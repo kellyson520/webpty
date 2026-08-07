@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import pty
 import selectors
 import signal
 import socket
@@ -22,6 +21,19 @@ from collections.abc import Iterable
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from ring_buffer import RingBuffer  # noqa: E402
+
+# --- platform dispatch ------------------------------------------------------
+# Windows has no pty.fork in the stdlib; a pywinpty backend
+# (pty_host_windows) takes over there. Importing pty_host must never start
+# a socket — only the __main__ guard below runs a server — and the
+# POSIX-only `pty` module is imported lazily so a plain `import pty_host`
+# works on Windows too.
+if os.name == "nt":
+    _backend = "winpty"
+    from pty_host_windows import main as _host_main  # noqa: E402
+else:
+    _backend = "forkpty"
+    import pty  # noqa: E402
 
 PIPE_NAME = (
     os.environ.get("WEBPTY_PTY_HOST_PIPE")
@@ -497,4 +509,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if os.name == "nt":
+        from pty_host_windows import run_windows_host
+        run_windows_host()
+    else:
+        main()

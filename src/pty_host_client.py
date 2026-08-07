@@ -192,7 +192,11 @@ async def _ensure_host_running() -> None:
     except (OSError, asyncio.TimeoutError):
         pass
     if os.name != "posix":
-        raise PtyHostError("pty-host requires POSIX")
+        raise PtyHostError(
+            "pty-host requires POSIX — on Windows install pywinpty and run "
+            "python src/pty_host_windows.py "
+            "(pip install -r requirements-windows.txt)"
+        )
     # Not up — spawn detached, then poll. Use subprocess (not os.fork) so the
     # child never inherits asyncio's epoll fds.
     import subprocess
