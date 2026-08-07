@@ -35,7 +35,13 @@ class PtyHostClient:
         self._pending: dict[int, asyncio.Future] = {}
         self.server_version: int | None = None
         self._connected = False
+        self._connect_lock = asyncio.Lock()
         self._listeners: dict[str, list] = {"output": [], "exit": [], "disconnect": []}
+
+    @property
+    def connected(self) -> bool:
+        """True while the socket to pty-host is open (see `_read_loop`)."""
+        return self._connected
 
     # --- event listeners ---------------------------------------------------
     def on(self, event: str, cb) -> None:  # type: ignore[no-untyped-def]
@@ -52,12 +58,15 @@ class PtyHostClient:
     async def connect(self) -> None:
         if self._connected:
             return
-        await _ensure_host_running()
-        reader, writer = await asyncio.open_unix_connection(PIPE_NAME)
-        self.reader = reader
-        self.writer = writer
-        self._connected = True
-        self._reader_task = asyncio.create_task(self._read_loop())
+        async with self._connect_lock:
+            if self._connected:
+                return
+            await _ensure_host_running()
+            reader, writer = await asyncio.open_unix_connection(PIPE_NAME)
+            self.reader = reader
+            self.writer = writer
+            self._connected = True
+            self._reader_task = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self) -> None:
         assert self.reader is not None

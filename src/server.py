@@ -532,6 +532,9 @@ class Server:
                 if s.get("id") == sid:
                     outbox.send(json.dumps({"type": "state", "session": s}), binary=False)
 
+            def on_reconnected(*_args) -> None:  # type: ignore[no-untyped-def]
+                outbox.send(json.dumps({"type": "reconnected"}), binary=False)
+
             if is_agent:
                 outbox.send(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}), binary=False)
                 self.sessions.on("agentEvent", on_agent_event)
@@ -541,6 +544,7 @@ class Server:
                     outbox.send(recent, binary=True)
                 self.sessions.on("output", on_output)
             self.sessions.on("change", on_change)
+            self.sessions.on("reconnected", on_reconnected)
 
             while True:
                 frame = await ws.recv()
@@ -570,6 +574,7 @@ class Server:
             self.sessions.off("output", on_output)
             self.sessions.off("agentEvent", on_agent_event)
             self.sessions.off("change", on_change)
+            self.sessions.off("reconnected", on_reconnected)
             outbox.stop()
             try:
                 await ws.close()
@@ -638,6 +643,7 @@ async def main() -> None:
 
     server = Server()
     await server.sessions.init()
+    server.sessions.start_host_monitor()
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)

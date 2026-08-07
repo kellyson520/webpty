@@ -621,15 +621,54 @@ class SessionManager:
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False
-        print("[webpty] disconnected from pty-host", flush=True)
-        for session in self.sessions.values():
-            if session.get("engine") != "pty":
+        print("[webpty] disconnected from pty-host — monitor will reconnect", flush=True)
+        # Do NOT mark running sessions stopped here: pty-host may have crashed
+        # while the underlying processes are still alive. The host monitor
+        # reconnects and re-attaches them (or marks genuinely dead ones
+        # stopped), so keep state pending until then.
+
+    # --- host monitor ------------------------------------------------------------
+    def start_host_monitor(self, interval_s: float = 2.0) -> None:
+        self._monitor_task = asyncio.get_event_loop().create_task(
+            self._monitor_loop(interval_s))
+
+    def stop_host_monitor(self) -> None:
+        if getattr(self, "_monitor_task", None):
+            self._monitor_task.cancel()
+            self._monitor_task = None
+
+    async def _monitor_loop(self, interval_s: float) -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                if not getattr(self.host, "connected", self.host_ready):
+                    await self._reconnect_host()
+            except Exception as err:  # noqa: BLE001
+                print(f"[webpty] host monitor error: {err}", flush=True)
+
+    async def _reconnect_host(self) -> None:
+        print("[webpty] reconnecting to pty-host...", flush=True)
+        await self.host.connect()
+        try:
+            result = await self.host.list()
+        except Exception as err:  # noqa: BLE001
+            print(f"[webpty] host list after reconnect failed: {err}", flush=True)
+            # Keep host_ready False and skip reconciliation so the monitor
+            # retries — stale host_sessions must not mark alive sessions dead.
+            return
+        self.host_sessions = {s["id"]: s for s in result.get("sessions", [])}
+        self.host_ready = True
+        for sid, session in self.sessions.items():
+            if session.get("engine") != "pty" or session.get("state") != "running":
                 continue
-            if session.get("state") != "running":
-                continue
-            session["state"] = "stopped"
-            session["pid"] = None
-            self._emit("change", self._public(session))
+            view = self.host_sessions.get(sid)
+            if view and view.get("alive"):
+                await self._reattach(session, view)
+            else:
+                session["state"] = "stopped"
+                session["pid"] = None
+                self._emit("change", self._public(session))
+        self._emit("reconnected")
 
     # --- helpers -------------------------------------------------------------------------
     def _inflate(self, stored: dict) -> dict:

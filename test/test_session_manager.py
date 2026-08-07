@@ -189,6 +189,38 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s["state"], "stopped")
         self.assertEqual(s["exit_code"], 0)
 
+    async def test_host_monitor_reconnects(self):
+        class FlakyHost(StubHost):
+            """Simulates a pty-host that crashes and comes back unstable:
+            the first reconnect attempt is followed by another drop, so the
+            monitor must keep trying until the host stays up."""
+
+            def __init__(self):
+                super().__init__()
+                self._disconnected = True
+
+            async def connect(self):
+                self.calls.append("connect")
+                self._disconnected = False
+                if self.calls.count("connect") < 2:
+                    self._disconnected = True  # host drops again right away
+
+            @property
+            def connected(self):
+                return not self._disconnected
+
+        sm = SessionManager(make_config(), lambda: None)
+        host = FlakyHost()
+        sm.host = host
+        reconnected = []
+        sm.on("reconnected", lambda: reconnected.append(True))
+        sm.start_host_monitor(interval_s=0.1)
+        await asyncio.sleep(0.35)
+        sm.stop_host_monitor()
+        self.assertGreaterEqual(host.calls.count("connect"), 2)
+        self.assertTrue(host.connected)
+        self.assertGreaterEqual(len(reconnected), 1)
+
     def test_agent_send_stopped_returns_false(self):
         s = self.sm.create(name="t", cwd="/tmp", tool="claude-chat")
         s["engine"] = "agent"
