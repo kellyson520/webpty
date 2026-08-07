@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>webpty</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <meta name="theme-color" content="#1a1a1a" />
+    <link rel="preload" href="/fonts/D2Coding.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header id="tabbar" class="tabbar">
+      <button class="drawer-btn" id="open-drawer" title="项目" aria-label="打开项目">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h7v2H3z"/></svg>
+      </button>
+      <div class="tabs" id="tabs"></div>
+      <button class="menu" id="open-menu" title="Menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+      </button>
+    </header>
+    <div id="shell" class="shell"></div>
+
+    <div id="menu-backdrop" class="menu-backdrop" hidden>
+      <div class="menu-pop" id="menu-pop" role="menu"></div>
+    </div>
+
+    <aside id="drawer" class="drawer" hidden>
+      <div class="drawer-backdrop"></div>
+      <div class="drawer-panel">
+        <header class="folders-head">
+          <h3>项目</h3>
+          <button class="sort-btn" id="folder-sort-btn" aria-label="排序">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M3 6h13v2H3zM3 11h10v2H3zM3 16h7v2H3z"/></svg>
+            <span class="sort-label" id="folder-sort-label"></span>
+          </button>
+        </header>
+        <div class="sort-pop" id="folder-sort-pop" hidden>
+          <button class="sort-opt" data-sort="active">最近活跃</button>
+          <button class="sort-opt" data-sort="name">按名称</button>
+          <button class="sort-opt" data-sort="date">按日期</button>
+        </div>
+        <div class="new-project-row" id="new-project-row">
+          <input type="text" id="new-project-name" placeholder="新建项目名称…" autocomplete="off" />
+          <button class="add-folder-btn" id="new-project-btn" title="创建项目">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            <span>新建</span>
+          </button>
+        </div>
+        <button class="add-folder-btn" id="add-folder-btn">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>添加文件夹</span>
+        </button>
+        <ul class="drawer-list" id="drawer-folders"></ul>
+      </div>
+    </aside>
+
+    <div id="folder-picker-backdrop" class="folder-picker-backdrop" hidden>
+      <div class="folder-picker" role="dialog" aria-label="添加文件夹">
+        <header class="folder-picker-head">
+          <button class="folder-picker-up" id="folder-picker-up" aria-label="Parent folder" title="Parent folder">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+          </button>
+          <div class="folder-picker-path" id="folder-picker-path"></div>
+          <button class="folder-picker-close" id="folder-picker-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>
+          </button>
+        </header>
+        <ul class="folder-picker-list" id="folder-picker-list"></ul>
+        <footer class="folder-picker-actions">
+          <button class="folder-picker-cancel" id="folder-picker-cancel">取消</button>
+          <button class="folder-picker-select" id="folder-picker-select">选择此文件夹</button>
+        </footer>
+      </div>
+    </div>
+
+    <template id="tpl-session">
+      <section class="page page-session" data-kind="session">
+        <div class="term-host">
+          <button class="scroll-bottom-btn" aria-label="Scroll to bottom" title="Scroll to bottom" hidden>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>
+          </button>
+        </div>
+        <div class="compose-bar">
+          <textarea class="compose-input" rows="1" placeholder="输入指令并发送"
+            enterkeyhint="send" autocomplete="off" autocapitalize="sentences" spellcheck="false"
+            name="webpty-compose" data-1p-ignore data-lpignore="true" data-form-type="other"></textarea>
+          <button class="compose-submit" aria-label="Submit" title="Submit (Enter on desktop)">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M4 12l1.4 1.4L11 7.83V20h2V7.83l5.6 5.57L20 12l-8-8z"/></svg>
+          </button>
+        </div>
+        <div class="key-row">
+          <button class="key-btn key-word" data-key="text:报告">报告</button>
+          <button class="key-btn key-word" data-key="text:继续">继续</button>
+          <button class="key-btn key-word" data-key="text:确认">确认</button>
+          <button class="key-btn key-word" data-key="text:完成">完成</button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="tab" aria-label="Tab" title="Tab">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h13"/><path d="M11 7l5 5-5 5"/><path d="M20 5v14"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="enter" aria-label="Return" title="Return">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 5v6a3 3 0 0 1-3 3H4"/><path d="M9 9l-5 5 5 5"/></svg>
+          </button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="copy" aria-label="Copy" title="Copy">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="paste" aria-label="Paste" title="Paste">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>
+          </button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-char" data-key="1">1</button>
+          <button class="key-btn key-char" data-key="2">2</button>
+          <button class="key-btn key-char" data-key="3">3</button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-char" data-key="a">A</button>
+          <button class="key-btn key-char" data-key="b">B</button>
+          <button class="key-btn key-char" data-key="c">C</button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="left" aria-label="Left" title="Left">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 5l-7 7 7 7"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="right" aria-label="Right" title="Right">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+          </button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="up" aria-label="Up" title="Up">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="down" aria-label="Down" title="Down">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>
+          </button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="home" aria-label="Home" title="Home">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5v14"/><path d="M20 12H8"/><path d="M13 7l-5 5 5 5"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="end" aria-label="End" title="End">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h12"/><path d="M11 7l5 5-5 5"/><path d="M20 5v14"/></svg>
+          </button>
+          <span class="key-gap" aria-hidden="true"></span>
+          <button class="key-btn key-icon" data-key="pgup" aria-label="Page Up" title="Page Up">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/></svg>
+          </button>
+          <button class="key-btn key-icon" data-key="pgdn" aria-label="Page Down" title="Page Down">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16"/><path d="M12 8v12"/><path d="M7 15l5 5 5-5"/></svg>
+          </button>
+        </div>
+      </section>
+    </template>
+
+    <template id="tpl-chat">
+      <section class="page page-chat" data-kind="chat">
+        <div class="chat-scroll">
+          <div class="chat-log"></div>
+        </div>
+        <div class="compose-bar">
+          <textarea class="compose-input" rows="1" placeholder="给 Claude 发消息…"
+            enterkeyhint="send" autocomplete="off" autocapitalize="sentences" spellcheck="false"
+            name="webpty-compose" data-1p-ignore data-lpignore="true" data-form-type="other"></textarea>
+          <button class="compose-submit" aria-label="Send" title="Send (Enter)">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M4 12l1.4 1.4L11 7.83V20h2V7.83l5.6 5.57L20 12l-8-8z"/></svg>
+          </button>
+        </div>
+      </section>
+    </template>
+
+    <template id="tpl-add">
+      <section class="page page-add" data-kind="add">
+        <header class="page-head">
+          <div class="title"><strong>新建会话</strong></div>
+        </header>
+        <form class="add-form">
+          <label>
+            <span>项目</span>
+            <select name="project" required></select>
+          </label>
+          <label>
+            <span>工具</span>
+            <select name="tool"></select>
+          </label>
+          <button class="primary" type="submit">+ 创建</button>
+          <p class="hint" id="add-hint"></p>
+        </form>
+      </section>
+    </template>
+
+    <div id="token-gate" class="token-gate" hidden>
+      <div class="token-gate-card">
+        <h2>webpty</h2>
+        <p>此服务器启用了访问门禁，请输入访问令牌以继续。</p>
+        <input type="password" id="token-gate-input" placeholder="访问令牌…" autocomplete="off" />
+        <button class="primary" id="token-gate-btn">解锁</button>
+        <p class="token-gate-err" id="token-gate-err"></p>
+      </div>
+    </div>
+
+    <script src="/vendor/xterm/lib/xterm.js"></script>
+    <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
+    <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>
+    <script src="/vendor/xterm-canvas/lib/addon-canvas.js"></script>
+    <script src="/vendor/xterm-unicode11/lib/addon-unicode11.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
