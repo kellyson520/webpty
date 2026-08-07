@@ -37,6 +37,7 @@
     "src",
     "public",
     "bin",
+    "install.sh",
     "README.md",
     "LICENSE"
   ],

@@ -61,7 +61,40 @@ phone — and switch between live sessions with a swipe.
 - **Built on Microsoft's ConPTY via `node-pty`** — same battle-tested
   PTY layer that VS Code uses.
 
-## Install
+## Install & deploy
+
+### One-command deploy (recommended)
+
+Run from a webpty checkout (or clone + install in one go):
+
+```sh
+git clone https://github.com/kellyson520/webpty.git
+cd webpty
+./install.sh            # npm ci → writes a systemd unit → starts the service
+```
+
+Tuning knobs (flags or env vars):
+
+```sh
+./install.sh \
+  --port=8080 \                    # or WEBPTY_PORT=8080
+  --bind=0.0.0.0 \                 # or WEBPTY_BIND_HOST=0.0.0.0
+  --projects-root=/srv/projects \  # or WEBPTY_PROJECTS_ROOT=/srv/projects
+  --user=webpty                    # or WEBPTY_USER=webpty (dedicated account)
+```
+
+Remote one-shot:
+
+```sh
+curl -sL https://github.com/kellyson520/webpty/archive/refs/heads/main.tar.gz \
+  | tar xz && cd webpty-main && ./install.sh
+```
+
+Everything is idempotent — re-running picks up new code, reinstalls deps and
+restarts the service. Remove it with `./install.sh --uninstall`. Service
+management: `journalctl -u webpty.service -f`, `systemctl restart webpty`.
+
+### Via npm (optional)
 
 ```sh
 # global (recommended for `webpty` on PATH)
