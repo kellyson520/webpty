@@ -1,0 +1,225 @@
+"""Configuration load/persist for webpty.
+
+Behaviour parity with the previous JS implementation:
+  * config lives under WEBPTY_DATA_DIR (default ~/.config/webpty on POSIX).
+  * `roots` from disk are preserved — even an explicit [] (deny all) is kept;
+    only configs that predate the field fall back to the default.
+  * `tools` merge: user entries win over built-ins, user-added tools survive,
+    and a tool set to null/false in the file is *disabled* (removed from the
+    merged list; the marker is persisted so the disable survives restarts).
+  * A corrupt config.json (bad JSON, or JSON that isn't an object — null,
+    string, array) is backed up as config.json.broken-<ts> and defaults are
+    used so the server always boots.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _default_data_dir() -> str:
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "webpty")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "webpty")
+
+
+data_dir = (
+    os.environ.get("WEBPTY_DATA_DIR")
+    or os.environ.get("PTYHUB_DATA_DIR")
+    or _default_data_dir()
+)
+logs_dir = os.path.join(data_dir, "logs")
+config_path = os.path.join(data_dir, "config.json")
+
+projects_root = (
+    os.environ.get("WEBPTY_PROJECTS_ROOT")
+    or os.environ.get("PTYHUB_PROJECTS_ROOT")
+    or os.environ.get("CSMWEB_PROJECTS_ROOT")
+    or os.path.abspath(os.path.join(_HERE, "..", ".."))
+)
+
+
+def effective_port(config_port) -> int:
+    """Port resolution: env var > config.json > 4789 default."""
+    raw_env = os.environ.get("WEBPTY_PORT") or os.environ.get("PTYHUB_PORT") or ""
+    try:
+        env_port = int(raw_env)
+        if 0 < env_port < 65536:
+            return env_port
+    except (TypeError, ValueError):
+        pass
+    try:
+        n = int(config_port)
+        if 0 < n < 65536:
+            return n
+    except (TypeError, ValueError):
+        pass
+    return 4789
+
+
+DEFAULT_TOOLS = {
+    "claude": {"command": "claude", "defaultArgs": "--remote-control", "nameFlag": "-n"},
+    "claude-chat": {"command": "claude", "defaultArgs": "", "engine": "agent",
+                    "permissionMode": "bypassPermissions", "label": "Claude (chat)"},
+    "codex": {"command": "codex", "defaultArgs": "", "nameFlag": None},
+    "reasonix": {"command": "reasonix", "defaultArgs": "", "nameFlag": None},
+    "opencode": {"command": "opencode", "defaultArgs": "", "nameFlag": None},
+    "aider": {"command": "aider", "defaultArgs": "", "nameFlag": None},
+    "gemini": {"command": "gemini", "defaultArgs": "", "nameFlag": None},
+    "qwen": {"command": "qwen-code", "defaultArgs": "", "nameFlag": None},
+    "cursor-agent": {"command": "cursor-agent", "defaultArgs": "", "nameFlag": None},
+    "copilot": {"command": "copilot", "defaultArgs": "", "nameFlag": None},
+    "agy": {"command": "agy", "defaultArgs": "", "nameFlag": None},
+    "powershell": {"command": "powershell", "defaultArgs": "-NoLogo"},
+    "bash": {"command": "bash", "defaultArgs": "", "nameFlag": None},
+}
+
+
+def default_config() -> dict:
+    return {
+        "bindHost": "0.0.0.0",
+        "port": 4789,
+        "roots": [projects_root],
+        "extraFolders": [],
+        "allowedLogins": [],
+        "authToken": "",
+        "tools": copy.deepcopy(DEFAULT_TOOLS),
+        "sessions": [],
+    }
+
+
+def ensure_data_dirs() -> None:
+    os.makedirs(logs_dir, exist_ok=True)
+
+
+def _migrate_legacy_data_dir() -> None:
+    # Only meaningful on Windows (legacy ptyhub/CSMWeb configs).
+    if os.path.exists(config_path) or sys.platform != "win32":
+        return
+    app_data = os.environ.get("APPDATA") or ""
+    for legacy_name in ("ptyhub", "CSMWeb"):
+        legacy_config = os.path.join(app_data, legacy_name, "config.json")
+        if not os.path.exists(legacy_config):
+            continue
+        ensure_data_dirs()
+        with open(legacy_config, "r", encoding="utf-8") as f:
+            data = f.read()
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(data)
+        legacy_logs = os.path.join(app_data, legacy_name, "logs")
+        if os.path.isdir(legacy_logs):
+            import shutil
+            try:
+                shutil.copytree(legacy_logs, logs_dir, dirs_exist_ok=True)
+            except OSError:
+                pass
+        print(f"[webpty] migrated legacy {legacy_name} config → {config_path}")
+        return
+
+
+def _backup_broken_config(reason: str) -> None:
+    try:
+        backup = f"{config_path}.broken-{int(time.time() * 1000)}"
+        with open(config_path, "rb") as src, open(backup, "wb") as dst:
+            dst.write(src.read())
+        print(f"[webpty] {reason} — backed up to {backup} and starting with defaults")
+    except OSError:
+        print(f"[webpty] {reason} — starting with defaults")
+
+
+def load_config() -> dict:
+    ensure_data_dirs()
+    _migrate_legacy_data_dir()
+
+    if not os.path.exists(config_path):
+        cfg = default_config()
+        save_config(cfg)
+        return cfg
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError) as err:
+        _backup_broken_config(f"config.json is corrupt ({err})")
+        raw = {}
+
+    # JSON may parse fine yet not be a usable config object (null/string/array).
+    if not isinstance(raw, dict):
+        _backup_broken_config("config.json is not a config object")
+        raw = {}
+
+    # --- tools merge -------------------------------------------------------
+    raw_tools = raw.get("tools") if isinstance(raw.get("tools"), dict) else {}
+    merged_tools: dict = {}
+    for key in set(DEFAULT_TOOLS.keys()) | set(raw_tools.keys()):
+        if key not in raw_tools:
+            # Built-in tool, untouched by the user — take the default as-is.
+            merged_tools[key] = copy.deepcopy(DEFAULT_TOOLS[key])
+            continue
+        user_val = raw_tools[key]
+        if user_val is None or user_val is False:
+            continue  # disabled by user
+        base = copy.deepcopy(DEFAULT_TOOLS.get(key, {}))
+        if isinstance(user_val, dict):
+            base.update(user_val)
+        merged_tools[key] = base
+    # Persist disable markers so a disabled tool stays disabled across restarts.
+    for key, val in raw_tools.items():
+        if val is None or val is False:
+            merged_tools[key] = val
+
+    merged = default_config()
+    merged.update({k: v for k, v in raw.items() if k != "tools"})
+    merged["tools"] = merged_tools
+    merged["sessions"] = raw.get("sessions", []) if isinstance(raw.get("sessions"), list) else []
+
+    # roots: keep user-configured roots (even explicit []) — only fall back
+    # when the field is absent.
+    if isinstance(raw.get("roots"), list):
+        merged["roots"] = [os.path.abspath(str(p)) for p in raw["roots"]]
+    else:
+        merged["roots"] = [projects_root]
+
+    if isinstance(raw.get("extraFolders"), list):
+        merged["extraFolders"] = [
+            os.path.abspath(str(p)) for p in raw["extraFolders"] if isinstance(p, str) and p
+        ]
+    else:
+        merged["extraFolders"] = []
+
+    if isinstance(raw.get("allowedLogins"), list):
+        merged["allowedLogins"] = [
+            str(s).lower() for s in raw["allowedLogins"] if isinstance(s, str) and s
+        ]
+    else:
+        merged["allowedLogins"] = []
+
+    if isinstance(raw.get("authToken"), str):
+        merged["authToken"] = raw["authToken"]
+    else:
+        merged["authToken"] = ""
+
+    # Persist merged form so newly added defaults (e.g. new tools) appear on disk.
+    save_config(merged)
+    return merged
+
+
+def save_config(config: dict) -> None:
+    ensure_data_dirs()
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def safe_name(value: str) -> str:
+    import re
+
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(value or "session"))
+    return cleaned[:80]

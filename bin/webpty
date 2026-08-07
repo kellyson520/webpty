@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""webpty CLI entry point.
+
+Usage:
+    webpty [--port N] [--host HOST]
+
+Starts the webpty server (HTTP API + WebSocket + static SPA). Configuration
+comes from config.json (see src/config.py); WEBPTY_PORT / WEBPTY_HOST env
+vars and --port/--host flags override it.
+"""
+import argparse
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "src"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="webpty", description="webpty — multi-session web terminal")
+    parser.add_argument("--port", type=int, default=None, help="listen port (env WEBPTY_PORT overrides config)")
+    parser.add_argument("--host", default=None, help="bind host (env WEBPTY_BIND_HOST overrides config)")
+    parser.add_argument("--version", action="store_true", help="print version and exit")
+    args = parser.parse_args()
+
+    if args.version:
+        print("webpty 0.0.1")
+        return 0
+
+    if args.port is not None:
+        os.environ["WEBPTY_PORT"] = str(args.port)
+    if args.host is not None:
+        os.environ["WEBPTY_BIND_HOST"] = args.host
+
+    import server
+    import asyncio
+
+    try:
+        asyncio.run(server.main())
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

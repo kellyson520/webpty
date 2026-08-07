@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# webpty — script deploy (no npm publish needed)
+# webpty — script deploy (Python, no npm)
 #
 #   install.sh                 deploy/update webpty from this checkout
-#   install.sh --update        pull latest code from git, reinstall deps, restart
-#   install.sh --update-cli    update installed agent CLI tools (reasonix,
-#                              codex, claude-code, opencode, …) to latest
+#   install.sh --update        pull latest code, sync venv, restart
+#   install.sh --update-cli    update installed agent CLIs (reasonix, codex,
+#                              claude-code, opencode, aider, gemini) to latest
 #   install.sh --uninstall     stop and remove the webpty service
 #
 # Tuning (flags or env):
@@ -15,8 +15,8 @@
 #   --user=U  / WEBPTY_USER              service user (default root)
 #   --source=GIT_URL / WEBPTY_GIT_REPO   clone from git instead of local dir
 #
-# Idempotent: re-running updates code + deps + restarts the service, so
-# webpty always tracks the repo (never a frozen npm release).
+# Idempotent: re-running updates code + venv + restarts the service, so
+# webpty always tracks the repo (never a frozen release).
 #
 set -euo pipefail
 
@@ -28,8 +28,7 @@ BIND_HOST="${WEBPTY_BIND_HOST:-0.0.0.0}"
 PORT="${WEBPTY_PORT:-4789}"
 PROJECTS_ROOT="${WEBPTY_PROJECTS_ROOT:-}"
 RUN_USER="${WEBPTY_USER:-root}"
-NODE_BIN="$(command -v node || true)"
-NPM_BIN="$(command -v npm || true)"
+PYTHON_BIN="$(command -v python3 || true)"
 DO_UNINSTALL=0
 DO_UPDATE_CLI=0
 # npm package names for the agent CLIs webpty supervises; only packages that
@@ -47,7 +46,7 @@ usage() {
   sed -n '2,11p' "$0"
   echo
   echo "Options:"
-  echo "  --update            git pull + npm ci + restart webpty"
+  echo "  --update            git pull + venv sync + restart webpty"
   echo "  --update-cli        npm update -g installed agent CLIs (reasonix, codex, claude-code, …)"
   echo "  --uninstall         stop & remove webpty.service"
   echo "  --port=N --bind=H --projects-root=DIR --user=U --source=GIT_URL"
@@ -91,7 +90,7 @@ fi
 
 # ---------- update agent CLIs ----------------------------------------------
 if [ "$DO_UPDATE_CLI" = 1 ]; then
-  need "$NPM_BIN"
+  need npm
   echo ">> updating installed agent CLIs (keeps your tools in sync, not frozen)"
   for pkg in "${AGENT_CLI_PACKAGES[@]}"; do
     if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then
@@ -108,12 +107,11 @@ fi
 
 # ---------- prerequisites --------------------------------------------------
 need systemctl
-need "$NODE_BIN" 2>/dev/null || need node
-need "$NPM_BIN" 2>/dev/null || need npm
+need "$PYTHON_BIN" 2>/dev/null || need python3
+PYTHON_BIN="$(command -v python3)"
 
-NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 20 ]; then
-  echo "ERROR: webpty needs Node >= 20 (found $("$NODE_BIN" -v))" >&2
+if ! "$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3, 10)' 2>/dev/null; then
+  echo "ERROR: webpty needs Python >= 3.10 (found $("$PYTHON_BIN" -V 2>&1))" >&2
   exit 1
 fi
 
@@ -124,13 +122,12 @@ if [ -n "$GIT_REPO" ]; then
   echo ">> cloning $GIT_REPO"
   git clone --depth 1 "$GIT_REPO" "$TMP_CLONE/webpty"
   SRC_DIR="$TMP_CLONE/webpty"
-elif [ ! -f "$SRC_DIR/package.json" ]; then
-  echo "ERROR: no package.json in $SRC_DIR — run from a webpty checkout or pass --source=GIT_URL" >&2
+elif [ ! -f "$SRC_DIR/src/server.py" ]; then
+  echo "ERROR: no src/server.py in $SRC_DIR — run from a webpty checkout or pass --source=GIT_URL" >&2
   exit 1
 fi
 
-# Sync to the latest code when this is a git checkout (the whole point:
-# webpty tracks the repo instead of a frozen npm release).
+# Sync to the latest code when this is a git checkout.
 if [ -d "$SRC_DIR/.git" ] && git -C "$SRC_DIR" remote >/dev/null 2>&1; then
   echo ">> pulling latest code"
   git -C "$SRC_DIR" pull --ff-only --quiet || {
@@ -138,14 +135,14 @@ if [ -d "$SRC_DIR/.git" ] && git -C "$SRC_DIR" remote >/dev/null 2>&1; then
   }
 fi
 
-# ---------- install deps ---------------------------------------------------
-echo ">> installing dependencies in $SRC_DIR"
-cd "$SRC_DIR"
-if [ -f package-lock.json ]; then
-  "$NPM_BIN" ci --omit=dev --no-audit --no-fund
-else
-  "$NPM_BIN" install --omit=dev --no-audit --no-fund
+# ---------- venv -----------------------------------------------------------
+VENV_DIR="$SRC_DIR/.venv"
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  echo ">> creating venv at $VENV_DIR"
+  "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
+echo ">> syncing venv (stdlib-only — nothing to pip install)"
+"$VENV_DIR/bin/python" -m py_compile "$SRC_DIR"/src/*.py
 
 # ---------- systemd unit ---------------------------------------------------
 mkdir -p /etc/systemd/system
@@ -170,7 +167,7 @@ Type=simple
 User=$RUN_USER
 WorkingDirectory=$SRC_DIR
 $ENV_LINES
-ExecStart=$NODE_BIN $SRC_DIR/src/server.js
+ExecStart=$VENV_DIR/bin/python $SRC_DIR/src/server.py
 Restart=on-failure
 RestartSec=3
 
