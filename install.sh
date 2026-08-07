@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 #
-# webpty — one-command deploy
+# webpty — script deploy (no npm publish needed)
 #
-#   install.sh [--update] [--port N] [--host HOST] [--projects-root DIR]
-#               [--bind 0.0.0.0] [--uninstall]
+#   install.sh                 deploy/update webpty from this checkout
+#   install.sh --update        pull latest code from git, reinstall deps, restart
+#   install.sh --update-cli    update installed agent CLI tools (reasonix,
+#                              codex, claude-code, opencode, …) to latest
+#   install.sh --uninstall     stop and remove the webpty service
 #
-# What it does (idempotent):
-#   1. locate the webpty source dir (default: this script's dir; or clone from
-#      GitHub when --source https://github.com/kellyson520/webpty.git is given)
-#   2. install production deps with npm ci (or npm install if no lockfile)
-#   3. write /etc/systemd/system/webpty.service
-#   4. systemctl daemon-reload + enable --now (starts or restarts the service)
+# Tuning (flags or env):
+#   --port=N  / WEBPTY_PORT              listen port (default 4789)
+#   --bind=H  / WEBPTY_BIND_HOST         bind host (default 0.0.0.0)
+#   --projects-root=DIR / WEBPTY_PROJECTS_ROOT
+#   --user=U  / WEBPTY_USER              service user (default root)
+#   --source=GIT_URL / WEBPTY_GIT_REPO   clone from git instead of local dir
 #
-# All options can also be given via env (WEBPTY_PORT, WEBPTY_HOST,
-# WEBPTY_PROJECTS_ROOT, WEBPTY_BIND_HOST).  Service runs as root by default —
-# set WEBPTY_USER to a dedicated account for tighter privilege separation.
+# Idempotent: re-running updates code + deps + restarts the service, so
+# webpty always tracks the repo (never a frozen npm release).
 #
 set -euo pipefail
 
@@ -29,24 +31,42 @@ RUN_USER="${WEBPTY_USER:-root}"
 NODE_BIN="$(command -v node || true)"
 NPM_BIN="$(command -v npm || true)"
 DO_UNINSTALL=0
+DO_UPDATE_CLI=0
+# npm package names for the agent CLIs webpty supervises; only packages that
+# are already installed globally get updated (never auto-installs new ones).
+AGENT_CLI_PACKAGES=(
+  reasonix
+  "@openai/codex"
+  "@anthropic-ai/claude-code"
+  "opencode-ai"
+  "aider-chat"
+  "@google/gemini-cli"
+)
 
 usage() {
-  sed -n '2,14p' "$0"
+  sed -n '2,11p' "$0"
+  echo
+  echo "Options:"
+  echo "  --update            git pull + npm ci + restart webpty"
+  echo "  --update-cli        npm update -g installed agent CLIs (reasonix, codex, claude-code, …)"
+  echo "  --uninstall         stop & remove webpty.service"
+  echo "  --port=N --bind=H --projects-root=DIR --user=U --source=GIT_URL"
   exit "${1:-0}"
 }
 
 for arg in "$@"; do
   case "$arg" in
-    --uninstall) DO_UNINSTALL=1 ;;
-    -h|--help)   usage ;;
-    --port=*)    PORT="${arg#--port=}" ;;
-    --host=*)    BIND_HOST="${arg#--host=}" ;;
-    --bind=*)    BIND_HOST="${arg#--bind=}" ;;
+    --uninstall)  DO_UNINSTALL=1 ;;
+    --update)     : ;; # default behaviour; kept for clarity
+    --update-cli) DO_UPDATE_CLI=1 ;;
+    -h|--help)    usage ;;
+    --port=*)     PORT="${arg#--port=}" ;;
+    --host=*)     BIND_HOST="${arg#--host=}" ;;
+    --bind=*)     BIND_HOST="${arg#--bind=}" ;;
     --projects-root=*) PROJECTS_ROOT="${arg#--projects-root=}" ;;
-    --source=*)  GIT_REPO="${arg#--source=}" ;;
+    --source=*)   GIT_REPO="${arg#--source=}" ;;
     --git-repo=*) GIT_REPO="${arg#--git-repo=}" ;;
-    --user=*)    RUN_USER="${arg#--user=}" ;;
-    --update)    : ;; # idempotent anyway
+    --user=*)     RUN_USER="${arg#--user=}" ;;
     *)
       echo "Unknown option: $arg (see --help)" >&2
       exit 2
@@ -69,6 +89,23 @@ if [ "$DO_UNINSTALL" = 1 ]; then
   exit 0
 fi
 
+# ---------- update agent CLIs ----------------------------------------------
+if [ "$DO_UPDATE_CLI" = 1 ]; then
+  need "$NPM_BIN"
+  echo ">> updating installed agent CLIs (keeps your tools in sync, not frozen)"
+  for pkg in "${AGENT_CLI_PACKAGES[@]}"; do
+    if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then
+      before="$(npm ls -g --depth=0 "$pkg" 2>/dev/null | sed -n '2p')"
+      echo ">> updating $pkg ($before)"
+      npm update -g "$pkg" --no-audit --no-fund 2>&1 | tail -1 || echo "   (update failed for $pkg, continuing)"
+    else
+      echo "   $pkg not installed globally — skipping"
+    fi
+  done
+  echo "✔ CLI tools updated. Restart webpty to pick up new versions: ./install.sh"
+  exit 0
+fi
+
 # ---------- prerequisites --------------------------------------------------
 need systemctl
 need "$NODE_BIN" 2>/dev/null || need node
@@ -82,14 +119,23 @@ fi
 
 # ---------- source dir -----------------------------------------------------
 if [ -n "$GIT_REPO" ]; then
+  need git
   TMP_CLONE="$(mktemp -d)"
   echo ">> cloning $GIT_REPO"
-  need git
   git clone --depth 1 "$GIT_REPO" "$TMP_CLONE/webpty"
   SRC_DIR="$TMP_CLONE/webpty"
 elif [ ! -f "$SRC_DIR/package.json" ]; then
-  echo "ERROR: no package.json in $SRC_DIR — pass --source/--git-repo or run from a webpty checkout" >&2
+  echo "ERROR: no package.json in $SRC_DIR — run from a webpty checkout or pass --source=GIT_URL" >&2
   exit 1
+fi
+
+# Sync to the latest code when this is a git checkout (the whole point:
+# webpty tracks the repo instead of a frozen npm release).
+if [ -d "$SRC_DIR/.git" ] && git -C "$SRC_DIR" remote >/dev/null 2>&1; then
+  echo ">> pulling latest code"
+  git -C "$SRC_DIR" pull --ff-only --quiet || {
+    echo "!! git pull failed — deploying with the code already on disk" >&2
+  }
 fi
 
 # ---------- install deps ---------------------------------------------------
@@ -141,6 +187,7 @@ if systemctl is-active --quiet webpty.service; then
   echo
   echo "✔ webpty is running:  http://${BIND_HOST}:${PORT}/"
   echo "  (log: journalctl -u webpty.service -f)"
+  echo "  (keep tools in sync: ./install.sh --update-cli)"
   echo "  (gate: set authToken in \$(data dir)/config.json to require a token — see README)"
 else
   echo "✘ webpty failed to start — check: journalctl -u webpty.service -n 50" >&2

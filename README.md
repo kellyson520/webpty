@@ -1,6 +1,6 @@
 # webpty
 
-**v1.0.0** · [npm @vitaldb/webpty](https://www.npmjs.com/package/@vitaldb/webpty) · [GitHub kellyson520/webpty](https://github.com/kellyson520/webpty)
+**v1.0.0** · [GitHub kellyson520/webpty](https://github.com/kellyson520/webpty)
 
 A multi-session web terminal that supervises long-running CLI agents
 (`claude`, `codex`, `reasonix`, `opencode`, `aider`, `pwsh`, …) per
@@ -61,16 +61,19 @@ phone — and switch between live sessions with a swipe.
 - **Built on Microsoft's ConPTY via `node-pty`** — same battle-tested
   PTY layer that VS Code uses.
 
-## Install & deploy
+## Install & deploy (script, no npm release)
 
-### One-command deploy (recommended)
+webpty is deployed from the git repo, not from an npm package — the script
+always syncs to the latest code, so the running version is never frozen.
+
+### One-command deploy
 
 Run from a webpty checkout (or clone + install in one go):
 
 ```sh
 git clone https://github.com/kellyson520/webpty.git
 cd webpty
-./install.sh            # npm ci → writes a systemd unit → starts the service
+./install.sh            # npm ci (deps only) → writes a systemd unit → starts the service
 ```
 
 Tuning knobs (flags or env vars):
@@ -90,22 +93,22 @@ curl -sL https://github.com/kellyson520/webpty/archive/refs/heads/main.tar.gz \
   | tar xz && cd webpty-main && ./install.sh
 ```
 
-Everything is idempotent — re-running picks up new code, reinstalls deps and
-restarts the service. Remove it with `./install.sh --uninstall`. Service
-management: `journalctl -u webpty.service -f`, `systemctl restart webpty`.
+### Keeping everything in sync (not locked to a version)
 
-### Via npm (optional)
+Re-running the script is idempotent: it `git pull`s the latest code,
+reinstalls deps and restarts the service — webpty always tracks `main`.
 
 ```sh
-# global (recommended for `webpty` on PATH)
-npm install -g @vitaldb/webpty
-
-# or one-shot
-npx -p @vitaldb/webpty webpty
+cd webpty
+./install.sh            # pull latest webpty code + restart
+./install.sh --update-cli   # update installed agent CLIs (reasonix, codex,
+                            # claude-code, opencode, aider, gemini) via npm -g
 ```
 
-Native dependency: `node-pty` (ships prebuilt binaries for Windows /
-macOS / Linux on Node 20+).
+`--update-cli` only touches CLIs that are already installed globally — it
+never auto-installs new ones. Remove everything with `./install.sh --uninstall`.
+
+Service management: `journalctl -u webpty.service -f`, `systemctl restart webpty`.
 
 ## Run
 

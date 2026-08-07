@@ -16,10 +16,10 @@
     "repl",
     "session-manager"
   ],
-  "homepage": "https://github.com/vitaldb/webpty",
+  "homepage": "https://github.com/kellyson520/webpty",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vitaldb/webpty.git"
+    "url": "git+https://github.com/kellyson520/webpty.git"
   },
   "license": "MIT",
   "type": "module",
