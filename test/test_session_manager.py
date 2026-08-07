@@ -221,6 +221,47 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(host.connected)
         self.assertGreaterEqual(len(reconnected), 1)
 
+    async def test_host_monitor_retries_after_list_failure(self):
+        class ListFlakyHost(StubHost):
+            """Simulates a pty-host whose socket comes up but `list` keeps
+            failing for a while: the monitor must keep retrying (host_ready
+            stays False) instead of giving up once the socket is connected."""
+
+            def __init__(self):
+                super().__init__()
+                self._disconnected = True
+                self._list_fails = 2
+
+            async def connect(self):
+                self.calls.append("connect")
+                self._disconnected = False
+
+            async def list(self):
+                self.calls.append("list")
+                if self._list_fails > 0:
+                    self._list_fails -= 1
+                    raise RuntimeError("host list unavailable")
+                return {"sessions": []}
+
+            @property
+            def connected(self):
+                return not self._disconnected
+
+        sm = SessionManager(make_config(), lambda: None)
+        host = ListFlakyHost()
+        sm.host = host
+        reconnected = []
+        sm.on("reconnected", lambda: reconnected.append(True))
+        sm.start_host_monitor(interval_s=0.1)
+        await asyncio.sleep(0.4)
+        sm.stop_host_monitor()
+        # list 失败后 monitor 必须持续重连（connected 为 True 也不停），
+        # 直到 list 成功重建视图、host_ready 恢复。
+        self.assertGreaterEqual(host.calls.count("list"), 2)
+        self.assertGreaterEqual(host.calls.count("connect"), 2)
+        self.assertTrue(sm.host_ready)
+        self.assertGreaterEqual(len(reconnected), 1)
+
     def test_agent_send_stopped_returns_false(self):
         s = self.sm.create(name="t", cwd="/tmp", tool="claude-chat")
         s["engine"] = "agent"

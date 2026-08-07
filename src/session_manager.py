@@ -641,7 +641,10 @@ class SessionManager:
         while True:
             await asyncio.sleep(interval_s)
             try:
-                if not getattr(self.host, "connected", self.host_ready):
+                # Reconnect when the socket is down OR the host has not been
+                # confirmed ready (list after reconnect may have failed). Stub
+                # hosts without a `connected` attr fall back to host_ready only.
+                if not (getattr(self.host, "connected", True) and self.host_ready):
                     await self._reconnect_host()
             except Exception as err:  # noqa: BLE001
                 print(f"[webpty] host monitor error: {err}", flush=True)
