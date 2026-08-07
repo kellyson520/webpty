@@ -31,7 +31,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "test": "node --test \"test/*.test.js\""
   },
   "files": [
     "src",

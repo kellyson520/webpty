@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as nodePty from 'node-pty';
+import { RingBuffer } from '../src/ring-buffer.js';
 
 const PIPE_NAME = process.env.WEBPTY_PTY_HOST_PIPE
   || (process.platform === 'win32'
@@ -18,48 +19,6 @@ const PIPE_NAME = process.env.WEBPTY_PTY_HOST_PIPE
 const BUFFER_CAP = 256 * 1024; // per-session scrollback for replay on reattach
 const HOST_VERSION = 1;
 const IDLE_NO_CLIENT_KILL_MS = Number(process.env.WEBPTY_HOST_IDLE_KILL_MS || 0);
-
-// --- Ring buffer (bytes) ----------------------------------------------------
-class RingBuffer {
-  constructor(capacity) {
-    this.capacity = capacity;
-    this.buf = Buffer.alloc(capacity);
-    this.write = 0;
-    this.size = 0;
-  }
-  push(chunk) {
-    let offset = 0;
-    const n = chunk.length;
-    if (n >= this.capacity) {
-      // Chunk alone exceeds buffer — keep only the tail.
-      chunk.copy(this.buf, 0, n - this.capacity, n);
-      this.write = 0;
-      this.size = this.capacity;
-      return;
-    }
-    while (offset < n) {
-      const space = this.capacity - this.write;
-      const toCopy = Math.min(n - offset, space);
-      chunk.copy(this.buf, this.write, offset, offset + toCopy);
-      this.write = (this.write + toCopy) % this.capacity;
-      offset += toCopy;
-    }
-    this.size = Math.min(this.size + n, this.capacity);
-  }
-  snapshot() {
-    if (this.size === 0) return Buffer.alloc(0);
-    const out = Buffer.alloc(this.size);
-    const start = (this.write - this.size + this.capacity) % this.capacity;
-    if (start + this.size <= this.capacity) {
-      this.buf.copy(out, 0, start, start + this.size);
-    } else {
-      const first = this.capacity - start;
-      this.buf.copy(out, 0, start, this.capacity);
-      this.buf.copy(out, first, 0, this.size - first);
-    }
-    return out;
-  }
-}
 
 // --- Sessions ---------------------------------------------------------------
 // id → { proc, buffer, clients:Set, cols, rows, pid, alive, exitCode, exitSignal }

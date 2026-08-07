@@ -11,14 +11,25 @@ export function caseFold(p) {
 }
 
 export function normalizeFsPath(input) {
-  return caseFold(path.resolve(String(input || '')).replace(/[\\/]+$/, ''));
+  let p = path.resolve(String(input || ''));
+  // Strip trailing separators but never reduce to empty — the filesystem
+  // root must stay itself ('/'). (Old code regex-stripped '/', turning it
+  // into '', which broke root containment checks.)
+  while (p.length > 1 && (p.endsWith('/') || p.endsWith('\\'))) {
+    p = p.slice(0, -1);
+  }
+  return caseFold(p);
 }
 
 export function isPathUnderRoots(candidate, roots) {
   const resolved = normalizeFsPath(candidate);
   return roots.some((root) => {
     const base = normalizeFsPath(root);
-    return resolved === base || resolved.startsWith(`${base}${path.sep}`);
+    if (resolved === base) return true;
+    // The filesystem root ('/') contains everything; the usual
+    // `base + sep` prefix check would produce '//' and never match.
+    if (base === path.parse(base).root && base.length === 1) return true;
+    return resolved.startsWith(`${base}${path.sep}`);
   });
 }
 

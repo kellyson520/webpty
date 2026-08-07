@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { logsDir, safeName } from './config.js';
 import { resolveCommand, splitArgs } from './tooling.js';
+import { RingBuffer } from './ring-buffer.js';
 import { PtyHostClient } from './pty-host-client.js';
 
 const AGENT_MAX_ITEMS = 4000;
@@ -19,7 +20,7 @@ const BUSY_IDLE_MS = 1200;
 // "what happened since the page was reloaded".
 const RECENT_BUF_CAP = 128 * 1024;
 
-function normalizeToolResult(content) {
+export function normalizeToolResult(content) {
   let text;
   if (typeof content === 'string') text = content;
   else if (Array.isArray(content)) {
@@ -52,49 +53,6 @@ function hasPriorConversation(cwd) {
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 
-// Small ring buffer for replaying recent output to fresh WS clients. Bytes
-// only — the data flowing through PTYs is UTF-8 but we don't decode here, we
-// just slice the tail and re-emit verbatim so escape sequences stay intact.
-class RingBuffer {
-  constructor(capacity) {
-    this.capacity = capacity;
-    this.buf = Buffer.alloc(capacity);
-    this.write = 0;
-    this.size = 0;
-  }
-  push(chunk) {
-    const n = chunk.length;
-    if (n === 0) return;
-    if (n >= this.capacity) {
-      chunk.copy(this.buf, 0, n - this.capacity, n);
-      this.write = 0;
-      this.size = this.capacity;
-      return;
-    }
-    let offset = 0;
-    while (offset < n) {
-      const space = this.capacity - this.write;
-      const toCopy = Math.min(n - offset, space);
-      chunk.copy(this.buf, this.write, offset, offset + toCopy);
-      this.write = (this.write + toCopy) % this.capacity;
-      offset += toCopy;
-    }
-    this.size = Math.min(this.size + n, this.capacity);
-  }
-  snapshot() {
-    if (this.size === 0) return Buffer.alloc(0);
-    const out = Buffer.alloc(this.size);
-    const start = (this.write - this.size + this.capacity) % this.capacity;
-    if (start + this.size <= this.capacity) {
-      this.buf.copy(out, 0, start, start + this.size);
-    } else {
-      const first = this.capacity - start;
-      this.buf.copy(out, 0, start, this.capacity);
-      this.buf.copy(out, first, 0, this.size - first);
-    }
-    return out;
-  }
-}
 
 export class SessionManager extends EventEmitter {
   constructor(config, save) {

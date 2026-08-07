@@ -70,7 +70,9 @@ function effectiveRoots() {
 }
 
 function validateSessionInput(body) {
-  const cwd = path.resolve(String(body.cwd || ''));
+  const rawCwd = String(body.cwd || '');
+  if (!rawCwd) throw Object.assign(new Error('cwd required'), { status: 400 });
+  const cwd = path.resolve(rawCwd);
   const tool = String(body.tool || '');
   if (!config.tools[tool]) throw Object.assign(new Error('Unknown tool'), { status: 400 });
   if (!isPathUnderRoots(cwd, effectiveRoots())) throw Object.assign(new Error('Path is outside registered roots'), { status: 400 });
@@ -179,8 +181,9 @@ app.get('/api/config', (req, res) => {
 app.get('/api/projects', (req, res) => res.json(listProjects()));
 
 app.post('/api/projects', (req, res) => {
-  const p = path.resolve(String(req.body?.path || ''));
-  if (!p) return res.status(400).json({ error: 'path required' });
+  const rawPath = String(req.body?.path || '').trim();
+  if (!rawPath) return res.status(400).json({ error: 'path required' });
+  const p = path.resolve(rawPath);
   let stat;
   try { stat = fs.statSync(p); } catch { return res.status(400).json({ error: 'Path does not exist' }); }
   if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a directory' });
@@ -275,25 +278,44 @@ app.use((err, req, res, next) => {
 });
 
 server.on('upgrade', async (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host}`);
+  } catch {
+    socket.destroy();
+    return;
+  }
   const match = url.pathname.match(/^\/ws\/sessions\/([^/]+)$/);
   if (!match) {
+    socket.destroy();
+    return;
+  }
+  // Validate the session id BEFORE handleUpgrade sends the 101 response —
+  // decodeURIComponent can throw on malformed percent-encoding, and once 101
+  // is on the wire the client sees an (incorrect) OPEN. Reject early instead.
+  let sessionId;
+  try {
+    sessionId = decodeURIComponent(match[1]);
+  } catch {
+    socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     socket.destroy();
     return;
   }
   try {
     const auth = await authorizePeer(req, config.allowedLogins, config.authToken);
     if (!auth.ok) {
-      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-      socket.destroy();
+      if (!socket.destroyed) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+      }
       return;
     }
   } catch {
-    socket.destroy();
+    if (!socket.destroyed) socket.destroy();
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    ws.sessionId = decodeURIComponent(match[1]);
+    ws.sessionId = sessionId;
     wss.emit('connection', ws, req);
   });
 });

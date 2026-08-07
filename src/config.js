@@ -103,7 +103,25 @@ export function loadConfig() {
     return structuredClone(defaultConfig);
   }
 
-  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch (err) {
+    // Corrupt config (partial write, hand-edit mistake). Don't crash the
+    // server — back the file up and fall back to defaults so webpty still
+    // boots and the user can recover the backup.
+    try { fs.copyFileSync(configPath, `${configPath}.broken-${Date.now()}`); } catch {}
+    console.error(`[webpty] config.json is corrupt (${err.message}) — backed up and starting with defaults`);
+    raw = {};
+  }
+  // JSON.parse can succeed while still being invalid as a config object:
+  // `null`, a bare string, or an array all parse fine but are not usable —
+  // treat them like the corrupt case instead of crashing on raw.tools below.
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    try { fs.copyFileSync(configPath, `${configPath}.broken-${Date.now()}`); } catch {}
+    console.error('[webpty] config.json is not a config object — backed up and starting with defaults');
+    raw = {};
+  }
   // Merge tools so user configuration always wins AND user-added tools are
   // preserved. Iterate over the union of default keys and raw keys — the old
   // code only walked defaultConfig.tools, silently dropping any custom tool

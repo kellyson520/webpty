@@ -30,8 +30,12 @@ export function splitArgs(input) {
   let cur = '';
   let quote = null;
   let escaped = false;
+  let sawQuote = false;
   // Backslash only escapes on Windows (C:\path\style args); on POSIX a lone
   // `\` is a literal path character (e.g. `\.\d` regex or `dir\file`).
+  // In quotes, a backslash is literal even on Windows — `"C:\temp\new"` must
+  // stay `C:\temp\new`, not have `\t`/`\n` swallowed (CommandLineToArgvW
+  // semantics: backslash only escapes a following quote inside a quoted arg).
   const backslashEscapes = process.platform === 'win32';
 
   for (const ch of String(input || '')) {
@@ -40,28 +44,32 @@ export function splitArgs(input) {
       escaped = false;
       continue;
     }
-    if (backslashEscapes && ch === '\\') {
+    if (backslashEscapes && !quote && ch === '\\') {
       escaped = true;
       continue;
     }
     if (quote) {
-      if (ch === quote) quote = null;
-      else cur += ch;
+      if (ch === quote) {
+        quote = null;
+        sawQuote = true;
+      } else cur += ch;
       continue;
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
+      sawQuote = true;
       continue;
     }
     if (/\s/.test(ch)) {
-      if (cur) {
+      if (cur || sawQuote) {
         args.push(cur);
         cur = '';
+        sawQuote = false;
       }
       continue;
     }
     cur += ch;
   }
-  if (cur) args.push(cur);
+  if (cur || sawQuote) args.push(cur);
   return args;
 }
