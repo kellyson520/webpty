@@ -631,6 +631,7 @@ class SessionManager:
 
     # --- host monitor ------------------------------------------------------------
     def start_host_monitor(self, interval_s: float = 2.0) -> None:
+        self.stop_host_monitor()
         self._monitor_task = asyncio.get_event_loop().create_task(
             self._monitor_loop(interval_s))
 

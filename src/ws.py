@@ -261,9 +261,9 @@ class Outbox:
             while True:
                 binary, data = await self._queue.get()
                 if binary:
-                    self.ws._send_frame(0x2, data)
+                    self.ws._send_frame(_OP_BINARY, data)
                 else:
-                    self.ws._send_frame(0x1, data.encode("utf-8") if isinstance(data, str) else data)
+                    self.ws._send_frame(_OP_TEXT, data.encode("utf-8") if isinstance(data, str) else data)
                 written += 1
                 # Apply backpressure periodically. Draining only when the queue
                 # is momentarily empty lets frames pile up unbounded in the
@@ -275,4 +275,4 @@ class Outbox:
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001 — connection lost; stop silently
-            pass
+            self._task = None

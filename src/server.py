@@ -675,6 +675,7 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()
 
