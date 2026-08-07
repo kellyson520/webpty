@@ -1,0 +1,3 @@
+# Windows pty-host backend: winpty console emulator binding (>= 2.0).
+# Required only on Windows — the POSIX backend uses only the stdlib.
+pywinpty>=2.0

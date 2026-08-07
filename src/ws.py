@@ -42,6 +42,7 @@ class WebSocket:
         self.open = False
         self._recv_buf = bytearray()
         self._closed = False
+        self.outbox = None
 
     # --- outbound ----------------------------------------------------------
     def _send_frame(self, opcode: int, payload: bytes) -> None:
@@ -69,8 +70,20 @@ class WebSocket:
     def send_bytes(self, data: bytes) -> None:
         self._send_frame(_OP_BINARY, data)
 
+    def attach_outbox(self, outbox) -> None:
+        """Route fire-and-forget sends through `outbox` (see Outbox).
+
+        Once attached, send_text_async/send_bytes_async enqueue into the
+        outbox instead of writing a frame and spawning a per-frame drain
+        task; the outbox's single background task drains them.
+        """
+        self.outbox = outbox
+
     def send_text_async(self, text: str) -> None:
         """Fire-and-forget send with drain (use from sync callbacks)."""
+        if self.outbox is not None:
+            self.outbox.send(text, binary=False)
+            return
         self.send_text(text)
         if not self._closed:
             try:
@@ -80,6 +93,9 @@ class WebSocket:
 
     def send_bytes_async(self, data: bytes) -> None:
         """Fire-and-forget send with drain (use from sync callbacks)."""
+        if self.outbox is not None:
+            self.outbox.send(data, binary=True)
+            return
         self.send_bytes(data)
         if not self._closed:
             try:
@@ -198,3 +214,65 @@ async def accept_websocket(reader: asyncio.StreamReader,
     ws = WebSocket(reader, writer)
     ws.open = True
     return ws
+
+
+class Outbox:
+    """Single-consumer write queue with drop-oldest backpressure.
+
+    Server callbacks call send() synchronously (never blocks the event loop);
+    one background task drains the queue and awaits writer.drain().
+    """
+    def __init__(self, ws, maxlen: int = 1024, drop_oldest: bool = True):
+        self.ws = ws
+        self.maxlen = maxlen
+        self.drop_oldest = drop_oldest
+        self.dropped = 0
+        self._queue = asyncio.Queue(maxsize=maxlen)
+        self._task = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._drain_loop())
+
+    def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            self._task = None
+
+    def send(self, data, binary: bool = True) -> None:  # type: ignore[no-untyped-def]
+        if self._task is None:
+            return
+        item = (binary, data)
+        if self.drop_oldest:
+            while self._queue.full():
+                try:
+                    self._queue.get_nowait()
+                    self.dropped += 1
+                except asyncio.QueueEmpty:
+                    break
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            self.dropped += 1
+
+    async def _drain_loop(self) -> None:
+        try:
+            written = 0
+            while True:
+                binary, data = await self._queue.get()
+                if binary:
+                    self.ws._send_frame(_OP_BINARY, data)
+                else:
+                    self.ws._send_frame(_OP_TEXT, data.encode("utf-8") if isinstance(data, str) else data)
+                written += 1
+                # Apply backpressure periodically. Draining only when the queue
+                # is momentarily empty lets frames pile up unbounded in the
+                # transport buffer under sustained load; awaiting drain() on
+                # every frame would recreate the per-frame task storm this
+                # class replaces.
+                if self._queue.empty() or written % 64 == 0:
+                    await self.ws.drain()
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — connection lost; stop silently
+            self._task = None

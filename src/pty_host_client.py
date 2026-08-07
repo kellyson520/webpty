@@ -14,6 +14,8 @@ import os
 import socket
 import sys
 
+from logging_util import log_error
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HOST_SCRIPT = os.path.join(_HERE, "pty_host.py")
 
@@ -35,7 +37,13 @@ class PtyHostClient:
         self._pending: dict[int, asyncio.Future] = {}
         self.server_version: int | None = None
         self._connected = False
+        self._connect_lock = asyncio.Lock()
         self._listeners: dict[str, list] = {"output": [], "exit": [], "disconnect": []}
+
+    @property
+    def connected(self) -> bool:
+        """True while the socket to pty-host is open (see `_read_loop`)."""
+        return self._connected
 
     # --- event listeners ---------------------------------------------------
     def on(self, event: str, cb) -> None:  # type: ignore[no-untyped-def]
@@ -52,12 +60,15 @@ class PtyHostClient:
     async def connect(self) -> None:
         if self._connected:
             return
-        await _ensure_host_running()
-        reader, writer = await asyncio.open_unix_connection(PIPE_NAME)
-        self.reader = reader
-        self.writer = writer
-        self._connected = True
-        self._reader_task = asyncio.create_task(self._read_loop())
+        async with self._connect_lock:
+            if self._connected:
+                return
+            await _ensure_host_running()
+            reader, writer = await asyncio.open_unix_connection(PIPE_NAME)
+            self.reader = reader
+            self.writer = writer
+            self._connected = True
+            self._reader_task = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self) -> None:
         assert self.reader is not None
@@ -130,7 +141,8 @@ class PtyHostClient:
         try:
             self.writer.write((json.dumps({"op": op, **(payload or {})}) + "\n").encode("utf-8"))
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            log_error("pty-host-client", err)
             return False
 
     # --- operations -----------------------------------------------------------
@@ -180,7 +192,11 @@ async def _ensure_host_running() -> None:
     except (OSError, asyncio.TimeoutError):
         pass
     if os.name != "posix":
-        raise PtyHostError("pty-host requires POSIX")
+        raise PtyHostError(
+            "pty-host requires POSIX — on Windows install pywinpty and run "
+            "python src/pty_host_windows.py "
+            "(pip install -r requirements-windows.txt)"
+        )
     # Not up — spawn detached, then poll. Use subprocess (not os.fork) so the
     # child never inherits asyncio's epoll fds.
     import subprocess

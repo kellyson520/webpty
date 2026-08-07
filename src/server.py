@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip as _gzip
 import json
 import mimetypes
 import os
@@ -24,9 +25,10 @@ from auth import authorize_peer  # noqa: E402
 from config import (  # noqa: E402
     config_path, effective_port, load_config, logs_dir, projects_root, save_config,
 )
+from logging_util import log_error  # noqa: E402
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
 from session_manager import SessionManager  # noqa: E402
-from ws import accept_websocket  # noqa: E402
+from ws import Outbox, accept_websocket  # noqa: E402
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -51,6 +53,8 @@ class Server:
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
         self.pkg = package_root()
+        self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
+        self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
         self._ws_clients: dict[str, list] = {}  # session id -> ws objects
 
     # --- helpers ------------------------------------------------------------
@@ -60,7 +64,8 @@ class Server:
     def _client_ip(self, reader: asyncio.StreamReader) -> str:
         try:
             return reader._transport.get_extra_info("peername")[0]  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            log_error("server", err)
             return ""
 
     async def _authorize(self, reader: asyncio.StreamReader,
@@ -212,14 +217,14 @@ class Server:
             auth = await self._authorize(reader, headers, target)
             if not auth["ok"]:
                 if target.startswith("/api/"):
-                    await self._send_json(writer, 403, {"error": "forbidden", "reason": auth["reason"]})
+                    await self._send_json(writer, 403, {"error": "forbidden", "reason": auth["reason"]}, headers)
                 else:
                     await self._send_html(writer, 403, self._denied_page(auth))
                 return
 
             await self._route(method, target, headers, reader, writer)
         except HttpError as err:
-            await self._send_json(writer, err.status, {"error": err.message})
+            await self._send_json(writer, err.status, {"error": err.message}, headers)
         except (ConnectionError, OSError):
             pass
         finally:
@@ -236,10 +241,10 @@ class Server:
 
         # --- API routes ------------------------------------------------------
         if path == "/api/config" and method == "GET":
-            return await self._send_json(writer, 200, self._api_config())
+            return await self._send_json(writer, 200, self._api_config(), headers)
 
         if path == "/api/projects" and method == "GET":
-            return await self._send_json(writer, 200, self._list_projects())
+            return await self._send_json(writer, 200, self._list_projects(), headers)
 
         if path == "/api/projects" and method == "POST":
             body = await self._read_json(reader, headers)
@@ -257,7 +262,7 @@ class Server:
             if not exists and not is_auto:
                 self.config["extraFolders"].append(p)
                 save_config(self.config)
-            return await self._send_json(writer, 200, self._list_projects())
+            return await self._send_json(writer, 200, self._list_projects(), headers)
 
         if path == "/api/projects/create" and method == "POST":
             body = await self._read_json(reader, headers)
@@ -293,12 +298,12 @@ class Server:
                 "path": target,
                 "mtime": mtime * 1000,
                 "claudeMtime": 0,
-            })
+            }, headers)
 
         if path == "/api/fs/list" and method == "GET":
             try:
                 entries = self._list_dir_entries(query.get("path", [""])[0])
-                return await self._send_json(writer, 200, entries)
+                return await self._send_json(writer, 200, entries, headers)
             except OSError as err:
                 raise HttpError(400, str(err))
 
@@ -307,47 +312,47 @@ class Server:
             roots = body.get("roots") if isinstance(body.get("roots"), list) else []
             self.config["roots"] = [os.path.abspath(str(r)) for r in roots if str(r)]
             save_config(self.config)
-            return await self._send_json(writer, 200, {"roots": self.config["roots"]})
+            return await self._send_json(writer, 200, {"roots": self.config["roots"]}, headers)
 
         if path == "/api/sessions" and method == "GET":
-            return await self._send_json(writer, 200, self.sessions.list())
+            return await self._send_json(writer, 200, self.sessions.list(), headers)
 
         if path == "/api/sessions/order" and method == "PUT":
             body = await self._read_json(reader, headers)
             self.sessions.reorder(body.get("ids") if isinstance(body.get("ids"), list) else [])
-            return await self._send_json(writer, 200, {"ok": True})
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         if path == "/api/sessions" and method == "POST":
             body = await self._read_json(reader, headers)
             session = self.sessions.create(**self._validate_session_input(body))
             if body.get("start"):
                 await self.sessions.start(session["id"])
-            return await self._send_json(writer, 201, self.sessions.public(session["id"]))
+            return await self._send_json(writer, 201, self.sessions.public(session["id"]), headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/start$", path)
         if m and method == "POST":
             await self.sessions.start(m.group(1))
-            return await self._send_json(writer, 200, self.sessions.public(m.group(1)))
+            return await self._send_json(writer, 200, self.sessions.public(m.group(1)), headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/stop$", path)
         if m and method == "POST":
             ok = await self.sessions.stop(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok})
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)$", path)
         if m and method == "DELETE":
             ok = await self.sessions.remove(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok})
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/input$", path)
         if m and method == "POST":
             body = await self._read_json(reader, headers)
             ok = self.sessions.write(m.group(1), body.get("bytes") or "")
-            return await self._send_json(writer, 200, {"ok": ok})
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
 
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
-            await self._serve_static(writer, method, path)
+            await self._serve_static(writer, method, path, headers)
             return
 
         raise HttpError(405, "Method not allowed")
@@ -367,7 +372,67 @@ class Server:
             raise HttpError(400, "Invalid JSON")
         return body if isinstance(body, dict) else {}
 
-    async def _serve_static(self, writer: asyncio.StreamWriter, method: str, path: str) -> None:
+    @staticmethod
+    def _accepts_gzip(accept_encoding: str) -> bool:
+        """True if the client may receive gzip (RFC 9110 q-values, case-insensitive).
+
+        `gzip;q=0` — or `*;q=0` with no explicit gzip — means "do not send
+        gzip"; an explicit `gzip;q=0` wins over a positive `*` wildcard.
+        """
+        seen_gzip = False
+        gzip_q = 0.0
+        wildcard_q = 0.0
+        for part in accept_encoding.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            name, _, params = part.partition(";")
+            q = 1.0
+            for p in params.split(";"):
+                p = p.strip()
+                if not p:
+                    continue
+                k, _, v = p.partition("=")
+                if k.strip().lower() == "q":
+                    try:
+                        q = float(v.strip())
+                    except ValueError:
+                        q = 0.0
+            name = name.strip().lower()
+            if name == "gzip":
+                seen_gzip = True
+                gzip_q = max(gzip_q, q)
+            elif name == "*":
+                wildcard_q = max(wildcard_q, q)
+        if seen_gzip:
+            return gzip_q > 0
+        return wildcard_q > 0
+
+    def _maybe_gzip(self, headers: dict[str, str], body: bytes,
+                    cache_key: str | None = None) -> tuple[bytes, str | None]:
+        """Compress body with gzip when it pays off; None encoding means identity.
+
+        Only bodies larger than 1 KB are compressed, and only when the client
+        accepts gzip and the compressed form is actually smaller. Static assets
+        cache their compressed form in `self._gzip_cache` (keyed by request
+        path), so repeat requests skip recompression. JSON responses pass
+        cache_key=None and are never cached (their content changes).
+        """
+        if len(body) <= 1024:
+            return body, None
+        if not self._accepts_gzip(headers.get("accept-encoding", "")):
+            return body, None
+        if cache_key is not None and cache_key in self._gzip_cache:
+            return self._gzip_cache[cache_key], "gzip"
+        compressed = _gzip.compress(body, compresslevel=6)
+        if len(compressed) >= len(body):
+            return body, None  # 压缩无收益（如已压缩的 WOFF2 字体）
+        if cache_key is not None:
+            self._gzip_cache[cache_key] = compressed
+        return compressed, "gzip"
+
+    async def _serve_static(self, writer: asyncio.StreamWriter, method: str, path: str,
+                            headers: dict[str, str]) -> None:
         if path == "/":
             path = "/index.html"
         # Prevent path traversal.
@@ -381,22 +446,33 @@ class Server:
         if path.startswith(_VENDOR_PREFIXES):
             cache = "public, max-age=604800, immutable"
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-        stat = os.stat(full)
+        try:
+            with open(full, "rb") as f:
+                st = os.fstat(f.fileno())
+                body = f.read()
+        except OSError:
+            raise HttpError(404, "Not found")
+        frozen = (st.st_mtime_ns, st.st_size)
+        # 文件更新（如部署时替换 public/）后使压缩缓存失效，避免 gzip 与
+        # 明文客户端看到不一致的内容。
+        if path in self._gzip_cache and self._gzip_meta.get(path) != frozen:
+            del self._gzip_cache[path]
+        body, enc = self._maybe_gzip(headers, body, cache_key=path)
+        if enc is not None:
+            self._gzip_meta[path] = frozen
         head = (
             "HTTP/1.1 200 OK\r\n"
             f"Content-Type: {ctype}\r\n"
-            f"Content-Length: {stat.st_size}\r\n"
+            f"Content-Length: {len(body)}\r\n"
             f"Cache-Control: {cache}\r\n"
-            "\r\n"
+            "Vary: Accept-Encoding\r\n"
         )
+        if enc is not None:
+            head += f"Content-Encoding: {enc}\r\n"
+        head += "\r\n"
         writer.write(head.encode("latin-1"))
         if method == "GET":
-            with open(full, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    writer.write(chunk)
+            writer.write(body)
         await writer.drain()
 
     # --- WebSocket -------------------------------------------------------------
@@ -443,30 +519,35 @@ class Server:
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
-
-        def on_output(out_sid: str, chunk: bytes) -> None:
-            if out_sid == sid and ws.open:
-                ws.send_bytes_async(chunk)
-
-        def on_agent_event(ev_sid: str, item: dict) -> None:
-            if ev_sid == sid and ws.open:
-                ws.send_text_async(json.dumps({"type": "agent", "item": item}))
-
-        def on_change(s) -> None:  # type: ignore[no-untyped-def]
-            if s.get("id") == sid and ws.open:
-                ws.send_text_async(json.dumps({"type": "state", "session": s}))
-
-        if is_agent:
-            ws.send_text(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}))
-            self.sessions.on("agentEvent", on_agent_event)
-        else:
-            recent = self.sessions.recent_output(sid)
-            if recent and ws.open:
-                ws.send_bytes_async(recent)
-            self.sessions.on("output", on_output)
-        self.sessions.on("change", on_change)
-
+        outbox = Outbox(ws, maxlen=1024)
+        outbox.start()
         try:
+            def on_output(out_sid: str, chunk: bytes) -> None:
+                if out_sid == sid:
+                    outbox.send(chunk, binary=True)
+
+            def on_agent_event(ev_sid: str, item: dict) -> None:
+                if ev_sid == sid:
+                    outbox.send(json.dumps({"type": "agent", "item": item}), binary=False)
+
+            def on_change(s) -> None:  # type: ignore[no-untyped-def]
+                if s.get("id") == sid:
+                    outbox.send(json.dumps({"type": "state", "session": s}), binary=False)
+
+            def on_reconnected(*_args) -> None:  # type: ignore[no-untyped-def]
+                outbox.send(json.dumps({"type": "reconnected"}), binary=False)
+
+            if is_agent:
+                outbox.send(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}), binary=False)
+                self.sessions.on("agentEvent", on_agent_event)
+            else:
+                recent = self.sessions.recent_output(sid)
+                if recent:
+                    outbox.send(recent, binary=True)
+                self.sessions.on("output", on_output)
+            self.sessions.on("change", on_change)
+            self.sessions.on("reconnected", on_reconnected)
+
             while True:
                 frame = await ws.recv()
                 if frame is None:
@@ -495,20 +576,27 @@ class Server:
             self.sessions.off("output", on_output)
             self.sessions.off("agentEvent", on_agent_event)
             self.sessions.off("change", on_change)
+            self.sessions.off("reconnected", on_reconnected)
+            outbox.stop()
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
 
     # --- response helpers ---------------------------------------------------------
-    async def _send_json(self, writer: asyncio.StreamWriter, status: int, obj: dict) -> None:
+    async def _send_json(self, writer: asyncio.StreamWriter, status: int, obj: dict,
+                         headers: dict[str, str]) -> None:
         body = json.dumps(obj).encode("utf-8")
+        body, enc = self._maybe_gzip(headers, body)
         head = (
             f"HTTP/1.1 {status} {self._status_text(status)}\r\n"
             "Content-Type: application/json; charset=utf-8\r\n"
             f"Content-Length: {len(body)}\r\n"
-            "\r\n"
+            "Vary: Accept-Encoding\r\n"
         )
+        if enc is not None:
+            head += f"Content-Encoding: {enc}\r\n"
+        head += "\r\n"
         writer.write(head.encode("latin-1") + body)
         await writer.drain()
 
@@ -557,6 +645,7 @@ async def main() -> None:
 
     server = Server()
     await server.sessions.init()
+    server.sessions.start_host_monitor()
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
@@ -586,6 +675,7 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()
 

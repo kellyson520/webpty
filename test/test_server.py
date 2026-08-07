@@ -4,6 +4,7 @@ Spawns the real server on a random port with an isolated data dir and
 exercises the REST endpoints and WS upgrade path end-to-end.
 """
 import base64
+import gzip as gz
 import json
 import os
 import shutil
@@ -168,6 +169,31 @@ class ServerIntegrationTest(unittest.TestCase):
         status, _ = self._req("/api/fs/list?path=/definitely/not/here")
         self.assertEqual(status, 400)
 
+    # --- gzip ---------------------------------------------------------------
+    def test_gzip_static_asset(self):
+        req = urllib.request.Request(f"{self.base}/app.js",
+                                     headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read()
+            self.assertEqual(resp.headers.get("Content-Encoding"), "gzip")
+            # 解压后是合法 JS
+            self.assertIn(b"function", gz.decompress(body))
+
+    def test_gzip_small_response_not_compressed(self):
+        # GET /api/sessions 此时为空列表（2 字节 < 1KB）：它按字母序先于
+        # 所有创建 session 的测试运行，作为「小响应不压缩」的稳定样本。
+        req = urllib.request.Request(f"{self.base}/api/sessions",
+                                     headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req) as resp:
+            self.assertIsNone(resp.headers.get("Content-Encoding"))
+
+    def test_gzip_q0_not_compressed(self):
+        # RFC 9110: gzip;q=0 显式拒绝 gzip，即使通配符 * 为正值。
+        req = urllib.request.Request(f"{self.base}/app.js",
+                                     headers={"Accept-Encoding": "gzip;q=0, *;q=1"})
+        with urllib.request.urlopen(req) as resp:
+            self.assertIsNone(resp.headers.get("Content-Encoding"))
+
     # --- WebSocket -----------------------------------------------------------
     async def _ws_roundtrip(self, sid, payload):
         reader, writer = await asyncio_open_conn(self.port)
@@ -213,6 +239,48 @@ class ServerIntegrationTest(unittest.TestCase):
                     break
             await ws.close()
             self.assertIn(b"WS_ECHO_OK", got)
+
+        asyncio.run(run())
+
+    def test_ws_agent_snapshot_via_outbox(self):
+        # Agent sessions emit their transcript snapshot over the WS; this
+        # exercises _ws_session's Outbox path for text frames end-to-end.
+        import asyncio
+
+        async def run():
+            status, sess = self._req("/api/sessions", "POST",
+                                     {"cwd": os.path.join(self.proj_root, "alpha"),
+                                      "tool": "claude-chat", "name": "ws-agent"})
+            self.assertEqual(status, 201, sess)
+            sid = sess["id"]
+            reader, writer = await asyncio_open_conn(self.port)
+            key = base64.b64encode(b"0123456789abcdef").decode()
+            req = (f"GET /ws/sessions/{sid} HTTP/1.1\r\nHost: x\r\n"
+                   "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+            writer.write(req.encode())
+            await writer.drain()
+            head = await reader.readline()
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n"):
+                    break
+            self.assertIn(b"101", head)
+            ws = WebSocket(reader, writer)
+            ws.open = True
+            end = time.time() + 8
+            got = b""
+            while time.time() < end:
+                frame = await ws.recv(1.5)
+                if frame is None:
+                    break
+                opcode, data = frame
+                if opcode == 0x1:  # snapshot arrives as a text frame
+                    got += data
+                    if b'"snapshot"' in got:
+                        break
+            await ws.close()
+            self.assertIn(b'"snapshot"', got)
 
         asyncio.run(run())
 
