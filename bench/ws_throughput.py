@@ -31,6 +31,7 @@ import base64
 import json
 import os
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -248,6 +249,72 @@ def _rss_kb(pid: int | None) -> int | None:
     return None
 
 
+def _children_pids(pid: int) -> list[int]:
+    """Direct children of a process via /proc/<pid>/task/<pid>/children.
+
+    Linux-specific; the pty-host daemon spawned by a webpty server is its
+    direct child (Popen with start_new_session changes the session, not the
+    parent), so this is a precise handle on "the pty-host this server
+    spawned" — unlike scanning all of /proc for pty_host.py cmdlines, which
+    also catches pty-hosts spawned by other webpty servers on the host.
+    """
+    try:
+        with open(f"/proc/{pid}/task/{pid}/children") as f:
+            return [int(x) for x in f.read().split()]
+    except OSError:
+        return []
+
+
+def _is_zombie(pid: int) -> bool:
+    """True once the process has terminated but not yet been reaped.
+
+    A zombie is already dead — SIGTERM worked — so the caller can stop
+    waiting on it even though /proc/<pid> still exists and os.kill(pid, 0)
+    still succeeds.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+            rparen = data.rfind(b")")
+            return data[rparen + 2:rparen + 3] == b"Z"
+    except OSError:
+        return False
+
+
+def _terminate_pids(pids: list[int], timeout_s: float = 3.0) -> None:
+    """SIGTERM a set of pids and wait for them to exit (SIGKILL as fallback).
+
+    pty_host.py installs a SIGTERM handler that kills its PTY sessions and
+    unlinks its socket, so a clean TERM is enough for a graceful teardown.
+    """
+    if not pids:
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        alive = []
+        for pid in pids:
+            if _is_zombie(pid):
+                continue  # already dead — init will reap it
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except (ProcessLookupError, OSError):
+                pass
+        if not alive:
+            return
+        time.sleep(0.05)
+    for pid in pids:  # stuck — force it
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # benchmark core
 # ---------------------------------------------------------------------------
@@ -332,6 +399,7 @@ async def _run(port: int, rounds: int, warmup: int, burst: int,
         return {
             "port": port,
             "mode": "self-hosted" if self_hosted else "existing-server",
+            "sid": sid,
             "rounds": rounds,
             "latency_ms": {
                 "p50": _pct(sorted(latencies), 50),
@@ -384,6 +452,12 @@ async def main() -> int:
         data_dir = tempfile.mkdtemp(prefix="webpty-bench-data-")
         tmp_dirs = [proj_root, data_dir]
         os.makedirs(os.path.join(proj_root, "p"), exist_ok=True)
+        # I-1: the server reads bindHost from config.json (not the env), so
+        # pre-write a config that pins the throwaway instance to loopback.
+        # A fresh data dir has no authToken → gate "none"; without this the
+        # instance would briefly listen on 0.0.0.0 with no auth.
+        with open(os.path.join(data_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"bindHost": "127.0.0.1"}, f)
         env = dict(os.environ)
         env.update({
             "WEBPTY_DATA_DIR": data_dir,
@@ -410,34 +484,70 @@ async def main() -> int:
             return 2
         self_hosted = True
 
+    # memory peak: sample RSS DURING the benchmark, while echo bursts are in
+    # flight — that is when the server is at its heaviest — instead of after
+    # the work has finished.
+    pid = proc.pid if proc is not None else _pid_listening_on(port)
+    peak_holder: dict[str, int | None] = {"kb": None}
+    stop_sampling = asyncio.Event()
+
+    async def _sample_loop() -> None:
+        while not stop_sampling.is_set():
+            if pid is not None:
+                rss = _rss_kb(pid)
+                if rss is not None:
+                    peak_holder["kb"] = rss if peak_holder["kb"] is None \
+                        else max(peak_holder["kb"], rss)
+            try:
+                await asyncio.wait_for(stop_sampling.wait(), 0.05)
+            except asyncio.TimeoutError:
+                pass
+
+    sampler = asyncio.create_task(_sample_loop())
+    results: dict | None = None
     try:
         results = await _run(port, args.rounds, args.warmup, args.burst,
                              self_hosted, proj_root)
     finally:
-        # cleanup: stop the bench session so an existing server is left tidy
+        stop_sampling.set()
         try:
-            _, sessions = await _http("GET", port, "/api/sessions")
-            for s in sessions:
-                if s.get("name") == "bench-ws":
-                    await _http("POST", port, f"/api/sessions/{s['id']}/stop", {})
+            await sampler
         except Exception:  # noqa: BLE001
             pass
+        # Cleanup: on an existing server, stop exactly the session we created
+        # (never a same-named one the user may already have). On a throwaway
+        # instance the whole data dir is removed below, so no stop is needed.
+        if not self_hosted and results is not None and results.get("sid"):
+            try:
+                await _http("POST", port,
+                            f"/api/sessions/{results['sid']}/stop", {})
+            except Exception:  # noqa: BLE001
+                pass
 
-    # memory peak: poll the server process RSS (best effort)
-    pid = proc.pid if proc is not None else _pid_listening_on(port)
-    peak_kb: int | None = None
-    if pid is not None:
-        for _ in range(40):
-            rss = _rss_kb(pid)
-            if rss is not None:
-                peak_kb = rss if peak_kb is None else max(peak_kb, rss)
-            await asyncio.sleep(0.05)
+    if results is None:
+        print("benchmark failed — see traceback above", file=sys.stderr)
+        return 1
+
+    peak_kb = peak_holder["kb"]
     if proc is not None:
+        # I-2: the pty-host daemon is detach-spawned by the server and would
+        # otherwise be left behind as an orphan (ppid=1). Capture the
+        # server's direct children — the pty-host it spawned — while the
+        # server is still alive, then TERM the server first: while it is
+        # alive its host monitor re-spawns the pty-host the moment we TERM
+        # it. With the server dead there is no respawner left, so the
+        # captured pty-host can be safely TERM'd (its SIGTERM handler kills
+        # its PTY sessions and unlinks its socket), then the data dir
+        # removed. Using /proc parent-child instead of a global pty_host.py
+        # cmdline scan means we never touch pty-hosts spawned by other
+        # webpty servers on the host.
+        host_pids = _children_pids(proc.pid)
         proc.terminate()
         try:
             await asyncio.wait_for(asyncio.to_thread(proc.wait), 3)
         except (asyncio.TimeoutError, Exception):  # noqa: BLE001
             proc.kill()
+        _terminate_pids(host_pids)
     for d in tmp_dirs:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -457,7 +567,8 @@ async def main() -> int:
           f"p99 {_fmt_ms(lat['p99'])} ms | max {_fmt_ms(lat['max'])} ms")
     if results["burst_msgs_per_s"]:
         print(f"  burst {args.burst} echoes: {results['burst_msgs_per_s']:.1f} msgs/s")
-    print(f"  mem peak     : {info['mem_peak_mib']} MiB (VmRSS of server process)")
+    mem_str = (f"{info['mem_peak_mib']} MiB" if info["mem_peak_mib"] is not None else "n/a")
+    print(f"  mem peak     : {mem_str} (VmRSS of server process)")
     return 0
 
 
