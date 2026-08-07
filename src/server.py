@@ -25,6 +25,7 @@ from auth import authorize_peer  # noqa: E402
 from config import (  # noqa: E402
     config_path, effective_port, load_config, logs_dir, projects_root, save_config,
 )
+from logging_util import log_error  # noqa: E402
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
 from session_manager import SessionManager  # noqa: E402
 from ws import Outbox, accept_websocket  # noqa: E402
@@ -63,7 +64,8 @@ class Server:
     def _client_ip(self, reader: asyncio.StreamReader) -> str:
         try:
             return reader._transport.get_extra_info("peername")[0]  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            log_error("server", err)
             return ""
 
     async def _authorize(self, reader: asyncio.StreamReader,

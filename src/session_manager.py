@@ -16,6 +16,7 @@ import time
 import uuid
 
 from config import logs_dir, safe_name
+from logging_util import log_error
 from paths import package_root  # noqa: F401  (kept for parity/debug)
 from ring_buffer import RingBuffer
 from tooling import resolve_command, split_args
@@ -155,14 +156,14 @@ class SessionManager:
             if proc:
                 try:
                     proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as err:  # noqa: BLE001
+                    log_error("session-manager", err)
             session["proc"] = None
         else:
             try:
                 await self.host.forget(sid)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as err:  # noqa: BLE001
+                log_error("session-manager", err)
             self.host_sessions.pop(sid, None)
         timer = session.get("_busy_timer")
         if timer:
@@ -251,15 +252,15 @@ class SessionManager:
                 result = await self.host.list()
                 self.host_sessions = {s["id"]: s for s in result.get("sessions", [])}
                 view = self.host_sessions.get(session["id"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as err:  # noqa: BLE001
+                log_error("session-manager", err)
             if view and view.get("alive"):
                 await self._reattach(session, view)
                 return session
             try:
                 await self.host.forget(session["id"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as err:  # noqa: BLE001
+                log_error("session-manager", err)
             self.host_sessions.pop(session["id"], None)
             try:
                 started = await self.host.start(start_opts)
@@ -496,7 +497,8 @@ class SessionManager:
             proc.stdin.write(payload.encode("utf-8"))
             self._emit("change", self._public(session))
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            log_error("session-manager", err)
             return False
 
     def transcript(self, sid: str) -> list:
@@ -512,8 +514,8 @@ class SessionManager:
             if proc:
                 try:
                     proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as err:  # noqa: BLE001
+                    log_error("session-manager", err)
                 session["proc"] = None
         else:
             exited_naturally = False
@@ -524,8 +526,8 @@ class SessionManager:
             if not exited_naturally:
                 try:
                     await self.host.kill(sid)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as err:  # noqa: BLE001
+                    log_error("session-manager", err)
         session["state"] = "stopped"
         session["pid"] = None
         timer = session.get("_busy_timer")

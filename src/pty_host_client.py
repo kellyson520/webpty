@@ -14,6 +14,8 @@ import os
 import socket
 import sys
 
+from logging_util import log_error
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HOST_SCRIPT = os.path.join(_HERE, "pty_host.py")
 
@@ -139,7 +141,8 @@ class PtyHostClient:
         try:
             self.writer.write((json.dumps({"op": op, **(payload or {})}) + "\n").encode("utf-8"))
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            log_error("pty-host-client", err)
             return False
 
     # --- operations -----------------------------------------------------------
