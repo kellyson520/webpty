@@ -26,7 +26,7 @@ from config import (  # noqa: E402
 )
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
 from session_manager import SessionManager  # noqa: E402
-from ws import accept_websocket  # noqa: E402
+from ws import Outbox, accept_websocket  # noqa: E402
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
@@ -443,30 +443,31 @@ class Server:
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
-
-        def on_output(out_sid: str, chunk: bytes) -> None:
-            if out_sid == sid and ws.open:
-                ws.send_bytes_async(chunk)
-
-        def on_agent_event(ev_sid: str, item: dict) -> None:
-            if ev_sid == sid and ws.open:
-                ws.send_text_async(json.dumps({"type": "agent", "item": item}))
-
-        def on_change(s) -> None:  # type: ignore[no-untyped-def]
-            if s.get("id") == sid and ws.open:
-                ws.send_text_async(json.dumps({"type": "state", "session": s}))
-
-        if is_agent:
-            ws.send_text(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}))
-            self.sessions.on("agentEvent", on_agent_event)
-        else:
-            recent = self.sessions.recent_output(sid)
-            if recent and ws.open:
-                ws.send_bytes_async(recent)
-            self.sessions.on("output", on_output)
-        self.sessions.on("change", on_change)
-
+        outbox = Outbox(ws, maxlen=1024)
+        outbox.start()
         try:
+            def on_output(out_sid: str, chunk: bytes) -> None:
+                if out_sid == sid:
+                    outbox.send(chunk, binary=True)
+
+            def on_agent_event(ev_sid: str, item: dict) -> None:
+                if ev_sid == sid:
+                    outbox.send(json.dumps({"type": "agent", "item": item}), binary=False)
+
+            def on_change(s) -> None:  # type: ignore[no-untyped-def]
+                if s.get("id") == sid:
+                    outbox.send(json.dumps({"type": "state", "session": s}), binary=False)
+
+            if is_agent:
+                outbox.send(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}), binary=False)
+                self.sessions.on("agentEvent", on_agent_event)
+            else:
+                recent = self.sessions.recent_output(sid)
+                if recent:
+                    outbox.send(recent, binary=True)
+                self.sessions.on("output", on_output)
+            self.sessions.on("change", on_change)
+
             while True:
                 frame = await ws.recv()
                 if frame is None:
@@ -495,6 +496,7 @@ class Server:
             self.sessions.off("output", on_output)
             self.sessions.off("agentEvent", on_agent_event)
             self.sessions.off("change", on_change)
+            outbox.stop()
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001

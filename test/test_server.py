@@ -216,6 +216,48 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_agent_snapshot_via_outbox(self):
+        # Agent sessions emit their transcript snapshot over the WS; this
+        # exercises _ws_session's Outbox path for text frames end-to-end.
+        import asyncio
+
+        async def run():
+            status, sess = self._req("/api/sessions", "POST",
+                                     {"cwd": os.path.join(self.proj_root, "alpha"),
+                                      "tool": "claude-chat", "name": "ws-agent"})
+            self.assertEqual(status, 201, sess)
+            sid = sess["id"]
+            reader, writer = await asyncio_open_conn(self.port)
+            key = base64.b64encode(b"0123456789abcdef").decode()
+            req = (f"GET /ws/sessions/{sid} HTTP/1.1\r\nHost: x\r\n"
+                   "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+            writer.write(req.encode())
+            await writer.drain()
+            head = await reader.readline()
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n"):
+                    break
+            self.assertIn(b"101", head)
+            ws = WebSocket(reader, writer)
+            ws.open = True
+            end = time.time() + 8
+            got = b""
+            while time.time() < end:
+                frame = await ws.recv(1.5)
+                if frame is None:
+                    break
+                opcode, data = frame
+                if opcode == 0x1:  # snapshot arrives as a text frame
+                    got += data
+                    if b'"snapshot"' in got:
+                        break
+            await ws.close()
+            self.assertIn(b'"snapshot"', got)
+
+        asyncio.run(run())
+
     def test_ws_malformed_session_id_rejected(self):
         import asyncio
 

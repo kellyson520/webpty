@@ -232,7 +232,7 @@ class Outbox:
 
     def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.get_event_loop().create_task(self._drain_loop())
+            self._task = asyncio.get_running_loop().create_task(self._drain_loop())
 
     def stop(self) -> None:
         if self._task:
@@ -257,13 +257,20 @@ class Outbox:
 
     async def _drain_loop(self) -> None:
         try:
+            written = 0
             while True:
                 binary, data = await self._queue.get()
                 if binary:
                     self.ws._send_frame(0x2, data)
                 else:
                     self.ws._send_frame(0x1, data.encode("utf-8") if isinstance(data, str) else data)
-                if self._queue.empty():
+                written += 1
+                # Apply backpressure periodically. Draining only when the queue
+                # is momentarily empty lets frames pile up unbounded in the
+                # transport buffer under sustained load; awaiting drain() on
+                # every frame would recreate the per-frame task storm this
+                # class replaces.
+                if self._queue.empty() or written % 64 == 0:
                     await self.ws.drain()
         except asyncio.CancelledError:
             pass
