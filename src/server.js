@@ -158,10 +158,15 @@ function listDirEntries(rawPath) {
 }
 
 app.get('/api/config', (req, res) => {
+  // Only expose enabled tools (null/false entries are user-disabled).
+  const enabledTools = {};
+  for (const [k, v] of Object.entries(config.tools)) {
+    if (v && typeof v === 'object') enabledTools[k] = v;
+  }
   res.json({
     roots: config.roots,
     projectsRoot,
-    tools: config.tools,
+    tools: enabledTools,
     configPath,
     bindHost: config.bindHost,
     port: effectivePort(config.port),

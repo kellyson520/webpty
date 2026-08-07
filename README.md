@@ -169,10 +169,35 @@ The previous `PTYHUB_*` and `CSMWEB_*` env vars are still honoured as
 fallbacks, and legacy `%APPDATA%\ptyhub\` / `%APPDATA%\CSMWeb\` data
 directories are auto-migrated on first launch.
 
-### Adding more tools
+### Tools are fully yours to configure
 
-Add an entry to `config.tools`. The string in `defaultArgs` is shell-split
-and passed as `argv`.
+The `tools` map is **not locked** — webpty merges your `config.json` over the
+built-in defaults on every boot, and your edits always win. Three operations
+are supported:
+
+**1. Tune a built-in tool** — override any field (command, args, label…):
+
+```json
+{ "tools": { "codex": { "defaultArgs": "--full-auto" } } }
+```
+
+**2. Add a custom tool** — a new key is preserved verbatim and appears in the
+UI picker (icon/label fall back to the tool name):
+
+```json
+{ "tools": { "my-agent": { "command": "myagent", "defaultArgs": "--watch" } } }
+```
+
+**3. Disable a built-in tool** — set it to `null` (or `false`) to remove it
+from the picker and block spawning it:
+
+```json
+{ "tools": { "gemini": null } }
+```
+
+The `defaultArgs` string is shell-split and passed as `argv`. webpty spawns
+`command` from your `PATH` — it never pins a CLI version — so updating a tool
+(e.g. `./install.sh --update-cli`) automatically applies to new sessions.
 
 ### PowerShell as Admin
 

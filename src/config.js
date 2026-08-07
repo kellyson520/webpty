@@ -104,9 +104,21 @@ export function loadConfig() {
   }
 
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  // Merge tools so user configuration always wins AND user-added tools are
+  // preserved. Iterate over the union of default keys and raw keys — the old
+  // code only walked defaultConfig.tools, silently dropping any custom tool
+  // the user added to config.json (and saveConfig() below then deleted it
+  // from disk, so a restart permanently locked the tool list).
+  //
+  // A tool set to `null` or `false` in config.json is *disabled*: it is
+  // dropped from the merged list (and kept as a marker below so the
+  // disable survives restarts) — letting users remove built-in tools too.
+  const rawTools = (raw.tools && typeof raw.tools === 'object') ? raw.tools : {};
   const mergedTools = {};
-  for (const key of Object.keys(defaultConfig.tools)) {
-    mergedTools[key] = { ...defaultConfig.tools[key], ...(raw.tools?.[key] || {}) };
+  for (const key of new Set([...Object.keys(defaultConfig.tools), ...Object.keys(rawTools)])) {
+    const userVal = rawTools[key];
+    if (userVal === null || userVal === false) continue; // disabled by user
+    mergedTools[key] = { ...(defaultConfig.tools[key] || {}), ...((userVal && typeof userVal === 'object') ? userVal : {}) };
   }
   const merged = {
     ...structuredClone(defaultConfig),
@@ -129,6 +141,11 @@ export function loadConfig() {
       : [],
     authToken: typeof raw.authToken === 'string' ? raw.authToken : ''
   };
+  // Persist disable markers (null/false) back into tools so a disabled tool
+  // stays disabled across restarts instead of being resurrected as default.
+  for (const [k, v] of Object.entries(rawTools)) {
+    if (v === null || v === false) merged.tools[k] = v;
+  }
   // Persist merged form so newly added defaults (e.g., new tools) appear on disk
   saveConfig(merged);
   return merged;
