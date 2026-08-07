@@ -1,5 +1,7 @@
 # webpty
 
+**v1.0.0** · [npm @vitaldb/webpty](https://www.npmjs.com/package/@vitaldb/webpty) · [GitHub kellyson520/webpty](https://github.com/kellyson520/webpty)
+
 A multi-session web terminal that supervises long-running CLI agents
 (`claude`, `codex`, `reasonix`, `opencode`, `aider`, `pwsh`, …) per
 project folder. Open any browser on your trusted network — desktop or
@@ -8,6 +10,29 @@ phone — and switch between live sessions with a swipe.
 > Built for the workflow: *"My PC has an AI agent CLI running in each of
 > my project folders. I want to reach whichever one I need from my
 > phone."*
+
+## What's new in 1.0.0
+
+- **Reasonix & mainstream agent tools** — preconfigured profiles for
+  `reasonix`, `opencode`, `aider`, `gemini`, `qwen-code`, `cursor-agent`,
+  `copilot` (see [Configuration](#configuration)). Opening a folder with
+  no session auto-selects `reasonix` (or your last-used tool for that
+  folder).
+- **Token gate (access control)** — optional `authToken`: every
+  non-localhost request must present it via `Authorization: Bearer …`,
+  `?token=…` or cookie; the UI shows a one-time unlock screen. See
+  [Security](#security).
+- **Create projects from the UI** — new-session drawer creates a folder
+  under the projects root (optionally `git init`ed) via
+  `POST /api/projects/create`, with path-traversal protection.
+- **Faster startup** — initial page load fetches config / projects /
+  sessions in parallel and xterm vendor assets are served with
+  immutable cache headers.
+- **Bug fixes** — user `roots` are preserved on reload (explicit `[]` =
+  deny-all is honored), POSIX args no longer lose backslashes,
+  case-folded project dedupe is platform-aware.
+- **Localized UI** — menu, sort controls, placeholder and quick-key
+  labels in Simplified Chinese.
 
 ## What it gives you
 

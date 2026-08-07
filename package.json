@@ -1,6 +1,6 @@
 {
   "name": "@vitaldb/webpty",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Multi-session web terminal with AI agent supervision — host claude / codex / reasonix / opencode sessions per project folder, reach them from any browser, with optional token/Tailscale gate.",
   "keywords": [
     "terminal",
