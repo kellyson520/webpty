@@ -101,8 +101,26 @@ Service management / 服务管理：`journalctl -u webpty.service -f`、
 ### Requirements / 环境要求
 
 - **Python ≥ 3.10** (stdlib only — no pip packages required)
-- **Linux / macOS** (PTY via stdlib `pty`; Windows not supported by the
-  stdlib PTY host)
+- **Linux / macOS** (PTY via stdlib `pty`); **Windows** via pywinpty — see
+  [Windows](#windows--windows-部署) below
+  **Windows** 走 pywinpty——见下文 [Windows 部署](#windows--windows-部署)
+
+### Windows / Windows 部署
+
+Windows has no systemd and the stdlib has no `pty`, so `install.sh` detects
+the platform (MSYS/Git-Bash/Cygwin) and takes the direct-run route instead
+of writing a service unit.
+
+Windows 没有 systemd，标准库也没有 `pty`，因此 `install.sh` 检测到平台
+（MSYS/Git-Bash/Cygwin）后走直跑路径，而不是写 systemd 服务。
+
+- Install Python ≥ 3.10, then / 安装 Python ≥ 3.10，然后：
+  `pip install -r requirements-windows.txt`
+- Run / 运行：`python src/server.py`（或 `pythonw` 后台运行；可用
+  [nssm](https://nssm.cc/) 注册为 Windows 服务）
+- The PTY backend uses **pywinpty** (Windows ConPTY); the wire protocol is
+  identical to the POSIX build.
+  PTY 后端使用 **pywinpty**（Windows ConPTY）；协议与 POSIX 版完全一致。
 
 ---
 

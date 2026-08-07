@@ -20,6 +20,25 @@
 #
 set -euo pipefail
 
+# ---------- platform detection ----------------------------------------------
+# Windows (MSYS/Git-Bash/Cygwin) has no systemd and the stdlib has no pty:
+# the script only installs the pywinpty deps, then hands off to the
+# direct-run path. POSIX keeps the full systemd deployment below.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
+  *) PLATFORM=posix ;;
+esac
+if [ "$PLATFORM" = windows ]; then
+  echo ">> Windows detected — install pywinpty and run: python src/server.py"
+  SRC_DIR="${WEBPTY_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+  PYTHON_BIN="$(command -v python || command -v python3 || true)"
+  if [ -n "$PYTHON_BIN" ]; then
+    "$PYTHON_BIN" -m pip install -r "$SRC_DIR/requirements-windows.txt" 2>/dev/null || true
+  fi
+  echo ">> On Windows run: pythonw src/server.py (or use nssm to register a service)"
+  exit 0
+fi
+
 # ---------- defaults -------------------------------------------------------
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${WEBPTY_SRC_DIR:-$SELF_DIR}"
