@@ -263,17 +263,87 @@ xterm.js  ───── WebSocket (binary) ──→  pty-host daemon (stdlib 
 
 ---
 
+## Performance & reliability / 性能与稳定性
+
+webpty is stdlib-only and small (the server process sits at a few tens of
+MiB RSS), so most of the tuning below is about *keeping latency flat under
+bursty PTY output and long-running sessions*.
+
+webpty 仅用标准库且体量小（服务器进程 RSS 仅几十 MiB），以下优化大多
+聚焦于**在突发的 PTY 输出与长时间会话下保持延迟平稳**。
+
+- **Outbox write queue / Outbox 写队列** — server→browser frames go through
+  a single-consumer `asyncio.Queue` drained by one background task
+  (`src/ws.py`). Burst writes never spawn a per-frame drain task, and a slow
+  client drops *oldest* frames instead of letting memory pile up
+  (drop-oldest backpressure; dropped count is surfaced in tests).
+  server→浏览器 的帧经单个消费者 `asyncio.Queue`，由一个后台任务统一
+  drain（`src/ws.py`）。突发写入不会为每帧创建 drain 任务；慢客户端时
+  **丢弃最旧帧**而非无限堆积内存（drop-oldest 背压，丢弃计数有测试覆盖）。
+- **gzip compression / gzip 压缩** — static assets and JSON responses larger
+  than 1 KB are gzip-compressed when the client accepts it *and* compression
+  actually shrinks the payload; compressed static assets are cached so repeat
+  requests skip recompression. Small responses (< 1 KB) stay identity.
+  大于 1 KB 的静态资源与 JSON 响应，在客户端接受且压缩确有收益时才 gzip
+  压缩；静态资源压缩结果缓存，重复请求不再重压。小响应（< 1 KB）不压缩。
+- **Output merging / 输出合并** — the pty-host merges small byte chunks into
+  fewer frames ≤ 32 KB (`merge_chunks`, `src/pty_host.py`) with a 16 ms flush
+  delay, slashing the number of PTY→browser frames under noisy output while
+  keeping the wire protocol byte-identical.
+  pty-host 把碎片字节合并成 ≤ 32 KB 的帧（`merge_chunks`，
+  `src/pty_host.py`），16 ms 冲刷延迟，嘈杂输出下的 PTY→浏览器帧数大幅
+  减少，且线上协议逐字节不变。
+- **Self-healing host monitor / 自愈监控** — a 2 s background monitor watches
+  the pty-host socket and readiness state; on crash it auto-reconnects,
+  re-attaches surviving sessions and emits a `reconnected` event (without
+  marking alive sessions dead), so the webpty server process can outlive its
+  pty-host.
+  每 2 s 的后台监控检查 pty-host socket 与就绪状态；崩溃后自动重连、
+  重新挂接仍存活的会话并发出 `reconnected` 事件（绝不把存活会话误判为
+  死亡），因此 webpty 服务器进程可以比它的 pty-host 活得更久。
+- **Windows backend / Windows 后端** — same wire protocol over pywinpty
+  (ConPTY), so the tuning above applies unchanged on Windows.
+  Windows 上经 pywinpty（ConPTY）跑同一线上协议，上述优化原样生效。
+
+### Recorded numbers / 记录数据
+
+The benchmark is a recording tool, **not a CI gate**:
+
+基准脚本为记录用途，**不是 CI gate**：
+
+```sh
+python3 bench/ws_throughput.py [port]     # reuses a running server, or
+                                          # auto-starts a throwaway one
+```
+
+It measures WebSocket `echo` round-trip latency (p95) and the server
+process's VmRSS peak while a bash session echoes back bursts of lines.
+
+它测量 bash 会话回显突发输出时 WebSocket `echo` 的往返延迟（p95）与
+服务器进程 VmRSS 峰值。
+
+```text
+# recorded locally, Linux / CPython 3.12, loopback, 100-echo bursts:
+# 本机记录（Linux / CPython 3.12 / 回环 / 每次 100 条 echo）：
+latency  min 16.92 ms | p50 17.23 ms | p95 18.17 ms | p99 18.65 ms
+burst    100 echoes: ~2.3k msgs/s
+mem peak ~24 MiB (VmRSS)
+```
+
+---
+
 ## Testing / 测试
 
 ```sh
 python3 -m unittest discover -s test
 ```
 
-108 tests cover paths, args parsing, ring buffer, auth, config merging,
-session manager, and end-to-end HTTP/WebSocket behavior.
+122 tests cover paths, args parsing, ring buffer, auth, config merging,
+session manager, pty-host crash recovery, and end-to-end HTTP/WebSocket
+behavior (1 platform-skipped on POSIX).
 
-108 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理以及
-端到端 HTTP/WebSocket 行为。
+122 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
+pty-host 崩溃自愈以及端到端 HTTP/WebSocket 行为（1 个平台跳过项）。
 
 ---
 
