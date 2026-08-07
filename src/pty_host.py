@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import time
+from collections.abc import Iterable
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from ring_buffer import RingBuffer  # noqa: E402
@@ -28,6 +29,41 @@ PIPE_NAME = (
 )
 BUFFER_CAP = 256 * 1024  # per-session scrollback for replay on reattach
 HOST_VERSION = 1
+MAX_OUTPUT_BYTES = 32768  # max bytes per merged output frame
+FLUSH_DELAY = 0.016  # seconds to wait before flushing pending output
+
+# --- output merging --------------------------------------------------------
+
+
+def merge_chunks(
+    chunks: Iterable[bytes], max_bytes: int = MAX_OUTPUT_BYTES
+) -> list[bytes]:
+    """Merge small byte chunks into fewer larger ones (≤ max_bytes each).
+
+    The order and total content of the input is preserved; only the frame
+    boundaries change, so the pty-host protocol (one base64 JSON line per
+    frame) stays identical from the client's point of view.
+    """
+    merged: list[bytes] = []
+    current = bytearray()
+    for c in chunks:
+        if not c:
+            continue
+        if current and len(current) + len(c) > max_bytes:
+            merged.append(bytes(current))
+            current = bytearray()
+        if len(c) >= max_bytes:
+            # A single chunk that already exceeds the cap is split by itself.
+            if current:
+                merged.append(bytes(current))
+                current = bytearray()
+            for i in range(0, len(c), max_bytes):
+                merged.append(c[i:i + max_bytes])
+        else:
+            current += c
+    if current:
+        merged.append(bytes(current))
+    return merged
 
 # --- sessions ---------------------------------------------------------------
 # sid -> {"pid", "master_fd", "buffer", "clients": set, "cols", "rows",
@@ -50,6 +86,45 @@ def _broadcast(session: dict, line: str) -> None:
             c.sendall(data)
         except OSError:
             session["clients"].discard(c)
+
+
+def _flush_output(session: dict) -> None:
+    """Merge pending chunks and broadcast one frame per merged piece."""
+    if session["pending"]:
+        for merged in merge_chunks(session["pending"], max_bytes=MAX_OUTPUT_BYTES):
+            line = json.dumps({
+                "ev": "output", "id": session["id"],
+                "data": base64.b64encode(merged).decode("ascii"),
+            }) + "\n"
+            _broadcast(session, line)
+        session["pending"] = []
+    session["last_flush"] = time.monotonic()
+
+
+def _flush_expired(now: float) -> None:
+    """Flush any session whose pending output has exceeded the flush delay."""
+    for session in sessions.values():
+        if session["pending"] and now - session["last_flush"] >= FLUSH_DELAY:
+            _flush_output(session)
+
+
+def _drain_output(session: dict) -> None:
+    """Non-blockingly read any remaining PTY output into buffer/pending.
+
+    Called before a session is dropped: a child that prints its final output
+    and exits may be reaped before the read branch of the event loop runs,
+    leaving that tail unread in the master fd. Draining here prevents it from
+    being lost when the fd is closed.
+    """
+    while True:
+        try:
+            chunk = os.read(session["master_fd"], 65536)
+        except OSError:
+            break  # EAGAIN (nothing more) or EIO (child gone)
+        if not chunk:
+            break
+        session["buffer"].push(chunk)
+        session["pending"].append(chunk)
 
 
 def handle_start(sock: socket.socket, msg: dict) -> None:
@@ -101,6 +176,8 @@ def handle_start(sock: socket.socket, msg: dict) -> None:
         "master_fd": master_fd,
         "buffer": RingBuffer(BUFFER_CAP),
         "clients": set(),
+        "pending": [],
+        "last_flush": time.monotonic(),
         "cols": cols,
         "rows": rows,
         "alive": True,
@@ -131,6 +208,11 @@ def handle_attach(sock: socket.socket, msg: dict) -> None:
         _send(sock, {"ev": "error", "reqId": msg.get("reqId"), "id": msg.get("id"),
                      "message": "not found"})
         return
+    # Flush pending output to the existing clients first, so the new client's
+    # replay (which already includes that data via the buffer) is not duplicated
+    # by a later flush frame.
+    if session["pending"]:
+        _flush_output(session)
     session["clients"].add(sock)
     st = _client_state.get(sock.fileno())
     if st:
@@ -250,6 +332,9 @@ def _drop_session(sid: str) -> None:
     session = sessions.pop(sid, None)
     if not session:
         return
+    _drain_output(session)
+    if session["pending"]:
+        _flush_output(session)
     try:
         sel.unregister(session["master_fd"])
     except (KeyError, ValueError):
@@ -278,6 +363,9 @@ def _reap_children() -> None:
                     session["exit_code"] = os.WEXITSTATUS(status)
                 elif os.WIFSIGNALED(status):
                     session["exit_signal"] = os.WTERMSIG(status)
+                _drain_output(session)
+                if session["pending"]:
+                    _flush_output(session)
                 line = json.dumps({
                     "ev": "exit", "id": sid,
                     "code": session["exit_code"], "signal": session["exit_signal"],
@@ -368,7 +456,8 @@ def main() -> None:
     try:
         while True:
             _reap_children()
-            events = sel.select(timeout=0.5)
+            events = sel.select(timeout=FLUSH_DELAY)
+            _flush_expired(time.monotonic())
             for key, _mask in events:
                 kind = key.data
                 if kind[0] == "accept":
@@ -387,15 +476,17 @@ def main() -> None:
                         continue
                     if chunk:
                         session["buffer"].push(chunk)
-                        line = json.dumps({
-                            "ev": "output", "id": sid,
-                            "data": base64.b64encode(chunk).decode("ascii"),
-                        }) + "\n"
-                        _broadcast(session, line)
+                        session["pending"].append(chunk)
+                        pending_bytes = sum(len(c) for c in session["pending"])
+                        if (pending_bytes >= MAX_OUTPUT_BYTES
+                                or time.monotonic() - session["last_flush"] >= FLUSH_DELAY):
+                            _flush_output(session)
     except KeyboardInterrupt:
         pass
     finally:
         for session in list(sessions.values()):
+            _drain_output(session)
+            _flush_output(session)
             _kill_session(session)
         sel.close()
         server.close()
