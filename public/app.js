@@ -1248,10 +1248,41 @@ function execCommandCopy(text) {
     return ok;
   } catch { return false; }
 }
+// Chunk size for large pastes over WS (Issue/plan Task 9): keep frames well
+// under limits and give the receiver time to drain between chunks.
+const PASTE_CHUNK = 32 * 1024;
+
+async function sendTextChunked(entry, text) {
+  // UTF-8 byte length (Chinese = 3 bytes each) decides chunking.
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= PASTE_CHUNK) {
+    if (entry.socket?.readyState === WebSocket.OPEN) entry.socket.send(text);
+    return;
+  }
+  const totalKB = Math.ceil(bytes.length / 1024);
+  const hint = document.getElementById('status-hint');
+  if (hint) hint.textContent = `正在粘贴 ${totalKB} KB…`;
+  try {
+    for (let i = 0; i < bytes.length; i += PASTE_CHUNK) {
+      if (entry.socket?.readyState !== WebSocket.OPEN) break;
+      const part = bytes.subarray(i, i + PASTE_CHUNK);
+      // Send as binary for pty sessions (bytes), text otherwise.
+      if (entry.socket.binaryType === 'arraybuffer' || entry.kind === 'session') {
+        entry.socket.send(part);
+      } else {
+        entry.socket.send(new TextDecoder().decode(part));
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  } finally {
+    if (hint) hint.textContent = '';
+  }
+}
+
 function pasteToSession(entry) {
   if (navigator.clipboard?.readText) {
     navigator.clipboard.readText()
-      .then((text) => { if (text && entry.socket?.readyState === WebSocket.OPEN) entry.socket.send(text); })
+      .then((text) => { if (text && entry.socket?.readyState === WebSocket.OPEN) sendTextChunked(entry, text); })
       .catch(() => focusComposeForPaste(entry));
     return;
   }
