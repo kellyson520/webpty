@@ -2104,26 +2104,34 @@ async function refreshNotifyPanel() {
     api('/api/notify/rules').catch(() => ({ rules: [] })),
     api('/api/notify/messages?page=1').catch(() => ({ items: [] })),
   ]);
-  notifyRules.innerHTML = '<h4>规则</h4>' + (rules.rules || []).map((r) =>
+  notifyRules.innerHTML = '<h4>规则</h4>' + ((rules.rules || []).map((r) =>
     `<div class="notify-item">${esc(r.name)} — ${esc(r.event_type)}
-     ${r.enabled ? '' : '(停用)'}</div>`).join('') || '<p>无规则</p>';
-  notifyMessages.innerHTML = '<h4>消息记录</h4>' + (msgs.items || []).slice(0, 20).map((m) =>
+     ${r.enabled ? '' : '(停用)'}</div>`).join('') || '<p>无规则</p>');
+  notifyMessages.innerHTML = '<h4>消息记录</h4>' + ((msgs.items || []).slice(0, 20).map((m) =>
     `<div class="notify-item ${esc(m.level)}">[${esc(m.level)}] ${esc(m.title)}
      <span class="muted">${esc(m.tool || '')} ${esc(m.project || '')}</span></div>`
-  ).join('') || '<p>暂无消息</p>';
+  ).join('') || '<p>暂无消息</p>');
 }
 document.getElementById('notify-close').onclick = () => { notifyBackdrop.hidden = true; };
 notifyBackdrop.addEventListener('click', (ev) => {
   if (ev.target === notifyBackdrop) notifyBackdrop.hidden = true;
 });
 document.getElementById('notify-rule-add').onclick = async () => {
-  const type = document.getElementById('notify-rule-type').value;
-  await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
-    name: 'rule-' + Date.now(), event_type: type, matcher_json: '{}',
-    action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
-  refreshNotifyPanel();
+  try {
+    const type = document.getElementById('notify-rule-type').value;
+    await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
+      name: 'rule-' + Date.now(), event_type: type, matcher_json: '{}',
+      action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
+    refreshNotifyPanel();
+  } catch (e) {
+    alert(e.message);
+  }
 };
 document.getElementById('notify-test').onclick = async () => {
-  const r = await api('/api/notify/test', { method: 'POST' });
-  alert(r.ok ? '测试邮件已发送' : 'SMTP 未配置');
+  try {
+    const r = await api('/api/notify/test', { method: 'POST' });
+    alert(r.ok ? '测试邮件已发送' : 'SMTP 未配置');
+  } catch (e) {
+    alert(e.message);
+  }
 };
