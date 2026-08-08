@@ -541,6 +541,7 @@ class Server:
             except (TypeError, ValueError):
                 raise HttpError(400, "Invalid limit")
             await self.cost.set_budget(limit)
+            save_config(self.config)  # persist the budget across restarts
             return await self._send_json(writer, 200, {"ok": True}, headers)
         if path == "/api/cost/reconcile" and method == "POST":
             from reconciler import Reconciler
@@ -823,10 +824,6 @@ class Server:
         outbox = Outbox(ws, maxlen=1024)
         outbox.start()
         try:
-            def on_output(out_sid: str, chunk: bytes) -> None:
-                if out_sid == sid:
-                    outbox.send(chunk, binary=True)
-
             def on_agent_event(ev_sid: str, item: dict) -> None:
                 if ev_sid == sid:
                     outbox.send(json.dumps({"type": "agent", "item": item}), binary=False)
@@ -845,6 +842,23 @@ class Server:
                 recent = self.sessions.recent_output(sid)
                 if recent:
                     outbox.send(recent, binary=True)
+                # Skip the replay window: pty-host broadcasts the buffer
+                # snapshot to every attached client on reconnect, which would
+                # re-send what `recent` already covered and duplicate the
+                # terminal content. Track the byte offset already delivered.
+                skip = len(recent) if recent else 0
+                seen = 0
+                def on_output(out_sid: str, chunk: bytes) -> None:
+                    nonlocal seen
+                    if out_sid != sid:
+                        return
+                    if seen < skip:
+                        take = min(skip - seen, len(chunk))
+                        seen += take
+                        chunk = chunk[take:]
+                        if not chunk:
+                            return
+                    outbox.send(chunk, binary=True)
                 self.sessions.on("output", on_output)
             self.sessions.on("change", on_change)
             self.sessions.on("reconnected", on_reconnected)

@@ -84,6 +84,8 @@ class Database:
                 source TEXT NOT NULL DEFAULT 'realtime'
             );
             CREATE INDEX IF NOT EXISTS idx_usage_ts ON token_usage (ts);
+            CREATE INDEX IF NOT EXISTS idx_usage_session
+                ON token_usage (session_id, tokens_in, tokens_out);
 
             CREATE TABLE IF NOT EXISTS backups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -67,6 +67,40 @@ class AgentConfigTest(unittest.TestCase):
         content = open(p, encoding="utf-8").read()
         self.assertIn('api_key = "sk-new"\n', content)
 
+    def test_toml_section_key_not_touched(self):
+        # 顶层 model 与 [projects] 段内的 model 并存 → 只改顶层
+        p = self._write(".codex/config.toml",
+                        'model = "gpt-5.4"\n'
+                        '[projects."/mnt/TG-ONE"]\n'
+                        'model = "local-project-model"\n'
+                        'trust_level = "trusted"\n')
+        res = ac.update_config("codex", {"model": "gpt-5.2"})
+        self.assertTrue(res["ok"])
+        content = open(p, encoding="utf-8").read()
+        self.assertIn('model = "gpt-5.2"', content)
+        self.assertIn('model = "local-project-model"', content)  # 段内不动
+        self.assertIn('trust_level = "trusted"', content)
+
+    def test_toml_value_escaping(self):
+        # 值含反斜杠（Windows 路径）正确转义
+        p = self._write(".codex/config.toml", 'model = "gpt-5.4"\n')
+        res = ac.update_config("codex", {"model": "C:\\models\\gpt5"})
+        self.assertTrue(res["ok"])
+        content = open(p, encoding="utf-8").read()
+        self.assertIn('model = "C:\\\\models\\\\gpt5"', content)
+        # 转义后仍是合法 TOML
+        import tomllib
+        parsed = tomllib.loads(content)
+        self.assertEqual(parsed["model"], "C:\\models\\gpt5")
+
+    def test_toml_invalid_file_refused(self):
+        # 无法解析的 TOML 拒绝编辑，不破坏原文件
+        p = self._write(".codex/config.toml", 'model = "unclosed\n[broken\n')
+        res = ac.update_config("codex", {"model": "gpt-5.2"})
+        self.assertFalse(res["ok"])
+        content = open(p, encoding="utf-8").read()
+        self.assertIn("unclosed", content)  # 原样保留
+
     def test_json_replace_env_values(self):
         p = self._write(".claude/settings.json", json.dumps({
             "env": {"ANTHROPIC_BASE_URL": "https://old",

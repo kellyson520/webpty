@@ -174,9 +174,8 @@ class Migrator(WorkerInterface):
             if r.get("id") not in existing_ids:
                 r.pop("id", None)
             await self.db.upsert_rule(r)
-        with open(os.path.join(self.data_dir, "config.json"), "w",
-                  encoding="utf-8") as f:
-            json.dump(self.config, f, indent=2, ensure_ascii=False)
+        from config import save_config
+        save_config(self.config)
         await self.db.add_migration({
             "filename": os.path.basename(path),
             "source_node": pkg["manifest"].get("source_node_id"),

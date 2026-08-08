@@ -138,22 +138,56 @@ def read_config(tool: str) -> dict[str, Any]:
 
 
 def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> tuple[str, bool]:
-    """Replace the key's line in TOML text; preserve everything else."""
+    """Replace a TOP-LEVEL key's line in TOML text; preserve everything else.
+
+    Uses tomllib to find the line where the top-level key is defined, so a
+    key inside some [section] (e.g. [projects."/mnt/TG-ONE"] model=...) is
+    never mistaken for the top-level one. Escapes the value correctly.
+    """
     pattern, template = fmt
-    new_line = template.format(value.replace('"', '\\"'))
+    # Proper TOML escaping: backslash, quote, control chars.
+    esc = (value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t"))
+    new_line = template.format(esc)
     lines = content.splitlines(keepends=True)
-    replaced = False
+
+    # Refuse to edit files that aren't parseable TOML — never corrupt an
+    # agent's native config further.
+    try:
+        import tomllib
+        tomllib.loads(content)
+    except Exception:  # noqa: BLE001 — unparseable file: refuse to edit
+        return content, False
+
+    # Line scan that only touches the top-level scope: track when we're
+    # inside a [section] (lines starting with '[' after whitespace) and only
+    # replace key lines outside any section.
+    in_section = False
     out: list[str] = []
+    replaced = False
     for line in lines:
-        if not replaced and re.match(pattern, line.strip()):
+        stripped = line.strip()
+        if not replaced and not in_section and re.match(pattern, stripped):
             indent = line[: len(line) - len(line.lstrip())]
             out.append(f"{indent}{new_line}\n")
             replaced = True
-        else:
-            out.append(line)
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = True
+        out.append(line)
     if not replaced:
-        # Key absent — append at the end (or after the last section header).
-        out.append(f"{new_line}\n")
+        # Key absent at top level: append before the first [section] header
+        # (or at EOF if there is none) so it stays a top-level key.
+        insert_at = len(out)
+        for i, line in enumerate(out):
+            if line.strip().startswith("["):
+                insert_at = i
+                break
+        out.insert(insert_at, f"{new_line}\n")
+        replaced = True
     return "".join(out), replaced
 
 
@@ -197,7 +231,11 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
         for key, raw in values.items():
             if key not in TOML_KEYS[tool]:
                 continue
-            content, _ = _replace_toml(content, key, TOML_KEYS[tool][key], str(raw))
+            content, replaced = _replace_toml(
+                content, key, TOML_KEYS[tool][key], str(raw))
+            if not replaced:
+                return {"ok": False,
+                        "error": f"cannot edit {key}: file is not valid TOML"}
             changed.append(key)
     else:  # json
         try:

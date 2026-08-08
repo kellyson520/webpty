@@ -38,6 +38,17 @@ async def collect_state(data_dir: str, config: dict, db: Database) -> dict:
             "prices": config.get("prices", {})}
 
 
+def _atomic_write_json(path: str, obj) -> None:
+    """Write JSON atomically (tmp + fsync + os.replace)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _sha256_file(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -136,8 +147,7 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
         existing = {}
     merged = dict(existing)
     merged.update(cfg)  # merge 语义：备份覆盖冲突键，保留现有新增键
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2, ensure_ascii=False)
+    _atomic_write_json(cfg_path, merged)
     # 恢复通知规则:同 id 覆盖,其余新增(sessions 是运行时状态,不恢复)
     existing_ids = {r["id"] for r in await db.list_rules()}
     for rule in state.get("notify_rules") or []:

@@ -59,11 +59,20 @@ class CostTracker:
         if cost is None:
             cost = cost_for(model, usage["tokens_in"], usage["tokens_out"],
                             self.config, cached_in=usage.get("cached_in", 0))
+        session_id = usage.get("session_id") or sid or event.get("session_id")
+        # Dedup against posthoc rows: if the reconciler already recorded this
+        # exact (session, tokens) pair, skip to avoid double billing.
+        dup = await self.db.query_one(
+            "SELECT 1 AS x FROM token_usage WHERE session_id=? AND "
+            "tokens_in=? AND tokens_out=? AND source='posthoc' LIMIT 1",
+            (session_id or "", usage["tokens_in"], usage["tokens_out"]))
+        if dup:
+            return
         await self.db.add_usage({
             "project": event.get("project"),
             "tool": event.get("tool"),
             "model": model,
-            "session_id": usage.get("session_id") or sid or event.get("session_id"),
+            "session_id": session_id,
             "tokens_in": usage["tokens_in"], "tokens_out": usage["tokens_out"],
             "cost": cost, "source": "realtime"})
 

@@ -21,6 +21,13 @@ _OP_CLOSE = 0x8
 _OP_PING = 0x9
 _OP_PONG = 0xA
 
+# Sentinel returned by _parse_frame when more bytes are needed.
+class _Incomplete:
+    __slots__ = ()
+
+
+_INCOMPLETE = _Incomplete()
+
 
 class WebSocketError(Exception):
     pass
@@ -127,14 +134,22 @@ class WebSocket:
 
     # --- inbound -------------------------------------------------------------
     async def recv(self, timeout_s: float | None = None) -> tuple[int, bytes] | None:
-        """Returns (opcode, payload) or None on close/EOF."""
+        """Returns (opcode, payload) or None on close/EOF/timeout.
+
+        Incomplete frames (payload split across TCP segments, extended
+        length headers not yet arrived) are NOT protocol errors: we keep
+        reading instead of closing the connection. Only real protocol
+        violations (bad opcode, fragmented frames) close the socket.
+        """
         while True:
             if len(self._recv_buf) >= 2:
                 try:
-                    return self._parse_frame()
+                    frame = self._parse_frame()
                 except WebSocketError as err:
                     await self.close(1002, str(err))
                     return None
+                if frame is not _INCOMPLETE:
+                    return frame
             try:
                 chunk = await asyncio.wait_for(self.reader.read(65536), timeout=timeout_s)
             except asyncio.TimeoutError:
@@ -146,7 +161,13 @@ class WebSocket:
                 return None
             self._recv_buf += chunk
 
-    def _parse_frame(self) -> tuple[int, bytes]:
+    def _parse_frame(self) -> tuple[int, bytes] | None | type[_INCOMPLETE]:
+        """Parse one frame from the buffer.
+
+        Returns (opcode, payload), None (close frame), or the _INCOMPLETE
+        sentinel when more bytes are needed. Raises WebSocketError only for
+        real protocol violations.
+        """
         b0 = self._recv_buf[0]
         b1 = self._recv_buf[1]
         fin = bool(b0 & 0x80)
@@ -156,33 +177,65 @@ class WebSocket:
         offset = 2
         if length == 126:
             if len(self._recv_buf) < 4:
-                raise WebSocketError("frame too short")
+                return _INCOMPLETE
             length = struct.unpack(">H", self._recv_buf[2:4])[0]
             offset = 4
         elif length == 127:
             if len(self._recv_buf) < 10:
-                raise WebSocketError("frame too short")
+                return _INCOMPLETE
             length = struct.unpack(">Q", self._recv_buf[2:10])[0]
             offset = 10
         mask_key = None
         if masked:
             if len(self._recv_buf) < offset + 4:
-                raise WebSocketError("frame too short")
+                return _INCOMPLETE
             mask_key = self._recv_buf[offset:offset + 4]
             offset += 4
         if len(self._recv_buf) < offset + length:
-            raise WebSocketError("frame too short")
+            return _INCOMPLETE
         payload = bytes(self._recv_buf[offset:offset + length])
         del self._recv_buf[:offset + length]
 
         if masked and mask_key:
             payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
-        if opcode == _OP_PING:
-            self._send_frame(_OP_PONG, payload)
-            return self._parse_frame()
-        if opcode == _OP_PONG:
-            return self._parse_frame()
+        # Handle control frames iteratively (a single TCP segment may pack
+        # many pings; recursion could hit the limit).
+        while opcode in (_OP_PING, _OP_PONG):
+            if opcode == _OP_PING:
+                self._send_frame(_OP_PONG, payload)
+            if len(self._recv_buf) < 2:
+                return _INCOMPLETE
+            b0 = self._recv_buf[0]
+            b1 = self._recv_buf[1]
+            fin = bool(b0 & 0x80)
+            opcode = b0 & 0x0F
+            masked = bool(b1 & 0x80)
+            length = b1 & 0x7F
+            offset = 2
+            if length == 126:
+                if len(self._recv_buf) < 4:
+                    return _INCOMPLETE
+                length = struct.unpack(">H", self._recv_buf[2:4])[0]
+                offset = 4
+            elif length == 127:
+                if len(self._recv_buf) < 10:
+                    return _INCOMPLETE
+                length = struct.unpack(">Q", self._recv_buf[2:10])[0]
+                offset = 10
+            mask_key = None
+            if masked:
+                if len(self._recv_buf) < offset + 4:
+                    return _INCOMPLETE
+                mask_key = self._recv_buf[offset:offset + 4]
+                offset += 4
+            if len(self._recv_buf) < offset + length:
+                return _INCOMPLETE
+            payload = bytes(self._recv_buf[offset:offset + length])
+            del self._recv_buf[:offset + length]
+            if masked and mask_key:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
         if opcode == _OP_CLOSE:
             self._closed = True
             return None

@@ -36,3 +36,56 @@ class OutboxTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         ob.stop()
         self.assertGreaterEqual(ob.dropped, 1)
+
+
+
+
+class FrameParseTest(unittest.IsolatedAsyncioTestCase):
+    """WS 帧解析：分片到达不误断连（审计高危项：远程网络断连根因）。"""
+
+    def _ws(self, buf: bytes):
+        import asyncio as _a
+        from ws import WebSocket
+        ws = WebSocket(_a.StreamReader(), None)
+        ws._recv_buf = bytearray(buf)
+        return ws
+
+    async def test_incomplete_payload_returns_sentinel(self):
+        from ws import _INCOMPLETE
+        ws = self._ws(b"\x81\xfe\x10\x00" + b"ab")  # 16B payload 只给 2B
+        self.assertIs(ws._parse_frame(), _INCOMPLETE)
+
+    async def test_incomplete_extended_length_returns_sentinel(self):
+        from ws import _INCOMPLETE
+        ws = self._ws(b"\x81\x7f")  # 64 位长度头只给 2B
+        self.assertIs(ws._parse_frame(), _INCOMPLETE)
+
+    async def test_incomplete_mask_key_returns_sentinel(self):
+        from ws import _INCOMPLETE
+        ws = self._ws(b"\x81\x80\x11\x22")  # masked，mask key 只给 2B
+        self.assertIs(ws._parse_frame(), _INCOMPLETE)
+
+    async def test_recv_handles_split_payload(self):
+        # TCP 分片：先到帧头+mask，payload 后到 → recv 不关闭连接，返回完整帧
+        import asyncio as _a
+        from ws import WebSocket
+        reader = _a.StreamReader()
+        reader.feed_data(b"\x81\x85\x11\x22\x33\x44")  # 头+mask，len=5 但无 payload
+        ws = WebSocket(reader, None)
+        reader.feed_data(bytes(b ^ [0x11, 0x22, 0x33, 0x44][i % 4] for i, b in enumerate(b"hello")))
+        frame = await ws.recv(timeout_s=1)
+        self.assertIsNotNone(frame)
+        op, payload = frame
+        self.assertEqual(op, 0x1)
+        self.assertEqual(payload, b"hello")
+
+    async def test_pings_then_text_no_recursion(self):
+        import asyncio as _a
+        from ws import WebSocket
+        reader = _a.StreamReader()
+        reader.feed_data(b"\x89\x00\x89\x00\x81\x01x")  # ping+ping+text
+        ws = WebSocket(reader, None)
+        frame = await ws.recv(timeout_s=1)
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame[0], 0x1)
+        self.assertEqual(frame[1], b"x")

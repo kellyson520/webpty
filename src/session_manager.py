@@ -168,6 +168,7 @@ class SessionManager:
         timer = session.get("_busy_timer")
         if timer:
             timer.cancel()
+        self._close_log_fh(session)
         self.sessions.pop(sid, None)
         self._persist()
         self._emit("remove", sid)
@@ -549,6 +550,7 @@ class SessionManager:
         if timer:
             timer.cancel()
         session["busy"] = False
+        self._close_log_fh(session)
         self._emit("change", self._public(session))
         self._emit("session_event", {
             "type": "terminated", "session_id": session["id"], "name": session.get("name"),
@@ -638,6 +640,7 @@ class SessionManager:
         if timer:
             timer.cancel()
         session["busy"] = False
+        self._close_log_fh(session)
         if session.get("log_path"):
             _append_log(session["log_path"], f"\r\n[webpty] exited code={code} signal={signal_}\r\n")
         self._emit("change", self._public(session))
@@ -774,20 +777,39 @@ class SessionManager:
         if session.get("recent_buf"):
             session["recent_buf"].push(chunk)
         if session.get("log_path"):
+            self._append_log_cached(session, chunk)
+        self._emit("output", session["id"], chunk)
+
+    # Cached per-session log file handle: opening/closing the log on every
+    # output chunk (~60/s on an active terminal) was pure syscall overhead.
+    def _append_log_cached(self, session: dict, chunk: bytes) -> None:
+        try:
+            fh = session.get("_log_fh")
+            if fh is None:
+                fh = open(session["log_path"], "ab", buffering=0)
+                session["_log_fh"] = fh
+            fh.write(chunk)
+        except OSError:
+            pass
+
+    def _close_log_fh(self, session: dict) -> None:
+        fh = session.pop("_log_fh", None)
+        if fh is not None:
             try:
-                with open(session["log_path"], "ab") as f:
-                    f.write(chunk)
+                fh.close()
             except OSError:
                 pass
-        self._emit("output", session["id"], chunk)
 
     def _mark_busy(self, session: dict) -> None:
         if not session.get("busy"):
             session["busy"] = True
             self._emit("change", self._public(session))
         timer = session.get("_busy_timer")
-        if timer:
+        if timer and not timer.done():
             timer.cancel()
+        elif timer:
+            # previous timer finished but session still busy — reuse slot
+            pass
 
         async def _clear() -> None:
             await asyncio.sleep(BUSY_IDLE_MS / 1000)

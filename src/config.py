@@ -262,9 +262,15 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     ensure_data_dirs()
-    with open(config_path, "w", encoding="utf-8") as f:
+    # Atomic write: tmp + os.replace so a crash mid-write can never leave a
+    # truncated config.json (which would otherwise lose all config + sessions).
+    tmp = config_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, config_path)
 
 
 def safe_name(value: str) -> str:

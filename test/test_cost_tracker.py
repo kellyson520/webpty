@@ -101,3 +101,19 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    async def test_realtime_skips_posthoc_duplicate(self):
+        # 先写入 posthoc 行（模拟 reconciler 已记录）→ realtime 同对跳过
+        await self.db.add_usage({
+            "project": "/p", "tool": "claude", "model": "claude-haiku",
+            "session_id": "s-dup", "tokens_in": 100, "tokens_out": 50,
+            "cost": 0.01, "source": "posthoc"})
+        self.c.handle_agent_event(self.ev(
+            json.dumps({"type": "message_delta",
+                        "usage": {"output_tokens": 50}}),
+            sid="s-dup", tool="claude"))
+        await asyncio.sleep(0.1)
+        rows = await self.db.query("SELECT source FROM token_usage WHERE session_id='s-dup'")
+        # 只有 posthoc 一条（realtime 被去重跳过）
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "posthoc")
