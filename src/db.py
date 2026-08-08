@@ -218,12 +218,16 @@ class Database:
         row = await self.query_one(
             """SELECT COALESCE(SUM(tokens_in),0) AS tokens_in,
                       COALESCE(SUM(tokens_out),0) AS tokens_out,
-                      COALESCE(SUM(cost),0) AS cost,
+                      COALESCE(SUM(CASE WHEN source='actual'
+                                        THEN cost ELSE 0 END),0) AS cost,
+                      COALESCE(SUM(CASE WHEN source!='actual'
+                                        THEN cost ELSE 0 END),0) AS estimated,
                       COUNT(*) AS entries
                FROM token_usage WHERE ts>=?""",
             (self._period_start(period),))
         return dict(row) if row else {"tokens_in": 0, "tokens_out": 0,
-                                      "cost": 0.0, "entries": 0}
+                                      "cost": 0.0, "estimated": 0.0,
+                                      "entries": 0}
 
     async def usage_grouped(self, group: str, period: str) -> list[dict]:
         col = {"project": "project", "tool": "tool", "model": "model",
@@ -232,7 +236,8 @@ class Database:
             f"""SELECT {col} AS name,
                        COALESCE(SUM(tokens_in),0) AS tokens_in,
                        COALESCE(SUM(tokens_out),0) AS tokens_out,
-                       COALESCE(SUM(cost),0) AS cost
+                       COALESCE(SUM(CASE WHEN source='actual'
+                                         THEN cost ELSE 0 END),0) AS cost
                 FROM token_usage WHERE ts>=? GROUP BY {col}
                 ORDER BY cost DESC""",
             (self._period_start(period),))

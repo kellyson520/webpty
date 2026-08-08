@@ -2409,7 +2409,8 @@ async function refreshCostPanel() {
   const alertsArr = Array.isArray(alerts) ? alerts : [];
   const over = alertsArr.some((a) => a.active);
   document.getElementById('cost-cards').innerHTML =
-    `<div class="cost-card${over ? ' over' : ''}"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div class="l">总成本</div></div>` +
+    `<div class="cost-card${over ? ' over' : ''}"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div class="l">实际成本(工具上报)</div></div>` +
+    `<div class="cost-card"><div class="v">$${Number(sum.estimated || 0).toFixed(4)}</div><div class="l">估算(未上报时)</div></div>` +
     `<div class="cost-card"><div class="v">${esc(sum.tokens_in ?? 0)}</div><div class="l">输入 tokens</div></div>` +
     `<div class="cost-card"><div class="v">${esc(sum.tokens_out ?? 0)}</div><div class="l">输出 tokens</div></div>` +
     `<div class="cost-card${over ? ' over' : ''}"><div class="v">${over ? '超限' : '正常'}</div><div class="l">预算状态</div></div>`;

@@ -67,10 +67,13 @@ class DatabaseTest(unittest.IsolatedAsyncioTestCase):
         s = await self.db.usage_summary("day")
         self.assertEqual(s["tokens_in"], 3000)
         self.assertEqual(s["tokens_out"], 1500)
-        self.assertAlmostEqual(s["cost"], 0.15, places=6)
+        # 无 actual 行时 cost=0,估算值在 estimated
+        self.assertAlmostEqual(s["cost"], 0.0, places=6)
+        self.assertAlmostEqual(s["estimated"], 0.15, places=6)
         grouped = await self.db.usage_grouped("project", "day")
         self.assertEqual(len(grouped), 3)
-        self.assertAlmostEqual(sum(g["cost"] for g in grouped), 0.15, places=6)
+        # 无 actual 行时 grouped 的 cost=0(估算不计入)
+        self.assertAlmostEqual(sum(g["cost"] for g in grouped), 0.0, places=6)
 
     async def test_backup_and_migration_tables(self):
         bid = await self.db.add_backup({

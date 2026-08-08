@@ -37,7 +37,7 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         await self._settle()
         s = await self.db.usage_summary("day")
         self.assertEqual(s["tokens_out"], 500)
-        self.assertAlmostEqual(s["cost"], 0.01, places=6)  # 500*20/1e6
+        self.assertAlmostEqual(s["estimated"], 0.01, places=6)  # 500*20/1e6
 
     async def test_records_from_embedded_usage(self):
         self.c.handle_agent_event({"type": "result", "session_id": "s2",
@@ -47,7 +47,7 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         await self._settle()
         s = await self.db.usage_summary("day")
         self.assertEqual(s["tokens_in"], 1000)
-        self.assertAlmostEqual(s["cost"], 0.01, places=6)  # 1000*10/1e6
+        self.assertAlmostEqual(s["estimated"], 0.01, places=6)  # 1000*10/1e6
 
     async def test_ignores_unparseable(self):
         self.c.handle_agent_event(self.ev("garbage"))
@@ -127,8 +127,35 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         await self._settle()
         s = await self.db.usage_summary("day")
         self.assertEqual(s["tokens_in"], 1000)
-        # 1000 in * 10(测试价)/1e6 = 0.01
-        self.assertAlmostEqual(s["cost"], 0.01, places=6)
+        # 1000 in * 10(测试价)/1e6 = 0.01(估算行,无 actual)
+        self.assertAlmostEqual(s["estimated"], 0.01, places=6)
+
+
+    async def test_records_actual_cost_from_result(self):
+        """result 事件自带 total_cost_usd → source=actual 落库。"""
+        self.c.handle_agent_event({
+            "t": "result", "costUsd": 1.23, "session_id": "s-act1",
+            "model": "deepseek-v3", "tool": "reasonix"})
+        await asyncio.sleep(0.1)
+        rows = await self.db.query(
+            "SELECT cost, source FROM token_usage WHERE session_id='s-act1'")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "actual")
+        self.assertAlmostEqual(rows[0]["cost"], 1.23, places=6)
+
+    async def test_actual_cost_not_double_counted(self):
+        """actual 行优先:估算行 cost 不计入 summary。"""
+        await self.db.add_usage({
+            "project": "/p", "tool": "reasonix", "model": "m",
+            "session_id": "s-act2", "tokens_in": 1000, "tokens_out": 0,
+            "cost": 9.9, "source": "realtime"})
+        self.c.handle_agent_event({
+            "t": "result", "costUsd": 1.23, "session_id": "s-act2",
+            "model": "m", "tool": "reasonix"})
+        await asyncio.sleep(0.1)
+        s = await self.db.usage_summary("month")
+        self.assertAlmostEqual(s["cost"], 1.23, places=6)
+        self.assertEqual(s["tokens_in"], 1000)  # tokens 仍计入
 
 
 if __name__ == "__main__":

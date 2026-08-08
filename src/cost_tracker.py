@@ -32,9 +32,37 @@ class CostTracker:
             self._last_usage.pop(event.get("session_id"), None)
 
     def handle_agent_event(self, event: dict, sid: str | None = None) -> None:
+        # reasonix result 事件自带 total_cost_usd(真实账单)— 直接记 actual。
+        if event.get("t") == "result":
+            task = asyncio.create_task(self._record_actual(event, sid))
+            self._tasks.add(task)
+            task.add_done_callback(self._on_record_done)
+            return
         task = asyncio.create_task(self._record(event, sid))
         self._tasks.add(task)
         task.add_done_callback(self._on_record_done)
+
+    async def _record_actual(self, event: dict, sid: str | None = None) -> None:
+        """Record the tool-reported actual cost (source='actual'). One row per
+        session; summary prefers actual over estimates (Task 4)."""
+        cost = event.get("costUsd")
+        if not isinstance(cost, (int, float)) or cost < 0:
+            return
+        session_id = event.get("session_id") or sid or ""
+        if not session_id:
+            return
+        dup = await self.db.query_one(
+            "SELECT 1 AS x FROM token_usage WHERE session_id=? "
+            "AND source='actual' LIMIT 1", (session_id,))
+        if dup:
+            return
+        await self.db.add_usage({
+            "project": event.get("project"),
+            "tool": event.get("tool"),
+            "model": event.get("model") or event.get("tool") or "unknown",
+            "session_id": session_id,
+            "tokens_in": 0, "tokens_out": 0,
+            "cost": float(cost), "source": "actual"})
 
     def _on_record_done(self, task: asyncio.Task) -> None:
         self._tasks.discard(task)
@@ -137,4 +165,6 @@ class CostTracker:
         if self._budget <= 0:
             return False
         s = await self.db.usage_summary("month")
-        return s["cost"] > self._budget
+        # 预算对比实际+估算合计(否则无 actual 上报时会话永不触发告警)
+        total = float(s.get("cost", 0)) + float(s.get("estimated", 0))
+        return total > self._budget

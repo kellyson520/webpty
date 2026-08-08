@@ -43,7 +43,7 @@ class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added, 2)
         s = await self.db.usage_summary("day")
         self.assertEqual(s["tokens_out"], 150)
-        self.assertAlmostEqual(s["cost"], 0.003, places=6)  # 150*20/1e6
+        self.assertAlmostEqual(s["estimated"], 0.003, places=6)  # 150*20/1e6
         rows = await self.db.query(
             "SELECT source, session_id FROM token_usage")
         self.assertEqual(len(rows), 2)
