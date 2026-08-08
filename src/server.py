@@ -53,7 +53,7 @@ class HttpError(Exception):
 
 
 class Server:
-    def __init__(self, db=None, notifier=None, cost=None,
+    def __init__(self, db=None, notifier=None, cost=None, migrator=None,
                  data_dir: str | None = None) -> None:
         self.config = load_config()
         self.data_dir = data_dir if data_dir is not None else _DATA_DIR
@@ -66,6 +66,7 @@ class Server:
         self.db = db
         self.notifier = notifier
         self.cost = cost
+        self.migrator = migrator
 
     # --- helpers ------------------------------------------------------------
     def _effective_roots(self) -> list[str]:
@@ -449,12 +450,105 @@ class Server:
             diff = await diff_backups(int(m.group(1)), int(m.group(2)), self.db)
             return await self._send_json(writer, 200, diff, headers)
 
+        # --- migrate --------------------------------------------------------
+        if path == "/api/migrate/export" and method == "POST":
+            p = await self.migrator.export()
+            return await self._send_json(writer, 201, {
+                "path": p, "filename": os.path.basename(p)}, headers)
+        if path == "/api/migrate/list" and method == "GET":
+            return await self._send_json(
+                writer, 200, {"migrations": await self.db.list_migrations()},
+                headers)
+        if path == "/api/migrate/clone" and method == "POST":
+            body = await self._read_json(reader, headers)
+            res = await self.migrator.clone(body.get("template", ""))
+            return await self._send_json(writer, 200, res, headers)
+        if path == "/api/migrate/import" and method == "POST":
+            res = await self._handle_migrate_import(reader, headers)
+            return await self._send_json(writer, 200, res, headers)
+        m = re.match(r"^/api/migrate/download/([^/]+)$", path)
+        if m and method == "GET":
+            return await self._handle_migrate_download(writer, m.group(1))
+
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
             await self._serve_static(writer, method, path, headers)
             return
 
         raise HttpError(405, "Method not allowed")
+
+    async def _handle_migrate_download(self, writer, filename: str):
+        backups_dir = os.path.join(self.data_dir, "backups")
+        safe = os.path.basename(filename)
+        path = os.path.realpath(os.path.join(backups_dir, safe))
+        if not path.startswith(os.path.realpath(backups_dir) + os.sep) \
+                or not os.path.isfile(path):
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
+        try:
+            size = os.path.getsize(path)
+            body = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: open(path, "rb").read())
+        except OSError:
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
+        headers = {"content-type": "application/gzip",
+                   "content-disposition": f'attachment; filename="{safe}"',
+                   "content-length": str(size)}
+        writer.write(b"HTTP/1.1 200 OK\r\n" +
+                     b"\r\n".join(f"{k}: {v}".encode() for k, v in headers.items()) +
+                     b"\r\n\r\n" + body)
+        await writer.drain()
+        return True
+
+    async def _handle_migrate_import(self, reader, headers) -> dict:
+        length = 0
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 50 * 1024 * 1024:
+            return {"status": "error", "message": "payload too large or empty"}
+        body = await reader.readexactly(length)
+        ct = headers.get("content-type", "")
+        boundary = None
+        for part in ct.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[len("boundary="):].strip('"')
+        if not boundary:
+            return {"status": "error", "message": "missing boundary"}
+        delim = b"--" + boundary.encode()
+        segs = body.split(delim)
+        filename = None
+        file_bytes = b""
+        mode = "merge"
+        for seg in segs:
+            if b"\r\n\r\n" not in seg:
+                continue
+            head, _, content = seg.partition(b"\r\n\r\n")
+            head_str = head.decode("utf-8", "replace")
+            content = content.rstrip(b"\r\n")
+            if 'name="mode"' in head_str:
+                mode = content.decode("utf-8", "replace").strip() or "merge"
+            if 'name="file"' in head_str:
+                for line in head_str.split("\r\n"):
+                    if line.lower().startswith("content-disposition:"):
+                        for bit in line.split(";"):
+                            bit = bit.strip()
+                            if bit.startswith("filename="):
+                                filename = bit[len("filename="):].strip('"')
+                file_bytes = content
+        if not filename or not file_bytes:
+            return {"status": "error", "message": "file field missing"}
+        uploads = os.path.join(self.data_dir, "uploads")
+        os.makedirs(uploads, exist_ok=True)
+        dest = os.path.join(uploads, os.path.basename(filename))
+        with open(dest, "wb") as f:
+            f.write(file_bytes)
+        if mode not in ("merge", "replace", "dry-run"):
+            mode = "merge"
+        return await self.migrator.import_package(dest, mode)
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0
@@ -725,7 +819,10 @@ async def main() -> None:
     db.connect()
     notifier = Notifier(db, config)
     cost = CostTracker(db, config)
-    server = Server(db=db, notifier=notifier, cost=cost, data_dir=data_dir)
+    from migrator import Migrator
+    migrator = Migrator(data_dir, config, db)
+    server = Server(db=db, notifier=notifier, cost=cost, migrator=migrator,
+                    data_dir=data_dir)
     await server.sessions.init()
     server.sessions.start_host_monitor()
     server.sessions.on("session_event", notifier.handle_event)
