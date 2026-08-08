@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from html import escape
 from typing import Any
 
 from mailer import Mailer
@@ -73,10 +74,10 @@ class Notifier:
         self.mailer.send(
             subject=f"[webpty] {event.get('tool')} {event.get('type')}",
             html=HTML_TMPL.format(
-                title=event.get("name", "session"),
-                body=event.get("type", ""),
-                meta=f"project: {event.get('project')}\n"
-                     f"exit_code: {event.get('exit_code')}",
+                title=escape(str(event.get("name", "session"))),
+                body=escape(str(event.get("type", ""))),
+                meta=escape(f"project: {event.get('project')}\n"
+                            f"exit_code: {event.get('exit_code')}"),
             ))
         await self.db.mark_delivered(nid, True)
 
