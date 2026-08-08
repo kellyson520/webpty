@@ -140,6 +140,8 @@ def _drain_output(session: dict) -> None:
 
 
 def handle_start(sock: socket.socket, msg: dict) -> None:
+    import fcntl
+    import struct
     sid = msg.get("id")
     if sid in sessions:
         _send(sock, {"ev": "error", "reqId": msg.get("reqId"), "id": sid,
@@ -163,24 +165,43 @@ def handle_start(sock: socket.socket, msg: dict) -> None:
     env.setdefault("TERM", "xterm-256color")
 
     try:
+        # pty.fork() wires the slave to 0/1/2 and makes it the controlling
+        # terminal (setsid + TIOCSCTTY) — required for TIOCSWINSZ to take
+        # effect. We set the window size INSIDE the child right before exec:
+        # setting it in the parent after fork() is racy (the child may exec and
+        # read ws_row=0/ws_col=0, which makes full-screen TUIs like reasonix
+        # render a 0x0 layout and go black).
         pid, master_fd = pty.fork()
+        if pid == 0:
+            try:
+                fcntl.ioctl(0, 0x5414, struct.pack("HH", rows, cols))  # TIOCSWINSZ on the controlling tty
+                os.chdir(cwd)
+                os.environ.clear()
+                os.environ.update(env)
+                # Close every inherited fd above stdio before exec. pty-host
+                # holds the listening unix socket, client sockets and the
+                # selectors epoll fd; leaking them lets TUIs mistake a stray
+                # readable fd for an event source and busy-loop.
+                try:
+                    os.closerange(3, 1024)
+                except OSError:
+                    pass
+                os.execvp(cmd, [cmd] + args)
+            except Exception as err:  # noqa: BLE001 — child must not raise
+                os.write(2, f"[pty-host] exec failed: {err}\n".encode())
+                os._exit(127)
     except OSError as err:
         _send(sock, {"ev": "error", "reqId": msg.get("reqId"), "id": sid,
                      "message": str(err)})
         return
 
-    if pid == 0:
-        # Child: exec the command.
-        try:
-            os.chdir(cwd)
-            os.environ.clear()
-            os.environ.update(env)
-            os.execvp(cmd, [cmd] + args)
-        except Exception as err:  # noqa: BLE001 — child must not raise
-            os.write(2, f"[pty-host] exec failed: {err}\n".encode())
-            os._exit(127)
+    # Parent: make sure the winsize is set on the master too (mirrors the
+    # child's setting; ioctl on either end of a pty updates both).
+    try:
+        fcntl.ioctl(master_fd, 0x5414, struct.pack("HH", rows, cols))  # TIOCSWINSZ
+    except OSError:
+        pass
 
-    # Parent.
     os.set_blocking(master_fd, False)
     session = {
         "id": sid,
@@ -207,7 +228,7 @@ def handle_start(sock: socket.socket, msg: dict) -> None:
         import fcntl
         import struct
 
-        fcntl.ioctl(master_fd, 0x5413, struct.pack("HH", rows, cols))  # TIOCSWINSZ
+        fcntl.ioctl(master_fd, 0x5414, struct.pack("HH", rows, cols))  # TIOCSWINSZ
     except Exception:  # noqa: BLE001 — window size is best-effort
         pass
 
@@ -276,7 +297,7 @@ def handle_resize(msg: dict) -> None:
             import fcntl
             import struct
 
-            fcntl.ioctl(session["master_fd"], 0x5413,
+            fcntl.ioctl(session["master_fd"], 0x5414,
                         struct.pack("HH", session["rows"], session["cols"]))
         except Exception:  # noqa: BLE001
             pass
