@@ -221,6 +221,42 @@ class SessionManager:
             return await self._start_agent(session, tool)
         return await self._start_pty(session, tool)
 
+    async def _start_pty_retry_copy(self, session: dict) -> None:
+        """Restart a reasonix-family session with `-c --copy` after an
+        in-use / no-resumable exit. Called from _on_host_exit."""
+        tool = self.config.get("tools", {}).get(session.get("tool")) or {}
+        command = resolve_command(tool.get("command"))
+        user_args = split_args(session.get("args", ""))
+        base_args = split_args(tool.get("defaultArgs", "")) + user_args
+        argv = ["--copy", "-c"] + [a for a in base_args if a not in ("-c", "--copy")]
+        name_flag = tool.get("nameFlag")
+        if name_flag and session.get("name") and name_flag not in user_args:
+            argv.append(name_flag)
+            argv.append(session.get("name"))
+        log_path = session.get("log_path") or os.path.join(
+            logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
+        session["log_path"] = log_path
+        _append_log(log_path, f"\r\n===== webpty auto-resume (--copy) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} =====\r\n")
+        session["state"] = "running"
+        try:
+            started = await self.host.start({
+                "id": session["id"],
+                "command": command,
+                "args": argv,
+                "cwd": session.get("cwd"),
+                "cols": session.get("cols") or DEFAULT_COLS,
+                "rows": session.get("rows") or DEFAULT_ROWS,
+            })
+            session["pid"] = started.get("pid")
+            session["started_at"] = int(time.time() * 1000)
+            session["mode"] = "pty-host"
+            self._emit("change", self._public(session))
+        except Exception as err:  # noqa: BLE001
+            session["state"] = "stopped"
+            session["exit_code"] = -1
+            _append_log(log_path, f"[webpty] auto-resume failed: {err}\r\n")
+            self._emit("change", self._public(session))
+
     async def _start_pty(self, session: dict, tool: dict) -> dict:
         if session.get("state") == "running":
             return session
@@ -276,12 +312,23 @@ class SessionManager:
             started = await self.host.start(start_opts)
         except Exception as err:  # noqa: BLE001
             message = getattr(err, "message", None) or str(err)
-            # Another webpty session of the same project holds the reasonix
-            # session lock (multi-open): retry with --copy so the second
-            # session runs as a duplicated conversation instead of failing.
-            if try_continue and ("in use" in message or "already in use" in message):
-                retry_argv = [a for a in argv if a != "-c"]
-                retry_argv.insert(0, "--copy")
+            # reasonix holds a GLOBAL session lock (one active session at a
+            # time). When another process (reasonix serve, or another webpty
+            # session of the same project) holds it, retry with
+            # `-c --copy` — --copy requires --continue/--resume and opens a
+            # duplicated conversation instead of failing.
+            if (session.get("tool") in ("reasonix", "opencode")
+                    and ("in use" in message or "already in use" in message)):
+                # reasonix holds a GLOBAL session lock (one active session at
+                # a time). Another process (reasonix serve, another webpty
+                # session) holds it → retry with `-c --copy`. --copy requires
+                # --continue/--resume and opens a duplicated conversation
+                # (verified: works even in a fresh project dir).
+                retry_argv = list(argv)
+                if "--copy" not in retry_argv:
+                    retry_argv.insert(0, "--copy")
+                if "-c" not in retry_argv:
+                    retry_argv.insert(0, "-c")
                 start_opts["args"] = retry_argv
                 try:
                     started = await self.host.start(start_opts)
@@ -677,6 +724,35 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return
+        # reasonix auto-resume: the process can exit code 1 right after
+        # start when (a) the GLOBAL session lock is held by another process
+        # ("session is in use") or (b) -c was added but there is no
+        # resumable session ("没有可恢复的会话"). In both cases restart once
+        # with `-c --copy` — it always works (verified even in a fresh
+        # project dir) and gives the user a usable session instead of a
+        # dead one.
+        log_text = ""
+        if session.get("log_path"):
+            try:
+                with open(session["log_path"], "r", encoding="utf-8",
+                          errors="replace") as f:
+                    log_text = f.read()
+            except OSError:
+                log_text = ""
+        tool = session.get("tool")
+        is_rx = tool in ("reasonix", "opencode")
+        retryable = (code != 0 and is_rx
+                     and not session.get("_resume_retried")
+                     and ("in use" in log_text
+                          or "没有可恢复的会话" in log_text))
+        if retryable:
+            session["_resume_retried"] = True
+            try:
+                self._start_pty_retry_copy(session)
+                return  # restart in flight; don't mark stopped yet
+            except Exception:  # noqa: BLE001
+                pass  # fall through to normal exit handling
+
         session["state"] = "stopped"
         session["exit_code"] = code
         session["signal"] = signal_

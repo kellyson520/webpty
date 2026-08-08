@@ -401,3 +401,40 @@ class ReasonixHistoryTest(unittest.TestCase):
         with mock.patch.object(sm2.os.path, "expanduser", return_value=tmp):
             self.assertTrue(sm2._reasonix_has_history("/root/webpty"))
             self.assertFalse(sm2._reasonix_has_history("/nonexistent"))
+
+
+class RetryCopyTest(unittest.IsolatedAsyncioTestCase):
+    """_start_pty_retry_copy 用 -c --copy 重启（reasonix 全局锁冲突时）。"""
+
+    def setUp(self):
+        from session_manager import SessionManager
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="wp-retry-")
+        self.sm = SessionManager({"tools": {"reasonix": {"command": "reasonix"}}},
+                                 lambda: None)
+        self.host = StubHost()
+        self.sm.host = self.host
+
+    async def test_retry_uses_copy_and_continue(self):
+        import os
+        s = self.sm.create(name="rx", cwd="/p", tool="reasonix")
+        # StubHost.start 记录 args
+        calls = []
+        orig_start = self.host.start
+
+        async def spy_start(opts):
+            calls.append(opts)
+            return {"pid": 999, "state": "running"}
+        self.host.start = spy_start
+
+        await self.sm._start_pty_retry_copy(s)
+        self.assertEqual(len(calls), 1)
+        args = calls[0]["args"]
+        self.assertIn("--copy", args)
+        self.assertIn("-c", args)
+        self.assertLess(args.index("--copy"), args.index("-c"))
+        self.assertEqual(s["state"], "running")
+        self.assertEqual(s["pid"], 999)
+
+        # 恢复
+        self.host.start = orig_start
