@@ -29,6 +29,7 @@ const notifyRules = document.getElementById('notify-rules');
 const notifyMessages = document.getElementById('notify-messages');
 const costBackdrop = document.getElementById('cost-backdrop');
 const backupBackdrop = document.getElementById('backup-backdrop');
+const migrateBackdrop = document.getElementById('migrate-backdrop');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const folderPickerBackdrop = document.getElementById('folder-picker-backdrop');
 const folderPickerList = document.getElementById('folder-picker-list');
@@ -1490,7 +1491,7 @@ function openMenu(sessionId) {
   addMenuItem('通知中心', openNotifyPanel);
   addMenuItem('成本账单', openCostPanel);
   addMenuItem('备份管理', openBackupPanel);
-  addMenuItem('迁移向导', () => { closeMenu(); alert('迁移面板（M5 实现）'); });
+  addMenuItem('迁移向导', openMigratePanel);
 
   addMenuSep();
   addMenuLabel('工具');
@@ -2226,4 +2227,46 @@ document.getElementById('backup-create').onclick = async () => {
     alert('备份失败: ' + e.message);
   }
   refreshBackupPanel();
+};
+
+// ---- Migration wizard panel (ext) ----
+function openMigratePanel() {
+  closeMenu();
+  migrateBackdrop.hidden = false;
+}
+document.getElementById('migrate-close').onclick = () => { migrateBackdrop.hidden = true; };
+migrateBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === migrateBackdrop) migrateBackdrop.hidden = true;
+});
+document.getElementById('migrate-export').onclick = async () => {
+  try {
+    const r = await api('/api/migrate/export', { method: 'POST' });
+    const a = document.createElement('a');
+    a.href = `/api/migrate/download/${encodeURIComponent(r.filename)}`;
+    a.download = r.filename;
+    a.click();
+    document.getElementById('migrate-result').innerHTML = `<p>已导出 ${esc(r.filename)}，开始下载</p>`;
+  } catch (e) {
+    alert('导出失败: ' + e.message);
+  }
+};
+document.getElementById('migrate-do').onclick = async () => {
+  const file = document.getElementById('migrate-file').files[0];
+  if (!file) { alert('请先选择 .tar.gz 包'); return; }
+  const mode = document.getElementById('migrate-mode').value;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('mode', mode);
+  try {
+    const res = await fetch('/api/migrate/import', {
+      method: 'POST', body: fd,
+      headers: { authorization: `Bearer ${localStorage.getItem('webpty.token') || ''}` },
+    });
+    const out = await res.json().catch(() => ({}));
+    document.getElementById('migrate-result').innerHTML =
+      `<div class="notify-item">状态: ${esc(out.status)} ${out.message ? '— ' + esc(out.message) : ''}
+       ${out.changes ? '<pre>' + esc(JSON.stringify(out.changes, null, 2)) + '</pre>' : ''}</div>`;
+  } catch (e) {
+    alert('导入失败: ' + e.message);
+  }
 };

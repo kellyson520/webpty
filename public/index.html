@@ -266,6 +266,28 @@
       </div>
     </div>
 
+    <div id="migrate-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>迁移向导</h2>
+          <button id="migrate-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <button id="migrate-export" type="button">1. 导出配置</button>
+            <label>2. 上传包 <input id="migrate-file" type="file" accept=".tar.gz"></label>
+            <select id="migrate-mode">
+              <option value="merge">merge</option>
+              <option value="replace">replace</option>
+              <option value="dry-run">dry-run</option>
+            </select>
+            <button id="migrate-do" type="button">3. 导入</button>
+          </div>
+          <div id="migrate-result" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/vendor/xterm/lib/xterm.js"></script>
     <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
     <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>
