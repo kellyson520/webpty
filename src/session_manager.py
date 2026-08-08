@@ -462,12 +462,14 @@ class SessionManager:
         state = {"got_init": False, "buf": ""}
 
         async def read_stdout() -> None:
+            import codecs
             assert proc.stdout is not None
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while True:
-                chunk = await proc.stdout.read(4096)
+                chunk = await proc.stdout.read(16384)
                 if not chunk:
                     break
-                text = chunk.decode("utf-8", "replace")
+                text = decoder.decode(chunk)
                 _append_log(log_path, text)
                 state["buf"] += text
                 while "\n" in state["buf"]:
@@ -476,14 +478,21 @@ class SessionManager:
                     line = line.strip()
                     if line and self._handle_agent_line(session, line):
                         state["got_init"] = True
+            # flush any partial multi-byte character held in the decoder
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                _append_log(log_path, tail)
+                state["buf"] += tail
 
         async def read_stderr() -> None:
+            import codecs
             assert proc.stderr is not None
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             while True:
-                chunk = await proc.stderr.read(4096)
+                chunk = await proc.stderr.read(16384)
                 if not chunk:
                     break
-                _append_log(log_path, f"[stderr] {chunk.decode('utf-8', 'replace')}")
+                _append_log(log_path, f"[stderr] {decoder.decode(chunk)}")
 
         async def wait_exit() -> None:
             code = await proc.wait()

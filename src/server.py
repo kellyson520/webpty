@@ -44,6 +44,8 @@ mimetypes.add_type("font/woff2", ".woff2")
 # Paths served with immutable long cache (vendor assets never change content).
 _VENDOR_PREFIXES = ("/vendor/",)
 
+_CLAUDE_MTIME_TTL = 30.0  # claude history mtime cache TTL (seconds)
+
 # Tools whose native config files webpty can read & edit.
 _AGENT_CONFIG_TOOLS = frozenset(
     ("codex", "reasonix", "claude", "opencode", "aider",
@@ -103,6 +105,9 @@ class Server:
         self.pkg = package_root()
         self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
+        # claude history mtime cache: key = abs project path, value =
+        # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
+        self._claude_mtime_cache: dict[str, tuple[float, float]] = {}
         self._ws_clients: dict[str, list] = {}  # session id -> ws objects
         self.db = db
         self.notifier = notifier
@@ -166,6 +171,13 @@ class Server:
         return entry
 
     def _claude_history_mtime(self, cwd: str) -> float:
+        # 30s TTL cache: /api/projects calls this per project; the underlying
+        # scandir of ~/.claude/projects/<proj> is expensive with many sessions.
+        cached = self._claude_mtime_cache.get(cwd)
+        if cached is not None:
+            mtime, at = cached
+            if time.time() - at < _CLAUDE_MTIME_TTL:
+                return mtime
         proj = os.path.abspath(cwd).replace(":", "-").replace("\\", "-").replace("/", "-").replace("_", "-")
         d = os.path.join(os.path.expanduser("~"), ".claude", "projects", proj)
         mtime = 0.0
@@ -179,6 +191,7 @@ class Server:
                     pass
         except OSError:
             pass
+        self._claude_mtime_cache[cwd] = (mtime, time.time())
         return mtime
 
     def _list_projects(self) -> list[dict]:
@@ -333,6 +346,7 @@ class Server:
             if not exists and not is_auto:
                 self.config["extraFolders"].append(p)
                 save_config(self.config)
+                self._claude_mtime_cache.clear()
             return await self._send_json(writer, 200, self._list_projects(), headers)
 
         if path == "/api/projects/create" and method == "POST":
@@ -406,6 +420,7 @@ class Server:
             else:
                 self.config["roots"] = []
             save_config(self.config)
+            self._claude_mtime_cache.clear()  # roots changed → rescan
             return await self._send_json(writer, 200, {"roots": self.config["roots"]}, headers)
 
         if path == "/api/config/tools" and method == "PUT":

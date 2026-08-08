@@ -324,6 +324,23 @@ class NormalizeToolResultTest(unittest.TestCase):
         self.assertEqual(normalize_tool_result(""), "")
 
 
+    async def test_utf8_split_across_chunks(self):
+        """增量解码:多字节字符跨块不产生替换符。"""
+        import codecs
+        text = "你好世界" * 500  # 2000 个中文,6000 字节
+        data = text.encode("utf-8")
+        cut = 4096
+        chunk1, chunk2 = data[:cut], data[cut:]
+        # 现有行为(分块 decode)会产生替换符
+        legacy = chunk1.decode("utf-8", "replace") + chunk2.decode("utf-8", "replace")
+        self.assertIn("\ufffd", legacy)
+        # 增量解码:无替换符且拼接等于原文
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        out = dec.decode(chunk1) + dec.decode(chunk2) + dec.decode(b"", final=True)
+        self.assertNotIn("\ufffd", out)
+        self.assertEqual(out, text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
