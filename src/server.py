@@ -214,19 +214,18 @@ class Server:
 
     def _list_dir_entries(self, raw_path: str) -> list[dict]:
         if not raw_path:
+            # Root view = the registered roots + extra folders only. Showing
+            # the whole filesystem here invites navigation outside the roots,
+            # which the fs/list guard then rejects with 403 ("无法列出").
             roots = []
-            if os.name == "nt":
-                import string
-
-                for letter in string.ascii_uppercase:
-                    drive = f"{letter}:\\"
-                    if os.path.exists(drive):
-                        roots.append({"name": f"{letter}:", "path": drive})
-            else:
-                roots.append({"name": "/", "path": "/"})
-            home = os.path.expanduser("~")
-            if home:
-                roots.append({"name": f"Home ({os.path.basename(home)})", "path": home})
+            for r in (self.config.get("roots") or []):
+                if r:
+                    roots.append({"name": os.path.basename(r.rstrip("/\\")) or r,
+                                  "path": r})
+            for f in (self.config.get("extraFolders") or []):
+                if f and f not in roots:
+                    roots.append({"name": os.path.basename(f.rstrip("/\\")) or f,
+                                  "path": f})
             return roots
         resolved = os.path.abspath(raw_path)
         entries = []
