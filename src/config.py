@@ -134,6 +134,8 @@ def default_config() -> dict:
         "authToken": "",
         "tools": copy.deepcopy(DEFAULT_TOOLS),
         "providers": copy.deepcopy(DEFAULT_PROVIDERS),
+        "restart": {"max_restarts": 3, "backoff_s": 10,
+                    "stall_timeout_s": 900},
         "sessions": [],
     }
 

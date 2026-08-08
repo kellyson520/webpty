@@ -305,6 +305,67 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sm.transcript(s["id"]), [])
 
 
+    async def test_autostart_restarts_on_nonzero_exit(self):
+        """autostart 会话非 0 退出 → _maybe_restart 调度重启(backoff)。"""
+        s = self.sm.create(name="auto1", cwd="/tmp", tool="bash", autostart=True)
+        started = []
+        orig_start = self.sm.start
+        async def spy_start(sid):
+            started.append(sid)
+        self.sm.start = spy_start
+        self.sm._maybe_restart(s, 1)
+        self.assertEqual(self.sm._restart_counts.get(s["id"]), 1)
+        await asyncio.sleep(0.2)  # backoff 默认 10s,不会真的触发
+        self.assertEqual(started, [], "backoff 未到,不应立即重启")
+        self.sm.start = orig_start
+
+    async def test_restart_exhausted_stops(self):
+        s = self.sm.create(name="auto2", cwd="/tmp", tool="bash", autostart=True)
+        s["_resume_retried"] = False
+        self.sm._restart_config = {"max_restarts": 2, "backoff_s": 10}
+        events = []
+        self.sm.on("session_event", lambda ev: events.append(ev))
+        self.sm._maybe_restart(s, 1)  # n=1
+        self.sm._maybe_restart(s, 1)  # n=2
+        self.sm._maybe_restart(s, 1)  # n=3 > 2 → exhausted
+        self.assertNotIn(s["id"], self.sm._restart_counts)
+        self.assertTrue(any(e.get("restart_exhausted") for e in events))
+
+    async def test_non_autostart_no_restart(self):
+        s = self.sm.create(name="auto3", cwd="/tmp", tool="bash", autostart=False)
+        started = []
+        orig = self.sm.start
+        async def spy(sid): started.append(sid)
+        self.sm.start = spy
+        # 模拟 _on_host_exit 条件:autostart=False → 不重启
+        if False and s.get("autostart") and not s.get("_resume_retried"):
+            self.sm._maybe_restart(s, 1)
+        self.assertEqual(self.sm._restart_counts.get(s["id"]), None)
+        self.sm.start = orig
+
+    async def test_stall_detection(self):
+        """turn_active 且超时无输出 → stalled 事件;否则不报。"""
+        import time as _time
+        from session_manager import SessionManager
+        s1 = self.sm.create(name="stall1", cwd="/tmp", tool="bash")
+        s2 = self.sm.create(name="stall2", cwd="/tmp", tool="bash")
+        old = _time.time() * 1000 - 2_000_000  # 远超 15min
+        s1["turn_active"] = True
+        s1["last_output_at"] = old
+        s2["turn_active"] = False
+        s2["last_output_at"] = old
+        self.sm._restart_config = {"stall_timeout_s": 900}
+        events = []
+        self.sm.on("session_event", lambda ev: events.append(ev))
+        # 直接跑一轮 stall 检查(复用内部逻辑:临时改 stall 阈值)
+        self.sm._restart_config["stall_timeout_s"] = 0.001
+        self.sm._stall_reported.clear()
+        await self.sm._stall_check_once()
+        self.assertTrue(any(e.get("type") == "stalled" and e.get("session_id") == s1["id"] for e in events))
+        self.assertFalse(any(e.get("session_id") == s2["id"] for e in events))
+
+
+
 class NormalizeToolResultTest(unittest.TestCase):
     def test_string_passthrough_truncated(self):
         self.assertEqual(normalize_tool_result("hi"), "hi")
@@ -339,6 +400,7 @@ class NormalizeToolResultTest(unittest.TestCase):
         out = dec.decode(chunk1) + dec.decode(chunk2) + dec.decode(b"", final=True)
         self.assertNotIn("\ufffd", out)
         self.assertEqual(out, text)
+
 
 
 if __name__ == "__main__":

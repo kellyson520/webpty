@@ -108,6 +108,10 @@ class SessionManager:
         self.host_sessions: dict[str, dict] = {}
         self.host_ready = False
         self._listeners: dict[str, list] = {"output": [], "agentEvent": [], "change": [], "remove": [], "session_event": []}
+        # autostart 会话非 0 退出自动重启(带退避);挂起检测去重
+        self._restart_counts: dict[str, int] = {}
+        self._restart_config = config.get("restart") or {}
+        self._stall_reported: dict[str, float] = {}
         for stored in config.get("sessions", []):
             session = self._inflate(stored)
             self.sessions[session["id"]] = session
@@ -194,6 +198,8 @@ class SessionManager:
             timer.cancel()
         self._close_log_fh(session)
         self.sessions.pop(sid, None)
+        self._restart_counts.pop(sid, None)  # id reuse must not inherit counts
+        self._stall_reported.pop(sid, None)
         self._persist()
         self._emit("remove", sid)
         return True
@@ -807,6 +813,33 @@ class SessionManager:
             "state": "stopped", "exit_code": session.get("exit_code"),
             "signal": session.get("signal"), "ts": time.time(),
         })
+        # Generic auto-restart: autostart sessions that exit non-zero (and
+        # weren't already handled by the reasonix in-use retry) are restarted
+        # with backoff, up to max_restarts. Manual stop (exit_code None via
+        # stop()) never restarts.
+        if (code not in (0, None) and session.get("autostart")
+                and not session.get("_resume_retried")):
+            self._maybe_restart(session, code)
+
+    def _maybe_restart(self, session: dict, code) -> None:  # type: ignore[no-untyped-def]
+        key = session["id"]
+        max_restarts = int(self._restart_config.get("max_restarts", 3))
+        backoff = float(self._restart_config.get("backoff_s", 10))
+        n = self._restart_counts.get(key, 0) + 1
+        if n > max_restarts:
+            self._restart_counts.pop(key, None)
+            self._emit("session_event", {
+                "type": "failed", "session_id": key,
+                "name": session.get("name"), "tool": session.get("tool"),
+                "project": session.get("cwd"), "state": "stopped",
+                "exit_code": code, "signal": None, "ts": time.time(),
+                "restart_exhausted": True,
+            })
+            return
+        self._restart_counts[key] = n
+        self._stall_reported.pop(key, None)  # fresh run → re-arm stall watch
+        loop = asyncio.get_event_loop()
+        loop.call_later(backoff, lambda: asyncio.create_task(self.start(key)))
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False
@@ -826,6 +859,44 @@ class SessionManager:
         if getattr(self, "_monitor_task", None):
             self._monitor_task.cancel()
             self._monitor_task = None
+
+    def start_stall_monitor(self) -> None:
+        """Background monitor: report sessions that are turn-active but
+        produced no output for stall_timeout_s (only notify, never kill)."""
+        if getattr(self, "_stall_task", None):
+            self._stall_task.cancel()
+        self._stall_task = asyncio.get_event_loop().create_task(
+            self._stall_monitor())
+
+    async def _stall_monitor(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                await self._stall_check_once()
+        except asyncio.CancelledError:
+            pass
+
+    async def _stall_check_once(self) -> None:
+        """One stall sweep: report turn-active sessions with no output for
+        stall_timeout_s. Each session is reported at most once per minute."""
+        stall_timeout = float(self._restart_config.get("stall_timeout_s", 900))
+        now = time.time()
+        for sid, s in self.sessions.items():
+            if not s.get("turn_active"):
+                continue
+            last_out = s.get("last_output_at") or 0
+            if now * 1000 - last_out > stall_timeout * 1000:
+                if self._stall_reported.get(sid) != now // 60:
+                    self._stall_reported[sid] = now // 60
+                    self._emit("session_event", {
+                        "type": "stalled", "session_id": sid,
+                        "name": s.get("name"),
+                        "tool": s.get("tool"),
+                        "project": s.get("cwd"),
+                        "state": s.get("state"),
+                        "exit_code": None, "signal": None,
+                        "ts": now,
+                    })
 
     async def _monitor_loop(self, interval_s: float) -> None:
         while True:

@@ -1114,6 +1114,7 @@ async def main() -> None:
                     data_dir=data_dir)
     await server.sessions.init()
     server.sessions.start_host_monitor()
+    server.sessions.start_stall_monitor()
     server.sessions.on("session_event", notifier.handle_event)
     server.sessions.on("session_event", cost.on_session_event)
     server.sessions.on("agentEvent", lambda sid, item: cost.handle_agent_event(item, sid))
