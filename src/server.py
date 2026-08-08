@@ -52,6 +52,42 @@ class HttpError(Exception):
         self.message = message
 
 
+def parse_multipart(body: bytes, boundary: str) -> tuple[str | None, bytes, str]:
+    """Parse a single-file multipart body (fields `file` + optional `mode`).
+
+    Returns (filename, file_bytes, mode). filename is None / file_bytes empty
+    when the file field is absent; mode falls back to "merge" when missing or
+    not one of merge|replace|dry-run. Only the single trailing CRLF that
+    separates the part from the boundary is stripped, so binary payloads that
+    themselves end in \r or \n survive byte-for-byte.
+    """
+    delim = b"--" + boundary.encode()
+    segs = body.split(delim)
+    filename = None
+    file_bytes = b""
+    mode = "merge"
+    for seg in segs:
+        if b"\r\n\r\n" not in seg:
+            continue
+        head, _, content = seg.partition(b"\r\n\r\n")
+        head_str = head.decode("utf-8", "replace")
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        if 'name="mode"' in head_str:
+            mode = content.decode("utf-8", "replace").strip() or "merge"
+        if 'name="file"' in head_str:
+            for line in head_str.split("\r\n"):
+                if line.lower().startswith("content-disposition:"):
+                    for bit in line.split(";"):
+                        bit = bit.strip()
+                        if bit.startswith("filename="):
+                            filename = bit[len("filename="):].strip('"')
+            file_bytes = content
+    if mode not in ("merge", "replace", "dry-run"):
+        mode = "merge"
+    return filename, file_bytes, mode
+
+
 class Server:
     def __init__(self, db=None, notifier=None, cost=None, migrator=None,
                  data_dir: str | None = None) -> None:
@@ -479,7 +515,7 @@ class Server:
 
     async def _handle_migrate_download(self, writer, filename: str):
         backups_dir = os.path.join(self.data_dir, "backups")
-        safe = os.path.basename(filename)
+        safe = os.path.basename(filename).replace('"', "")
         path = os.path.realpath(os.path.join(backups_dir, safe))
         if not path.startswith(os.path.realpath(backups_dir) + os.sep) \
                 or not os.path.isfile(path):
@@ -518,27 +554,7 @@ class Server:
                 boundary = part[len("boundary="):].strip('"')
         if not boundary:
             return {"status": "error", "message": "missing boundary"}
-        delim = b"--" + boundary.encode()
-        segs = body.split(delim)
-        filename = None
-        file_bytes = b""
-        mode = "merge"
-        for seg in segs:
-            if b"\r\n\r\n" not in seg:
-                continue
-            head, _, content = seg.partition(b"\r\n\r\n")
-            head_str = head.decode("utf-8", "replace")
-            content = content.rstrip(b"\r\n")
-            if 'name="mode"' in head_str:
-                mode = content.decode("utf-8", "replace").strip() or "merge"
-            if 'name="file"' in head_str:
-                for line in head_str.split("\r\n"):
-                    if line.lower().startswith("content-disposition:"):
-                        for bit in line.split(";"):
-                            bit = bit.strip()
-                            if bit.startswith("filename="):
-                                filename = bit[len("filename="):].strip('"')
-                file_bytes = content
+        filename, file_bytes, mode = parse_multipart(body, boundary)
         if not filename or not file_bytes:
             return {"status": "error", "message": "file field missing"}
         uploads = os.path.join(self.data_dir, "uploads")
@@ -546,8 +562,6 @@ class Server:
         dest = os.path.join(uploads, os.path.basename(filename))
         with open(dest, "wb") as f:
             f.write(file_bytes)
-        if mode not in ("merge", "replace", "dry-run"):
-            mode = "merge"
         return await self.migrator.import_package(dest, mode)
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
