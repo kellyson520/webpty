@@ -24,7 +24,7 @@ from pty_host_client import PtyHostClient
 
 AGENT_MAX_ITEMS = 4000
 TOOL_RESULT_MAX = 8000
-BUSY_IDLE_MS = 1200
+BUSY_IDLE_MS = 5000  # keep the tab dot blinking this long after the last output
 RECENT_BUF_CAP = 128 * 1024
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 30
@@ -274,6 +274,7 @@ class SessionManager:
         session["state"] = "running"
         session["exit_code"] = None
         session["signal"] = None
+        self._mark_busy(session)  # running → tab dot blinks until idle 5s
 
         try:
             await self.host.attach(session["id"])

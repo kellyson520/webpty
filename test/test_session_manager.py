@@ -326,3 +326,19 @@ class NormalizeToolResultTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    async def test_output_sets_busy_and_clears(self):
+        """输出 → busy=True change 事件；空闲 BUSY_IDLE_MS 后 → False。"""
+        from session_manager import BUSY_IDLE_MS
+        s = self.sm.create(name="busy-test", cwd="/tmp", tool="bash")
+        changes = []
+        self.sm.on("change", lambda pub: changes.append(pub["busy"]))
+        # 模拟 pty 输出（经 StubHost 不会真实输出，直接调内部方法）
+        self.sm._emit_output(s, b"hello\r\n")
+        self.assertTrue(s["busy"])
+        self.assertTrue(changes and changes[-1] is True)
+        # 等待空闲清除
+        await asyncio.sleep((BUSY_IDLE_MS + 300) / 1000)
+        self.assertFalse(s["busy"])
+        self.assertFalse(changes[-1])
+        await self.sm.remove(s["id"])

@@ -1297,6 +1297,27 @@ function renderTabs() {
     dot.dataset.tool = s.tool;
     tab.appendChild(dot);
 
+    // Close button: hover/active tab only, tap to close the session.
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'tab-close';
+    closeBtn.title = '关闭会话';
+    closeBtn.setAttribute('aria-label', '关闭会话');
+    closeBtn.innerHTML = '×';
+    closeBtn.onclick = async (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (!confirm(`关闭会话「${s.name}」？`)) return;
+      try {
+        await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
+      } catch (e) {
+        alert(e.message);
+        return;
+      }
+      await refreshSessions();
+    };
+    tab.appendChild(closeBtn);
+
     tab.onclick = () => scrollToIndex(idx);
     tabsEl.appendChild(tab);
   });
@@ -1948,10 +1969,16 @@ async function activateTool(project, tool, existing) {
   }
   closeDrawer();
   try {
+    // Multi-open support: name the session "<tool>-<project>" so several
+    // sessions of the same agent (even the same project) are distinguishable
+    // in the tab bar; append a counter when the name would collide.
+    let name = `${tool}-${project.name}`;
+    const same = sessions.filter((s) => s.tool === tool && s.name === name);
+    if (same.length > 0) name = `${tool}-${project.name}-${same.length + 1}`;
     const created = await api('/api/sessions', {
       method: 'POST',
       body: JSON.stringify({
-        name: project.name,
+        name,
         cwd: project.path,
         tool,
         args: '',
