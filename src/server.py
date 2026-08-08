@@ -134,22 +134,36 @@ class Server:
         enabled = {}
         for k, v in self.config.get("tools", {}).items():
             if v and isinstance(v, dict):
-                enabled[k] = v
+                enabled[k] = self._mask_api_key(v)
         gate = "none"
         if self.config.get("authToken"):
             gate = "token"
         elif self.config.get("allowedLogins"):
             gate = "tailscale"
+        providers = {}
+        for name, p in (self.config.get("providers") or {}).items():
+            if isinstance(p, dict):
+                providers[name] = self._mask_api_key(dict(p))
         return {
             "roots": self.config.get("roots", []),
             "projectsRoot": projects_root,
             "tools": enabled,
-            "providers": self.config.get("providers", {}),
+            "providers": providers,
             "configPath": config_path,
             "bindHost": self.config.get("bindHost", "0.0.0.0"),
             "port": effective_port(self.config.get("port")),
             "gate": gate,
         }
+
+    @staticmethod
+    def _mask_api_key(entry: dict) -> dict:
+        """Never send plaintext apiKey to the browser (Issue 2.2). Mask to a
+        'configured' marker; the agent edit form treats a masked value as
+        'keep existing' and an empty string as 'clear'."""
+        if isinstance(entry, dict) and entry.get("apiKey"):
+            key = str(entry["apiKey"])
+            entry["apiKey"] = ("****" + key[-4:]) if len(key) > 4 else "****"
+        return entry
 
     def _claude_history_mtime(self, cwd: str) -> float:
         proj = os.path.abspath(cwd).replace(":", "-").replace("\\", "-").replace("/", "-").replace("_", "-")
@@ -359,8 +373,20 @@ class Server:
             }, headers)
 
         if path == "/api/fs/list" and method == "GET":
+            raw = query.get("path", [""])[0]
+            if raw:
+                # Directory enumeration is restricted to registered roots
+                # (and their subdirs). Deny arbitrary paths like /etc.
+                req_path = os.path.abspath(raw)
+                allowed = [os.path.abspath(r)
+                           for r in (self.config.get("roots") or [])] + \
+                          [os.path.abspath(f)
+                           for f in (self.config.get("extraFolders") or [])]
+                if not any(req_path == a or req_path.startswith(a + os.sep)
+                           for a in allowed):
+                    raise HttpError(403, "path outside registered roots")
             try:
-                entries = self._list_dir_entries(query.get("path", [""])[0])
+                entries = self._list_dir_entries(raw)
                 return await self._send_json(writer, 200, entries, headers)
             except OSError as err:
                 raise HttpError(400, str(err))
@@ -386,6 +412,7 @@ class Server:
         if path == "/api/config/tools" and method == "PUT":
             body = await self._read_json(reader, headers)
             incoming = body.get("tools") if isinstance(body.get("tools"), dict) else {}
+            from config import DEFAULT_TOOLS
             merged = dict(self.config.get("tools", {}))
             for key, val in incoming.items():
                 key = str(key)
@@ -395,6 +422,18 @@ class Server:
                     continue
                 if not isinstance(val, dict):
                     continue
+                # Security: `command` determines what gets exec'd. Only allow
+                # a tool's command to be one of the built-in defaults — never
+                # an arbitrary path/string (that would be a remote RCE via
+                # PUT /api/config/tools). New tools must use a known command.
+                if "command" in val and val["command"] is not None:
+                    new_cmd = str(val["command"]).strip()
+                    allowed_cmds = {str(t.get("command"))
+                                    for t in DEFAULT_TOOLS.values() if t}
+                    if new_cmd not in allowed_cmds:
+                        raise HttpError(
+                            400, f"command must be one of the built-in agent "
+                                 f"commands ({', '.join(sorted(allowed_cmds))})")
                 base = dict(merged.get(key) or {})
                 for field in ("command", "defaultArgs", "engine", "nameFlag",
                               "permissionMode", "label", "provider",
@@ -558,7 +597,17 @@ class Server:
             from reconciler import Reconciler
             claude_dir = os.path.expanduser("~/.claude/projects")
             rec = Reconciler(self.db, self.config)
-            added = await rec.reconcile(claude_dir)
+            # File scan is blocking I/O — run it in a thread so the event
+            # loop (and every other session) stays responsive.
+            from reconciler import scan_claude_logs
+            items = await asyncio.get_event_loop().run_in_executor(
+                None, scan_claude_logs, claude_dir)
+            added = 0
+            for u in items:
+                try:
+                    added += await rec._add_one(u, "claude")
+                except Exception:  # noqa: BLE001
+                    continue
             return await self._send_json(writer, 200, {"added": added}, headers)
 
         # --- backups -----------------------------------------------------------
@@ -792,6 +841,23 @@ class Server:
     async def _handle_ws_upgrade(self, reader: asyncio.StreamReader,
                                  writer: asyncio.StreamWriter, target: str,
                                  headers: dict[str, str]) -> None:
+        # Origin check (Issue 3.4, defense in depth): reject cross-site
+        # WebSocket connections so a malicious page can't ride the user's
+        # session cookie to open a terminal. Browsers send Origin on WS;
+        # missing Origin (non-browser clients) is allowed for tooling.
+        origin = headers.get("origin") or headers.get("Origin")
+        if origin:
+            host = headers.get("host") or headers.get("Host") or ""
+            try:
+                from urllib.parse import urlparse as _up
+                o_host = _up(origin).netloc
+                if o_host and o_host != host and o_host not in ("localhost", "127.0.0.1"):
+                    writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    writer.close()
+                    return
+            except ValueError:
+                pass
         path = urllib.parse.urlparse(target).path
         m = re.match(r"^/ws/sessions/([^/]+)$", path)
         if not m:
@@ -1039,6 +1105,18 @@ async def main() -> None:
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
+
+    # Secure-by-default: refuse to listen on non-loopback addresses while the
+    # gate is off. With bindHost=0.0.0.0 and no authToken/allowedLogins, any
+    # LAN/internet client can rewrite tools.command and run arbitrary commands
+    # (RCE). Local-only is always fine; remote access REQUIRES a gate.
+    _loopbacks = ("127.0.0.1", "::1", "localhost")
+    if bind_host not in _loopbacks and not config.get("authToken") \
+            and not config.get("allowedLogins"):
+        raise SystemExit(
+            "[webpty] REFUSING to start: bindHost is not loopback but no "
+            "authToken/allowedLogins is configured (remote RCE risk). "
+            "Set config.authToken (or allowedLogins) or bind 127.0.0.1.")
 
     listener = await asyncio.start_server(on_client, bind_host, port)
 

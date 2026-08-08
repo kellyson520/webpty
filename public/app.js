@@ -120,6 +120,9 @@ async function unlockToken() {
   tokenGateErr.textContent = '验证中…';
   try {
     localStorage.setItem('webpty.token', token);
+    // Mirror to a cookie so the WebSocket handshake can auth without putting
+    // the token in the URL (Issue 3.3: no token in logs/history/Referer).
+    document.cookie = `webpty_token=${encodeURIComponent(token)}; path=/; samesite=strict; max-age=2592000`;
     const c = await api('/api/config');
     config = c;
     tokenGate.hidden = true;
@@ -127,6 +130,7 @@ async function unlockToken() {
     await bootstrap();
   } catch (e) {
     localStorage.removeItem('webpty.token');
+    document.cookie = 'webpty_token=; path=/; max-age=0';
     tokenGateBtn.disabled = false;
     tokenGateErr.textContent = e.message.includes('forbidden') ? '令牌错误，请重试' : e.message;
   }
@@ -390,9 +394,9 @@ function connectSocket(entry, session, attempt = 0) {
   if (live.get(session.id) !== entry) return; // entry was disposed during retry
   try { entry.socket?.close(); } catch {}
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = localStorage.getItem('webpty.token');
-  const q = token ? `?token=${encodeURIComponent(token)}` : '';
-  const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}${q}`);
+  // No ?token= in the URL — the webpty_token cookie travels with the
+  // handshake (Issue 3.3 keeps the token out of logs/history/Referer).
+  const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     attempt = 0;
@@ -933,9 +937,9 @@ function connectChatSocket(entry, session, attempt = 0) {
   if (live.get(session.id) !== entry) return;
   try { entry.socket?.close(); } catch {}
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = localStorage.getItem('webpty.token');
-  const q = token ? `?token=${encodeURIComponent(token)}` : '';
-  const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}${q}`);
+  // No ?token= in the URL — the webpty_token cookie travels with the
+  // handshake (Issue 3.3 keeps the token out of logs/history/Referer).
+  const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
   ws.onopen = () => { attempt = 0; };
   ws.onmessage = (event) => {
     if (typeof event.data !== 'string') return;
@@ -1150,13 +1154,17 @@ function prettyInput(input) {
 
 // --- minimal, safe markdown → HTML (escapes first, then limited formatting) -
 function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function renderInline(s) {
   s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
+  // Link URLs: exclude quote/angle/backtick chars so the href attribute can
+  // never be escaped (stored-XSS via onmouseover=... — Issue 2.3), and keep
+  // the protocol whitelist (http/https only).
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s"'<>`]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
   return s;
 }
 function renderMarkdown(text) {
@@ -2651,8 +2659,8 @@ async function refreshAgentsPanel() {
         const f = el.dataset.field;
         const v = f === 'engine' ? el.value : el.value.trim();
         if (f === 'apiKey') {
-          // empty apiKey = keep the existing key (don't wipe it)
-          if (v !== '') patch[f] = v;
+          // empty OR masked (****...) = keep the existing key (don't wipe it)
+          if (v !== '' && !v.startsWith('****')) patch[f] = v;
           return;
         }
         if (f === 'nameFlag' || f === 'provider') {
@@ -2781,7 +2789,8 @@ async function refreshProvidersPanel() {
         const f = el.dataset.pfield;
         const v = el.value.trim();
         if (f === 'apiKey') {
-          if (v !== '') patch[f] = v; // empty = keep existing key
+          // empty or masked (****...) = keep existing key
+          if (v !== '' && !v.startsWith('****')) patch[f] = v;
         } else if (f === 'models') {
           patch[f] = v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
         } else {

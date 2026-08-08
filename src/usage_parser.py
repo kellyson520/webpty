@@ -39,10 +39,13 @@ def parse_usage(line: str, tool: str) -> dict | None:
     if isinstance(usage, dict):
         u = _extract(usage)
         if u["tokens_in"] or u["tokens_out"] or u["cached_in"]:
+            msg = obj.get("message")
+            model = (msg.get("model") if isinstance(msg, dict) else None) \
+                or obj.get("model")
             return {
                 **u,
                 "cost": None,  # computed by cost_tracker via price_table
-                "model": obj.get("model") or obj.get("message", {}).get("model"),
+                "model": model,
                 "session_id": obj.get("session_id"),
             }
     if obj.get("type") in ("stats", "usage_event") and (

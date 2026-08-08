@@ -121,7 +121,12 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
 
 def default_config() -> dict:
     return {
-        "bindHost": "0.0.0.0",
+        # Secure-by-default: bind loopback only. Opening to 0.0.0.0 without
+        # an authToken (or allowedLogins) is a zero-credential RCE surface —
+        # any LAN/internet client could rewrite tools.command and spawn
+        # arbitrary processes. Users who want remote access must explicitly
+        # set bindHost AND enable a gate (see README).
+        "bindHost": "127.0.0.1",
         "port": 4789,
         "roots": [projects_root],
         "extraFolders": [],

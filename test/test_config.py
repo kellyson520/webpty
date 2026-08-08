@@ -36,7 +36,7 @@ class ConfigTest(unittest.TestCase):
     def test_default_created_on_first_run(self):
         c = cfg.load_config()
         self.assertTrue(os.path.exists(cfg.config_path))
-        self.assertEqual(c["bindHost"], "0.0.0.0")
+        self.assertEqual(c["bindHost"], "127.0.0.1")  # secure-by-default
         self.assertIn("claude", c["tools"])
         self.assertIn("codex", c["tools"])
         self.assertIn("reasonix", c["tools"])

@@ -15,6 +15,7 @@ import os
 import selectors
 import signal
 import socket
+import struct
 import sys
 import time
 from collections.abc import Iterable
@@ -452,6 +453,25 @@ def _client_read(sock: socket.socket) -> None:
 
 def on_connection(server: socket.socket) -> None:
     sock, _addr = server.accept()
+    # Security (Issue 2.4): only the user who started pty-host may connect —
+    # otherwise any local user could spawn arbitrary commands (privilege
+    # escalation if webpty runs as root). Verify the peer's UID via
+    # SO_PEERCRED and drop others.
+    try:
+        cred = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        peer_uid = struct.unpack("3i", cred)[1]  # pid, uid, gid
+    except (OSError, struct.error):
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return
+    if peer_uid != os.getuid():
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return
     sock.setblocking(False)
     state = {"buf": bytearray(), "sessions": set()}
     _client_state[sock.fileno()] = state
@@ -468,6 +488,10 @@ def main() -> None:
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(PIPE_NAME)
+    try:
+        os.chmod(PIPE_NAME, 0o700)  # only the owner may connect (Issue 2.4)
+    except OSError:
+        pass
     server.listen(16)
     server.setblocking(False)
     sel.register(server, selectors.EVENT_READ, ("accept", server))

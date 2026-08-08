@@ -44,6 +44,49 @@ def redact_config(obj):
     return obj
 
 
+def sanitize_import_config(cfg: dict) -> dict:
+    """Filter an imported config so it can never inject credentials or
+    executable fields (Issue 1: RCE / auth takeover via migrate import).
+
+    - credentials (authToken / allowedLogins / *key* / *password* / *token*)
+      are dropped entirely (the receiver keeps its own)
+    - tools: `command` must be a built-in default command; otherwise the tool
+      entry is dropped
+    - providers: apiKey is dropped
+    """
+    from config import DEFAULT_TOOLS
+    allowed_cmds = {str(t.get("command"))
+                    for t in DEFAULT_TOOLS.values() if t}
+    out = {}
+    for k, v in cfg.items():
+        if _is_sensitive(k):
+            continue  # never import credentials
+        if k == "tools" and isinstance(v, dict):
+            tools = {}
+            for name, tv in v.items():
+                if not isinstance(tv, dict):
+                    continue
+                t = dict(tv)
+                cmd = str(t.get("command") or "")
+                if cmd and cmd not in allowed_cmds:
+                    continue  # drop tools with non-builtin commands
+                t.pop("apiKey", None)
+                tools[name] = t
+            out[k] = tools
+            continue
+        if k == "providers" and isinstance(v, dict):
+            providers = {}
+            for name, pv in v.items():
+                if isinstance(pv, dict):
+                    p = dict(pv)
+                    p.pop("apiKey", None)
+                    providers[name] = p
+            out[k] = providers
+            continue
+        out[k] = v
+    return out
+
+
 class WorkerInterface:
     """Cluster reservation: a controller aggregates export_state() from each
     executor; single-node deployments implement this directly."""
@@ -142,6 +185,10 @@ class Migrator(WorkerInterface):
         if not isinstance(incoming, dict):
             return {"status": "error", "message": "invalid package",
                     "mode": mode}
+        # Security: sanitize the imported config BEFORE applying it. Never
+        # import credentials or executable fields from an untrusted package —
+        # that would be config injection (RCE / auth takeover).
+        incoming = sanitize_import_config(incoming)
         if mode == "dry-run":
             current = dict(self.config)
             changed = []

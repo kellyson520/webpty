@@ -70,11 +70,10 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("local-token", blob)
         self.assertNotIn("local-smtp-pass", blob)
         by_key = {c["key"]: c for c in res["changes"]}
-        # 顶层敏感键:只标注 redacted
+        # 敏感键被 sanitize 完全拒绝导入:不出现在变更列表(比 redacted 更安全)
         for k in ("authToken", "allowedLogins"):
-            self.assertIn(k, by_key, f"{k} should appear as changed")
-            self.assertEqual(by_key[k]["incoming"], "redacted")
-        # 嵌套敏感值(notify.smtp.password)随所属键一起脱敏,不回显明文
+            self.assertNotIn(k, by_key, f"{k} must never be importable")
+        # 嵌套敏感值(notify.smtp.password)导出时已脱敏为空
         self.assertEqual(by_key["notify"]["incoming"]["smtp"]["password"], "")
         # 非敏感键:展示 incoming 值
         self.assertEqual(by_key["port"]["incoming"], 4790)
@@ -196,5 +195,26 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(a) > 8)
 
 
+    async def test_sanitize_blocks_rce_and_credentials(self):
+        """导入恶意包:非内置 command 工具被丢弃、authToken 被拒。"""
+        from migrator import sanitize_import_config
+        evil = {
+            "authToken": "attacker-token",
+            "tools": {
+                "good": {"command": "bash", "defaultArgs": "-c"},
+                "evil": {"command": "/bin/sh", "defaultArgs": "-c id"},
+            },
+            "providers": {"deepseek": {"baseUrl": "https://x", "apiKey": "sk-evil"}},
+            "port": 9999,
+        }
+        clean = sanitize_import_config(evil)
+        self.assertNotIn("authToken", clean)
+        self.assertIn("good", clean["tools"])
+        self.assertNotIn("evil", clean["tools"])
+        self.assertNotIn("apiKey", clean["providers"]["deepseek"])
+        self.assertEqual(clean["port"], 9999)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -40,22 +40,27 @@ class Reconciler:
     async def reconcile(self, projects_dir: str, tool: str = "claude") -> int:
         added = 0
         for u in scan_claude_logs(projects_dir):
-            key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
-            dup = await self.db.query_one(
-                "SELECT 1 AS x FROM token_usage WHERE session_id=? AND "
-                "tokens_in=? AND tokens_out=? LIMIT 1",
-                key)
-            if dup:
-                continue
-            model = u.get("model") or tool
-            cost = u.get("cost")
-            if cost is None:
-                cost = cost_for(model, u["tokens_in"], u["tokens_out"],
-                                self.config, cached_in=u.get("cached_in", 0))
-            await self.db.add_usage({
-                "project": u.get("project"), "tool": tool, "model": model,
-                "session_id": u.get("session_id"),
-                "tokens_in": u["tokens_in"], "tokens_out": u["tokens_out"],
-                "cost": cost, "source": "posthoc"})
-            added += 1
+            added += await self._add_one(u, tool)
         return added
+
+    async def _add_one(self, u: dict, tool: str) -> int:
+        """Insert a single scanned usage row (dedup + cost). Returns 1 when
+        inserted, 0 when it was a duplicate."""
+        key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
+        dup = await self.db.query_one(
+            "SELECT 1 AS x FROM token_usage WHERE session_id=? AND "
+            "tokens_in=? AND tokens_out=? LIMIT 1",
+            key)
+        if dup:
+            return 0
+        model = u.get("model") or tool
+        cost = u.get("cost")
+        if cost is None:
+            cost = cost_for(model, u["tokens_in"], u["tokens_out"],
+                            self.config, cached_in=u.get("cached_in", 0))
+        await self.db.add_usage({
+            "project": u.get("project"), "tool": tool, "model": model,
+            "session_id": u.get("session_id"),
+            "tokens_in": u["tokens_in"], "tokens_out": u["tokens_out"],
+            "cost": cost, "source": "posthoc"})
+        return 1

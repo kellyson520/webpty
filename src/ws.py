@@ -29,6 +29,10 @@ class _Incomplete:
 
 _INCOMPLETE = _Incomplete()
 
+# Maximum inbound frame payload (16MB). Prevents a malicious peer from
+# declaring a 2^63-1 length and draining server memory (Issue 3.1).
+MAX_FRAME_BYTES = 16 * 1024 * 1024
+
 
 class WebSocketError(Exception):
     pass
@@ -194,6 +198,8 @@ class WebSocket:
             if len(self._recv_buf) < 10:
                 return _INCOMPLETE
             length = struct.unpack(">Q", self._recv_buf[2:10])[0]
+            if length > MAX_FRAME_BYTES:
+                raise WebSocketError("frame too large")
             offset = 10
         mask_key = None
         if masked:
@@ -234,6 +240,8 @@ class WebSocket:
                 if len(self._recv_buf) < 10:
                     return _INCOMPLETE
                 length = struct.unpack(">Q", self._recv_buf[2:10])[0]
+                if length > MAX_FRAME_BYTES:
+                    raise WebSocketError("frame too large")
                 offset = 10
             mask_key = None
             if masked:

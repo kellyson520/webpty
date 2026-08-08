@@ -113,3 +113,16 @@ class OutboxResyncTest(unittest.IsolatedAsyncioTestCase):
         ob.stop()
         self.assertTrue(ob.dropped > 0, "应有丢帧")
         self.assertTrue(resynced, "丢帧应触发 on_resync")
+
+
+class FrameLimitTest(unittest.IsolatedAsyncioTestCase):
+    """超长帧声明必须被拒绝（内存 DoS 防护）。"""
+
+    async def test_huge_extended_length_rejected(self):
+        from ws import WebSocket, WebSocketError
+        import asyncio as _a
+        ws = WebSocket(_a.StreamReader(), None)
+        # 64-bit 长度头声明 2^40（远超 16MB 上限）
+        ws._recv_buf = bytearray(b"\x81\x7f" + (2 ** 40).to_bytes(8, "big"))
+        with self.assertRaises(WebSocketError):
+            ws._parse_frame()

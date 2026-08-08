@@ -110,7 +110,8 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
     row = await db.get_backup(backup_id)
     if not row:
         return {"ok": False, "message": "backup not found"}
-    path = os.path.join(data_dir, "backups", row["filename"])
+    path = os.path.join(data_dir, "backups",
+                        os.path.basename(row["filename"]))
     if not os.path.exists(path):
         return {"ok": False, "message": "file missing"}
     if _sha256_file(path) != row["sha256"]:
@@ -146,6 +147,8 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
     except (OSError, json.JSONDecodeError):
         existing = {}
     merged = dict(existing)
+    from migrator import sanitize_import_config
+    cfg = sanitize_import_config(cfg)  # 拒绝导入凭据/可执行字段(同 migrate)
     merged.update(cfg)  # merge 语义：备份覆盖冲突键，保留现有新增键
     _atomic_write_json(cfg_path, merged)
     # 恢复通知规则:同 id 覆盖,其余新增(sessions 是运行时状态,不恢复)

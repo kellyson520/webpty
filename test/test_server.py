@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest import mock
 
@@ -187,12 +188,16 @@ class ServerIntegrationTest(unittest.TestCase):
                           {"tools": {"gemini": None}})
         self.assertEqual(st, 200)
         self.assertNotIn("gemini", j["tools"])
-        # 新增自定义工具
+        # 新增自定义工具:command 必须为内置命令(安全白名单)
         st, j = self._req("/api/config/tools", "PUT",
-                          {"tools": {"my-agent": {"command": "myagent",
+                          {"tools": {"my-agent": {"command": "bash",
                                                   "defaultArgs": "--x"}}})
         self.assertEqual(st, 200)
-        self.assertEqual(j["tools"]["my-agent"]["command"], "myagent")
+        self.assertEqual(j["tools"]["my-agent"]["command"], "bash")
+        # 非内置 command 被拒绝(防 RCE)
+        st, _ = self._req("/api/config/tools", "PUT",
+                          {"tools": {"evil": {"command": "/bin/sh"}}})
+        self.assertEqual(st, 400)
         # 非法值忽略（非 dict / 未知字段不破坏现有）
         st, j = self._req("/api/config/tools", "PUT",
                           {"tools": {"bash": 42, "codex": {"bogus": 1}}})
@@ -203,7 +208,7 @@ class ServerIntegrationTest(unittest.TestCase):
         cfg = json.load(open(os.path.join(self.data_dir, "config.json")))
         self.assertEqual(cfg["tools"]["codex"]["defaultArgs"], "--full-auto")
         self.assertIsNone(cfg["tools"]["gemini"])
-        self.assertEqual(cfg["tools"]["my-agent"]["command"], "myagent")
+        self.assertEqual(cfg["tools"]["my-agent"]["command"], "bash")
 
     def test_tools_field_null_clears_not_disables(self):
         # 字段级 null（如 nameFlag=null）只清除字段，不禁用工具
@@ -252,7 +257,18 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertGreaterEqual(len(j), 1)
 
     def test_fs_list_bad_path(self):
-        status, _ = self._req("/api/fs/list?path=/definitely/not/here")
+        # Security (Issue 3.5.6): enumeration is restricted to registered
+        # roots — an outside path is denied with 403 before any filesystem
+        # access.
+        status, j = self._req("/api/fs/list?path=/definitely/not/here")
+        self.assertEqual(status, 403)
+        self.assertIn("outside", j.get("error", ""))
+
+    def test_fs_list_missing_path_inside_root(self):
+        # Inside a registered root but nonexistent → OSError → 400.
+        status, _ = self._req(
+            "/api/fs/list?path=" + urllib.parse.quote(
+                os.path.join(self.proj_root, "__nope__")))
         self.assertEqual(status, 400)
 
     # --- backup restore keeps memory config in sync -----------------------
@@ -465,6 +481,19 @@ async def asyncio_open_conn(port):
     import asyncio
 
     return await asyncio.open_connection("127.0.0.1", port)
+
+
+
+    def test_fs_list_restricted_to_roots(self):
+        # roots 内路径允许
+        st, _ = self._req(f"/api/fs/list?path={self.proj_root}")
+        self.assertEqual(st, 200)
+        # roots 外路径拒绝（403）
+        st, _ = self._req("/api/fs/list?path=/etc")
+        self.assertEqual(st, 403)
+        # 空 path（系统根浏览起点）允许
+        st, _ = self._req("/api/fs/list")
+        self.assertEqual(st, 200)
 
 
 if __name__ == "__main__":

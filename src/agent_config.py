@@ -134,7 +134,30 @@ def read_config(tool: str) -> dict[str, Any]:
             content = f.read()
     except OSError as err:
         return {"ok": False, "error": str(err)}
+    # Mask secrets in the raw view (Issue 2.2): keys like
+    # api_key / ANTHROPIC_AUTH_TOKEN / password must not be sent to the
+    # browser in plaintext. TOML `key = "value"` and JSON "key": "value".
+    content = _mask_secret_values(content)
     return {"ok": True, "path": path, "content": content}
+
+
+_SECRET_KEY_RE = re.compile(
+    r'(?im)^(\s*["\']?(?:api_?key|auth_token|password|token|secret)'
+    r'["\']?\s*[:=]\s*["\'])([^"\']+)(["\'])')
+_SECRET_KEY_RE2 = re.compile(
+    r'(?i)("(?:apiKey|authToken|password|token|secret)"\s*:\s*")([^"]+)(")')
+
+
+def _mask_secret_values(text: str) -> str:
+    """Replace secret values with **** (keep first 4 + last 4 if long)."""
+
+    def _mask(m):
+        val = m.group(2)
+        masked = "****" + val[-4:] if len(val) > 8 else "****"
+        return m.group(1) + masked + m.group(3)
+
+    out = _SECRET_KEY_RE.sub(_mask, text)
+    return _SECRET_KEY_RE2.sub(_mask, out)
 
 
 def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> tuple[str, bool]:

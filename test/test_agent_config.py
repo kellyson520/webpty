@@ -133,3 +133,19 @@ class AgentConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaskTest(unittest.TestCase):
+    def test_read_config_masks_secrets(self):
+        """raw 配置视图中的 api_key / AUTH_TOKEN 被掩蔽。"""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="wp-mask-")
+        p = os.path.join(tmp, "config.toml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('model = "gpt-5.4"\napi_key = "sk-super-secret-123"\n')
+        with mock.patch.object(ac, "AGENT_CONFIG_PATHS", {"codex": [p]}):
+            with mock.patch.object(ac, "_HOME", tmp):
+                res = ac.read_config("codex")
+        self.assertTrue(res["ok"])
+        self.assertNotIn("sk-super-secret-123", res["content"])
+        self.assertIn("****", res["content"])

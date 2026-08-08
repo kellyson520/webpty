@@ -87,6 +87,12 @@ def _append_log(log_path: str, text: str) -> None:
         return
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        # Rotate at 5MB (Issue 3 hardening): rename to .1, keep newest only.
+        try:
+            if os.path.getsize(log_path) > 5 * 1024 * 1024:
+                os.replace(log_path, log_path + ".1")
+        except OSError:
+            pass
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(text)
     except OSError:
@@ -211,6 +217,16 @@ class SessionManager:
 
     # --- start / stop ------------------------------------------------------------
     async def start(self, sid: str) -> dict | None:
+        session = self.sessions.get(sid)
+        if not session:
+            return None
+        lock = session.get("_lock")
+        if lock is not None:
+            async with lock:
+                return await self._start_locked(sid)
+        return await self._start_locked(sid)
+
+    async def _start_locked(self, sid: str) -> dict | None:
         session = self.sessions.get(sid)
         if not session:
             return None
@@ -616,6 +632,16 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return False
+        lock = session.get("_lock")
+        if lock is not None:
+            async with lock:
+                return await self._stop_locked(sid)
+        return await self._stop_locked(sid)
+
+    async def _stop_locked(self, sid: str) -> bool:
+        session = self.sessions.get(sid)
+        if not session:
+            return False
         if session.get("engine") == "agent":
             proc = session.get("proc")
             if proc:
@@ -857,6 +883,7 @@ class SessionManager:
     def _inflate(self, stored: dict) -> dict:
         tool = self.config.get("tools", {}).get(stored.get("tool")) or {}
         engine = tool.get("engine", "pty")
+        import asyncio as _aio
         return {
             "id": stored.get("id") or str(uuid.uuid4()),
             "name": stored.get("name"),
@@ -864,6 +891,9 @@ class SessionManager:
             "tool": stored.get("tool"),
             "args": stored.get("args") or "",
             "autostart": bool(stored.get("autostart")),
+            # Serializes start/stop/remove per session (Issue 3: no races
+            # where stop kills a freshly restarted process).
+            "_lock": _aio.Lock(),
             "state": "stopped",
             "pid": None,
             "proc": None,
