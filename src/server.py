@@ -751,10 +751,23 @@ async def main() -> None:
         backup.interval_hours (default 24h); errors are logged, never fatal.
         """
         from backup import create_backup_async, rotate
-        interval = float((config.get("backup") or {}).get("interval_hours", 24))
-        retention = int((config.get("backup") or {}).get("retention", 7))
+
+        def _backup_settings() -> tuple[float, int]:
+            """Parse interval_hours/retention defensively; fall back to
+            defaults (24h / 7) and log on non-numeric config values so a
+            bad value can never kill the loop.
+            """
+            try:
+                interval = float((config.get("backup") or {}).get("interval_hours", 24))
+                retention = int((config.get("backup") or {}).get("retention", 7))
+                return interval, retention
+            except (TypeError, ValueError) as err:
+                log_error("backup", err)
+                return 24.0, 7
+
         await asyncio.sleep(30)  # 启动后 30s 首次
         while True:
+            interval, retention = _backup_settings()
             try:
                 await create_backup_async(data_dir, config, db)
                 await rotate(db, retention)
@@ -768,7 +781,7 @@ async def main() -> None:
         except Exception as err:  # noqa: BLE001
             print(f"[webpty] autostart error: {err}", flush=True)
 
-    asyncio.create_task(_backup_loop())
+    backup_task = asyncio.create_task(_backup_loop())
     asyncio.create_task(_autostart())
 
     try:
@@ -776,6 +789,15 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        # Cancel the infinite backup loop before tearing down the db so no
+        # in-flight backup touches a closed connection. _autostart is a
+        # short-lived one-shot task and needs no handle (matches existing
+        # behaviour).
+        backup_task.cancel()
+        try:
+            await backup_task
+        except asyncio.CancelledError:
+            pass
         server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()
