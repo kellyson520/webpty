@@ -366,6 +366,29 @@ class Server:
             save_config(self.config)
             return await self._send_json(writer, 200, {"roots": self.config["roots"]}, headers)
 
+        if path == "/api/config/tools" and method == "PUT":
+            body = await self._read_json(reader, headers)
+            incoming = body.get("tools") if isinstance(body.get("tools"), dict) else {}
+            merged = dict(self.config.get("tools", {}))
+            for key, val in incoming.items():
+                key = str(key)
+                if val is None or val is False:
+                    merged[key] = None  # disabled marker (persisted; hidden by _api_config)
+                    continue
+                if not isinstance(val, dict):
+                    continue
+                base = dict(merged.get(key) or {})
+                for field in ("command", "defaultArgs", "engine", "nameFlag",
+                              "permissionMode", "label"):
+                    if field in val:
+                        base[field] = val[field]
+                merged[key] = base
+            self.config["tools"] = merged
+            save_config(self.config)
+            enabled = {k: v for k, v in merged.items()
+                       if v and isinstance(v, dict)}
+            return await self._send_json(writer, 200, {"tools": enabled}, headers)
+
         if path == "/api/sessions" and method == "GET":
             return await self._send_json(writer, 200, self.sessions.list(), headers)
 

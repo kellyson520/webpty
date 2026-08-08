@@ -1488,6 +1488,7 @@ function openMenu(sessionId) {
 
   addMenuSep();
   addMenuLabel('扩展');
+  addMenuItem('Agent 管理', openAgentsPanel);
   addMenuItem('通知中心', openNotifyPanel);
   addMenuItem('成本账单', openCostPanel);
   addMenuItem('备份管理', openBackupPanel);
@@ -2107,13 +2108,34 @@ async function refreshNotifyPanel() {
     api('/api/notify/rules').catch(() => ({ rules: [] })),
     api('/api/notify/messages?page=1').catch(() => ({ items: [] })),
   ]);
-  notifyRules.innerHTML = '<h4>规则</h4>' + ((rules.rules || []).map((r) =>
-    `<div class="notify-item">${esc(r.name)} — ${esc(r.event_type)}
-     ${r.enabled ? '' : '(停用)'}</div>`).join('') || '<p>无规则</p>');
-  notifyMessages.innerHTML = '<h4>消息记录</h4>' + ((msgs.items || []).slice(0, 20).map((m) =>
-    `<div class="notify-item ${esc(m.level)}">[${esc(m.level)}] ${esc(m.title)}
-     <span class="muted">${esc(m.tool || '')} ${esc(m.project || '')}</span></div>`
-  ).join('') || '<p>暂无消息</p>');
+  const ruleList = rules.rules || [];
+  const msgList = msgs.items || [];
+  document.getElementById('notify-rules-count').textContent = ruleList.length;
+  document.getElementById('notify-messages-count').textContent = msgs.total ?? msgList.length;
+  notifyRules.innerHTML = ruleList.map((r) =>
+    `<div class="panel-item">
+       <span class="dot" style="background:${r.enabled ? 'var(--accent)' : 'var(--dot)'}"></span>
+       <div class="item-main">
+         <div class="item-title">${esc(r.name)} <span class="badge">${esc(r.event_type)}</span></div>
+         <div class="item-sub">level: ${esc(r.level)} · action: ${esc(r.action)}
+           ${r.quiet_start ? ` · 静默 ${esc(r.quiet_start)}–${esc(r.quiet_end)}` : ''}
+           ${r.enabled ? '' : ' · <span style="color:var(--muted)">已停用</span>'}</div>
+       </div>
+     </div>`).join('') ||
+    `<div class="empty-tip">暂无规则 — 点击「添加规则」创建第一条通知规则</div>`;
+  notifyMessages.innerHTML = msgList.slice(0, 20).map((m) => {
+    const t = new Date((m.ts || 0) * 1000);
+    const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
+    const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
+    return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')}">
+      <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
+      <div class="item-main">
+        <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
+        <div class="item-sub">${esc(m.tool || '')} ${esc(m.project || '')} · ${when} · ${m.delivered ? '已发送' : '待重试'}</div>
+      </div>
+    </div>`;
+  }).join('') ||
+    `<div class="empty-tip">暂无消息 — 会话事件触发后将显示在这里</div>`;
 }
 document.getElementById('notify-close').onclick = () => { notifyBackdrop.hidden = true; };
 notifyBackdrop.addEventListener('click', (ev) => {
@@ -2153,15 +2175,22 @@ async function refreshCostPanel() {
     api('/api/cost/alerts').catch(() => []),
   ]);
   const alertsArr = Array.isArray(alerts) ? alerts : [];
+  const over = alertsArr.some((a) => a.active);
   document.getElementById('cost-cards').innerHTML =
-    `<div class="cost-card"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div>成本</div></div>` +
-    `<div class="cost-card"><div class="v">${esc(sum.tokens_in || 0)}</div><div>输入 tokens</div></div>` +
-    `<div class="cost-card"><div class="v">${esc(sum.tokens_out || 0)}</div><div>输出 tokens</div></div>` +
-    (alertsArr.some((a) => a.active) ? `<div class="cost-card" style="border-color:#e5534b"><div class="v">超限</div><div>预算</div></div>` : '');
-  document.getElementById('cost-groups').innerHTML = '<h4>按工具</h4>' +
-    ((byTool || []).map((g) => `<div class="notify-item">${esc(g.name)} —
-      $${Number(g.cost || 0).toFixed(4)} (${esc(g.tokens_in ?? 0)}/${esc(g.tokens_out ?? 0)})</div>`).join('') ||
-    '<p>暂无数据</p>');
+    `<div class="cost-card${over ? ' over' : ''}"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div class="l">总成本</div></div>` +
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_in ?? 0)}</div><div class="l">输入 tokens</div></div>` +
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_out ?? 0)}</div><div class="l">输出 tokens</div></div>` +
+    `<div class="cost-card${over ? ' over' : ''}"><div class="v">${over ? '超限' : '正常'}</div><div class="l">预算状态</div></div>`;
+  document.getElementById('cost-groups').innerHTML =
+    ((byTool || []).map((g) =>
+      `<div class="panel-item">
+         <span class="dot" style="background:var(--tool-codex)"></span>
+         <div class="item-main">
+           <div class="item-title">${esc(g.name)} <span class="badge">$${Number(g.cost || 0).toFixed(4)}</span></div>
+           <div class="item-sub">${esc(g.tokens_in ?? 0)} in / ${esc(g.tokens_out ?? 0)} out</div>
+         </div>
+       </div>`).join('') ||
+    `<div class="empty-tip">暂无数据 — Agent 使用后成本将实时统计</div>`);
 }
 document.getElementById('cost-close').onclick = () => { costBackdrop.hidden = true; };
 costBackdrop.addEventListener('click', (ev) => {
@@ -2196,11 +2225,23 @@ function openBackupPanel() {
 }
 async function refreshBackupPanel() {
   const r = await api('/api/backup/list').catch(() => ({ backups: [] }));
-  document.getElementById('backup-list').innerHTML = '<h4>快照列表</h4>' +
-    ((r.backups || []).map((b) =>
-      `<div class="notify-item">${esc(b.filename)} — ${esc((Number(b.size_bytes || 0) / 1024).toFixed(1))}KB
-       <button data-restore="${esc(b.id)}" type="button">恢复</button></div>`).join('') ||
-    '<p>暂无备份</p>');
+  const list = r.backups || [];
+  document.getElementById('backup-list-count').textContent = list.length;
+  document.getElementById('backup-list').innerHTML = list.map((b) => {
+    const t = new Date((b.created_at || 0) * 1000);
+    const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
+    return `<div class="panel-item">
+      <span class="dot" style="background:var(--accent)"></span>
+      <div class="item-main">
+        <div class="item-title">${esc(b.filename)} ${b.encrypted ? '<span class="badge warn">加密</span>' : ''}</div>
+        <div class="item-sub">${esc((Number(b.size_bytes || 0) / 1024).toFixed(1))}KB · ${when} · SHA256 ${esc((b.sha256 || '').slice(0, 10))}…</div>
+      </div>
+      <div class="item-side">
+        <button class="btn sm" data-restore="${esc(b.id)}" type="button">恢复</button>
+      </div>
+    </div>`;
+  }).join('') ||
+    `<div class="empty-tip">暂无备份 — 点击「立即备份」创建第一个快照（默认每 24h 自动备份）</div>`;
   // Re-bind restore handlers after every refresh (innerHTML replaced above).
   document.querySelectorAll('#backup-list [data-restore]').forEach((btn) => {
     btn.onclick = async () => {
@@ -2263,10 +2304,135 @@ document.getElementById('migrate-do').onclick = async () => {
       headers: { authorization: `Bearer ${localStorage.getItem('webpty.token') || ''}` },
     });
     const out = await res.json().catch(() => ({}));
+    const statusOk = out.status === 'done';
+    const badgeCls = out.status === 'error' ? 'err' : (out.status === 'dry-run' ? 'warn' : 'ok');
     document.getElementById('migrate-result').innerHTML =
-      `<div class="notify-item">状态: ${esc(out.status)} ${out.message ? '— ' + esc(out.message) : ''}
-       ${out.changes ? '<pre>' + esc(JSON.stringify(out.changes, null, 2)) + '</pre>' : ''}</div>`;
+      `<div class="panel-item ${out.status === 'error' ? 'critical' : ''}">
+         <span class="dot" style="background:${statusOk ? 'var(--accent)' : (out.status === 'error' ? 'var(--danger)' : '#d29922')}"></span>
+         <div class="item-main">
+           <div class="item-title">导入 <span class="badge ${badgeCls}">${esc(out.status)}</span></div>
+           <div class="item-sub">${esc(out.message || '')} · 模式 ${esc(mode)}</div>
+         </div>
+       </div>` +
+      (out.changes && typeof out.changes === 'object' && Object.keys(out.changes).length
+        ? `<div class="result-pre">${esc(JSON.stringify(out.changes, null, 2))}</div>` : '');
   } catch (e) {
     alert('导入失败: ' + e.message);
+  }
+};
+
+// ---- Agent management panel (ext) ----
+const agentsBackdrop = document.getElementById('agents-backdrop');
+const agentsList = document.getElementById('agents-list');
+
+function openAgentsPanel() {
+  closeMenu();
+  agentsBackdrop.hidden = false;
+  refreshAgentsPanel();
+}
+
+const AGENT_TOOL_COLORS = {
+  claude: 'var(--tool-claude)', 'claude-chat': 'var(--tool-claude)',
+  codex: 'var(--tool-codex)', reasonix: 'var(--tool-accent, var(--accent))',
+  opencode: 'var(--tool-accent, var(--accent))', agy: 'var(--tool-agy)',
+  powershell: 'var(--tool-powershell)', bash: 'var(--dot)',
+};
+
+async function refreshAgentsPanel() {
+  const cfg = await api('/api/config').catch(() => ({ tools: {} }));
+  const tools = cfg.tools || {};
+  const names = Object.keys(tools);
+  document.getElementById('agents-count').textContent = names.length;
+  agentsList.innerHTML = names.map((name) => {
+    const t = tools[name] || {};
+    const color = AGENT_TOOL_COLORS[name] || 'var(--accent)';
+    const isAgent = t.engine === 'agent' || name === 'claude-chat';
+    return `<div class="panel-item agent-row" data-agent="${esc(name)}">
+      <span class="dot" style="background:${color}"></span>
+      <div class="item-main">
+        <div class="item-title">${esc(TOOL_LABEL[name] || name)}
+          <span class="badge ${isAgent ? 'ok' : ''}">${isAgent ? 'agent' : 'pty'}</span>
+          ${t.engine ? `<span class="badge">${esc(t.engine)}</span>` : ''}</div>
+        <div class="item-sub agent-cmd">${esc(t.command || name)} ${esc(t.defaultArgs || '')}</div>
+        <div class="agent-edit">
+          <div class="row">
+            <label>command <input class="inp" data-field="command" value="${esc(t.command || '')}"></label>
+            <label>defaultArgs <input class="inp" style="min-width:200px" data-field="defaultArgs" value="${esc(t.defaultArgs || '')}"></label>
+            <label>engine
+              <select class="sel" data-field="engine">
+                <option value="">pty</option>
+                <option value="agent" ${t.engine === 'agent' ? 'selected' : ''}>agent</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <button class="btn sm primary" data-act="save">保存</button>
+            <button class="btn sm" data-act="cancel">取消</button>
+          </div>
+        </div>
+      </div>
+      <div class="item-side agent-actions">
+        <button class="btn sm" data-act="edit" type="button">编辑</button>
+        <button class="btn sm danger" data-act="disable" type="button">禁用</button>
+      </div>
+    </div>`;
+  }).join('') ||
+    `<div class="empty-tip">没有可用 Agent — 在顶部输入工具名与命令添加</div>`;
+
+  // ---- row actions (re-bound after every refresh) ----
+  agentsList.querySelectorAll('.agent-row').forEach((row) => {
+    const name = row.dataset.agent;
+    row.querySelector('[data-act="edit"]').onclick = () => {
+      row.classList.add('editing');
+    };
+    row.querySelector('[data-act="cancel"]').onclick = () => {
+      row.classList.remove('editing');
+    };
+    row.querySelector('[data-act="save"]').onclick = async () => {
+      const patch = {};
+      row.querySelectorAll('[data-field]').forEach((el) => {
+        const f = el.dataset.field;
+        patch[f] = f === 'engine' ? el.value : el.value.trim();
+      });
+      if (patch.engine === '') delete patch.engine;
+      try {
+        await api('/api/config/tools', {
+          method: 'PUT', body: JSON.stringify({ tools: { [name]: patch } }) });
+        row.classList.remove('editing');
+        refreshAgentsPanel();
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    };
+    row.querySelector('[data-act="disable"]').onclick = async () => {
+      if (!confirm(`禁用 Agent「${name}」？（可从配置重新启用）`)) return;
+      try {
+        await api('/api/config/tools', {
+          method: 'PUT', body: JSON.stringify({ tools: { [name]: null } }) });
+        refreshAgentsPanel();
+      } catch (e) {
+        alert('禁用失败: ' + e.message);
+      }
+    };
+  });
+}
+
+document.getElementById('agents-close').onclick = () => { agentsBackdrop.hidden = true; };
+agentsBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === agentsBackdrop) agentsBackdrop.hidden = true;
+});
+document.getElementById('agents-new-add').onclick = async () => {
+  const name = document.getElementById('agents-new-name').value.trim();
+  const cmd = document.getElementById('agents-new-cmd').value.trim();
+  if (!name || !cmd) { alert('请填写工具名与命令'); return; }
+  try {
+    await api('/api/config/tools', {
+      method: 'PUT', body: JSON.stringify({
+        tools: { [name]: { command: cmd, defaultArgs: '', nameFlag: null } } }) });
+    document.getElementById('agents-new-name').value = '';
+    document.getElementById('agents-new-cmd').value = '';
+    refreshAgentsPanel();
+  } catch (e) {
+    alert('添加失败: ' + e.message);
   }
 };

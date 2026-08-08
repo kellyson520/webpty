@@ -161,6 +161,35 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(j["roots"], [self.proj_root])
 
+    def test_tools_put_updates_and_disables(self):
+        # 修改现有工具 defaultArgs
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"codex": {"defaultArgs": "--full-auto"}}})
+        self.assertEqual(st, 200)
+        self.assertEqual(j["tools"]["codex"]["defaultArgs"], "--full-auto")
+        # 禁用工具（null 标记）
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"gemini": None}})
+        self.assertEqual(st, 200)
+        self.assertNotIn("gemini", j["tools"])
+        # 新增自定义工具
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"my-agent": {"command": "myagent",
+                                                  "defaultArgs": "--x"}}})
+        self.assertEqual(st, 200)
+        self.assertEqual(j["tools"]["my-agent"]["command"], "myagent")
+        # 非法值忽略（非 dict / 未知字段不破坏现有）
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"bash": 42, "codex": {"bogus": 1}}})
+        self.assertEqual(st, 200)
+        self.assertIn("codex", j["tools"])
+        self.assertNotIn("bogus", j["tools"]["codex"])
+        # 重启后持久化（load_config 合并保留用户编辑）
+        cfg = json.load(open(os.path.join(self.data_dir, "config.json")))
+        self.assertEqual(cfg["tools"]["codex"]["defaultArgs"], "--full-auto")
+        self.assertIsNone(cfg["tools"]["gemini"])
+        self.assertEqual(cfg["tools"]["my-agent"]["command"], "myagent")
+
     def test_fs_list(self):
         status, j = self._req("/api/fs/list")
         self.assertEqual(status, 200)
