@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
+from logging_util import log_error
 from price_table import cost_for
 from usage_parser import parse_usage
 
@@ -25,12 +25,20 @@ class CostTracker:
     def handle_agent_event(self, event: dict) -> None:
         task = asyncio.create_task(self._record(event))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._on_record_done)
+
+    def _on_record_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        err = task.exception()
+        if err is not None:
+            log_error("cost_tracker", err)
 
     async def _record(self, event: dict) -> None:
         usage = None
-        if event.get("usage") is not None:
-            u = event["usage"]
+        u = event.get("usage")
+        if isinstance(u, dict) and u:
             usage = {
                 "tokens_in": int(u.get("input_tokens") or 0),
                 "tokens_out": int(u.get("output_tokens") or 0),

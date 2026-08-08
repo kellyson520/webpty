@@ -474,6 +474,13 @@ class SessionManager:
             self._emit("change", self._public(session))
             return False
 
+        # Lines that carry usage but no transcript item (message_start /
+        # message_delta / ...) are re-emitted verbatim so business-layer
+        # listeners (CostTracker) can meter them in realtime.
+        usage = evt.get("usage")
+        if isinstance(usage, dict) and usage:
+            self._emit("agentEvent", session["id"], {
+                "type": "usage", "raw": line, "tool": session.get("tool")})
         return False
 
     def _push_agent(self, session: dict, item: dict) -> None:
