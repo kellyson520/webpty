@@ -64,6 +64,24 @@ def has_prior_conversation(cwd: str) -> bool:
     return bool(glob.glob(os.path.join(base, encode_claude_project(cwd), "*.jsonl")))
 
 
+def _reasonix_has_history(cwd: str) -> bool:
+    """True when reasonix has persisted sessions FOR THIS PROJECT DIRECTORY.
+
+    reasonix stores sessions per working directory under
+    ~/.reasonix/projects/<encoded-cwd>/sessions/ — encoding is
+    '/root' → '-root', '/root/webpty' → '-root-webpty'. Checking the
+    project-scoped dir (not the global store) means `-c` resumes the
+    sessions of THIS project, never the ones held by reasonix serve
+    (which runs in a different cwd and locks its own directory).
+    """
+    import glob
+
+    enc = "-" + str(cwd).replace("/", "-").lstrip("-")
+    base = os.path.join(os.path.expanduser("~"), ".reasonix",
+                        "projects", enc, "sessions")
+    return bool(glob.glob(os.path.join(base, "*.jsonl")))
+
+
 def _append_log(log_path: str, text: str) -> None:
     if not log_path:
         return
@@ -214,10 +232,23 @@ class SessionManager:
         user_resume = any(a in RESUME_FLAGS for a in user_args)
         if session.get("tool") == "claude" and not user_resume and has_prior_conversation(session.get("cwd")):
             argv.insert(0, "-c")
+        # reasonix-family: resume the previous conversation of THIS project.
+        # reasonix keeps per-cwd session history, so `-c` restores the exact
+        # project's last session (never reasonix serve's, which runs in a
+        # different cwd). Only add -c when this project actually has history —
+        # with no resumable session reasonix exits code 1 instead of starting
+        # fresh, which would make a first run fail.
+        try_continue = (
+            session.get("tool") in ("reasonix", "opencode")
+            and not user_resume
+            and _reasonix_has_history(session.get("cwd"))
+        )
         name_flag = tool.get("nameFlag")
         if name_flag and session.get("name") and name_flag not in user_args:
             argv.insert(0, session.get("name"))
             argv.insert(0, name_flag)
+        if try_continue and "-c" not in argv:
+            argv.insert(0, "-c")
 
         log_path = os.path.join(logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
         session["log_path"] = log_path
@@ -245,7 +276,20 @@ class SessionManager:
             started = await self.host.start(start_opts)
         except Exception as err:  # noqa: BLE001
             message = getattr(err, "message", None) or str(err)
-            if message != "already started":
+            # Another webpty session of the same project holds the reasonix
+            # session lock (multi-open): retry with --copy so the second
+            # session runs as a duplicated conversation instead of failing.
+            if try_continue and ("in use" in message or "already in use" in message):
+                retry_argv = [a for a in argv if a != "-c"]
+                retry_argv.insert(0, "--copy")
+                start_opts["args"] = retry_argv
+                try:
+                    started = await self.host.start(start_opts)
+                    _append_log(log_path,
+                                "[webpty] reasonix session in use — resumed with --copy\r\n")
+                except Exception as err2:  # noqa: BLE001
+                    return fail(err2)
+            elif message != "already started":
                 return fail(err)
             # Host may own this id from a prior run — probe and reattach.
             view = None

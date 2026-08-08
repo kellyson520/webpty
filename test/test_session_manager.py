@@ -371,3 +371,33 @@ class PtyHostClientReadLoopTest(unittest.IsolatedAsyncioTestCase):
         await c._read_loop()
         # 不应抛异常；行被完整解析（虽然 msg 太大无实际用途，但循环不崩）
         self.assertTrue(c._connected is False)  # EOF 后清理
+
+
+class ReasonixHistoryTest(unittest.TestCase):
+    """_reasonix_has_history 按项目目录精确判断。"""
+
+    def test_encoding_and_detection(self):
+        from unittest import mock
+        import os, tempfile
+        import session_manager as sm
+
+        tmp = tempfile.mkdtemp(prefix="wp-rxhist-")
+        # 模拟 ~/.reasonix/projects/-root-webpty/sessions/ 有会话文件
+        proj = os.path.join(tmp, ".reasonix", "projects", "-root-webpty", "sessions")
+        os.makedirs(proj, exist_ok=True)
+        open(os.path.join(proj, "20260808-010000-test.jsonl"), "w").close()
+
+        with mock.patch.object(sm, "os") as mocked_os:
+            # os.path.expanduser 需要真实，patch 其他
+            pass
+        # 直接验证编码函数
+        enc = "-" + "/root/webpty".replace("/", "-").lstrip("-")
+        self.assertEqual(enc, "-root-webpty")
+        enc_root = "-" + "/root".replace("/", "-").lstrip("-")
+        self.assertEqual(enc_root, "-root")
+
+        # 用 mock expanduser 指向 tmp
+        import session_manager as sm2
+        with mock.patch.object(sm2.os.path, "expanduser", return_value=tmp):
+            self.assertTrue(sm2._reasonix_has_history("/root/webpty"))
+            self.assertFalse(sm2._reasonix_has_history("/nonexistent"))
