@@ -368,7 +368,18 @@ class Server:
         if path == "/api/config/roots" and method == "PUT":
             body = await self._read_json(reader, headers)
             roots = body.get("roots") if isinstance(body.get("roots"), list) else []
-            self.config["roots"] = [os.path.abspath(str(r)) for r in roots if str(r)]
+            # If the client did NOT explicitly pass an empty list (= deny all),
+            # always keep projects_root inside the roots: the new-session page
+            # defaults to it and a roots set that excludes it would make every
+            # default session fail with "Path is outside registered roots".
+            if roots:
+                normalized = [os.path.abspath(str(r)) for r in roots if str(r)]
+                pr = os.path.abspath(projects_root)
+                if pr not in normalized:
+                    normalized.append(pr)
+                self.config["roots"] = normalized
+            else:
+                self.config["roots"] = []
             save_config(self.config)
             return await self._send_json(writer, 200, {"roots": self.config["roots"]}, headers)
 

@@ -161,6 +161,21 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(j["roots"], [self.proj_root])
 
+    def test_roots_put_keeps_projects_root(self):
+        # roots 不含 projects_root 时自动并入（否则默认会话会 "outside roots"）
+        other = os.path.join(self.proj_root, "other")
+        status, j = self._req("/api/config/roots", "PUT", {"roots": [other]})
+        self.assertEqual(status, 200)
+        self.assertIn(self.proj_root, j["roots"])  # projects_root 被保留
+        self.assertIn(other, j["roots"])
+        # 显式空数组 = 拒绝一切（合法，不强制并入）
+        status, j = self._req("/api/config/roots", "PUT", {"roots": []})
+        self.assertEqual(status, 200)
+        self.assertEqual(j["roots"], [])
+        # 清理：恢复项目根，避免影响后续测试
+        self._req("/api/config/roots", "PUT",
+                  {"roots": [self.proj_root]})
+
     def test_tools_put_updates_and_disables(self):
         # 修改现有工具 defaultArgs
         st, j = self._req("/api/config/tools", "PUT",
@@ -251,7 +266,9 @@ class ServerIntegrationTest(unittest.TestCase):
         st, _ = self._req("/api/config/roots", "PUT", {"roots": [other]})
         self.assertEqual(st, 200)
         _, drifted = self._req("/api/config")
-        self.assertEqual(drifted["roots"], [other])
+        # roots 保护：projects_root 自动并入（新行为），other 也在
+        self.assertIn(other, drifted["roots"])
+        self.assertIn(self.proj_root, drifted["roots"])
         st, res = self._req(f"/api/backup/restore/{bid}", "POST")
         self.assertEqual(st, 200)
         self.assertTrue(res["ok"])
