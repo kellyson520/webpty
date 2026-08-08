@@ -89,3 +89,27 @@ class FrameParseTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(frame)
         self.assertEqual(frame[0], 0x1)
         self.assertEqual(frame[1], b"x")
+
+
+class OutboxResyncTest(unittest.IsolatedAsyncioTestCase):
+    """丢帧时触发 on_resync（TUI 增量状态重建）。"""
+
+    async def test_drop_triggers_resync_callback(self):
+        import asyncio as _a
+        from ws import Outbox
+        ws = FakeWS()
+        resynced = []
+        ob = Outbox(ws, maxlen=4, on_resync=lambda: resynced.append(True))
+        ob.start()
+        # 模拟慢消费者：drain 被阻塞，队列堆满触发丢帧
+        ob.ws.drain = lambda: asyncio.sleep(0.05)
+        for i in range(8):
+            ob.send(b"x" * 100, binary=True)
+        # 等队列排空（drain 循环在 empty 时检查 resync）
+        for _ in range(100):
+            if ob._queue.empty() and resynced:
+                break
+            await _a.sleep(0.02)
+        ob.stop()
+        self.assertTrue(ob.dropped > 0, "应有丢帧")
+        self.assertTrue(resynced, "丢帧应触发 on_resync")

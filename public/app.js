@@ -403,6 +403,20 @@ function connectSocket(entry, session, attempt = 0) {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'state') { applySessionState(msg.session); return; }
+        if (msg.type === 'resync') {
+          // Server dropped output frames (backgrounded tab etc.) and sent a
+          // full buffer snapshot. Reset the terminal and replay it so
+          // incremental TUI state (reasonix repaints, cursor) is rebuilt
+          // instead of showing a garbled, misaligned screen.
+          try {
+            entry.term.reset();
+            if (msg.data) {
+              const bin = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+              entry.term.write(bin);
+            }
+          } catch {}
+          return;
+        }
       } catch {}
     }
     // Large frames are chunked into ~8KB writes. term.write() parses

@@ -10,6 +10,7 @@ import base64
 import hashlib
 import os
 import struct
+import time
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _MAGIC = 65536  # 2**16 for mask bit
@@ -73,6 +74,15 @@ class WebSocket:
 
     def send_text(self, text: str) -> None:
         self._send_frame(_OP_TEXT, text.encode("utf-8"))
+
+    def ping(self, payload: bytes = b"") -> None:
+        """Send a WebSocket ping (keepalive / half-open detection)."""
+        if not self._closed:
+            self._send_frame(_OP_PING, payload)
+
+    def last_pong_at(self) -> float:
+        """Monotonic timestamp of the last PONG (0 = never)."""
+        return getattr(self, "_last_pong_at", 0.0)
 
     def send_bytes(self, data: bytes) -> None:
         self._send_frame(_OP_BINARY, data)
@@ -204,6 +214,8 @@ class WebSocket:
         while opcode in (_OP_PING, _OP_PONG):
             if opcode == _OP_PING:
                 self._send_frame(_OP_PONG, payload)
+            else:
+                self._last_pong_at = time.monotonic()
             if len(self._recv_buf) < 2:
                 return _INCOMPLETE
             b0 = self._recv_buf[0]
@@ -275,11 +287,14 @@ class Outbox:
     Server callbacks call send() synchronously (never blocks the event loop);
     one background task drains the queue and awaits writer.drain().
     """
-    def __init__(self, ws, maxlen: int = 1024, drop_oldest: bool = True):
+    def __init__(self, ws, maxlen: int = 1024, drop_oldest: bool = True,
+                 on_resync=None):
         self.ws = ws
         self.maxlen = maxlen
         self.drop_oldest = drop_oldest
         self.dropped = 0
+        self._needs_resync = False
+        self._on_resync = on_resync
         self._queue = asyncio.Queue(maxsize=maxlen)
         self._task = None
 
@@ -301,12 +316,26 @@ class Outbox:
                 try:
                     self._queue.get_nowait()
                     self.dropped += 1
+                    # Dropping output corrupts incremental state (TUI
+                    # repaints, cursor moves). Signal the consumer so it can
+                    # reset and request a full resync instead of showing a
+                    # garbled screen.
+                    self._needs_resync = True
                 except asyncio.QueueEmpty:
                     break
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull:
             self.dropped += 1
+            self._needs_resync = True
+
+    def _emit_resync_if_needed(self) -> None:
+        if self._needs_resync and self._on_resync is not None:
+            self._needs_resync = False
+            try:
+                self._on_resync()
+            except Exception:  # noqa: BLE001 — resync must not kill the drain
+                pass
 
     async def _drain_loop(self) -> None:
         try:
@@ -325,6 +354,8 @@ class Outbox:
                 # class replaces.
                 if self._queue.empty() or written % 64 == 0:
                     await self.ws.drain()
+                if self._queue.empty():
+                    self._emit_resync_if_needed()
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001 — connection lost; stop silently

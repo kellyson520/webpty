@@ -832,7 +832,34 @@ class Server:
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
-        outbox = Outbox(ws, maxlen=1024)
+        # Replay window state (pty sessions): bytes of recent_output already
+        # delivered. Declared here so on_resync (defined for both engines)
+        # can reset them via nonlocal.
+        skip = 0
+        seen = 0
+
+        def on_resync() -> None:
+            # Frames were dropped (consumer too slow, e.g. backgrounded tab).
+            # Send the full buffer snapshot; the client resets the terminal
+            # and replays it so incremental TUI state is rebuilt instead of
+            # showing a garbled, misaligned screen.
+            try:
+                recent = self.sessions.recent_output(sid)
+                if recent:
+                    import base64 as _b64
+                    outbox.send(json.dumps({
+                        "type": "resync",
+                        "data": _b64.b64encode(recent).decode("ascii"),
+                    }), binary=False)
+                # The snapshot already contains the buffer; reset the replay
+                # window so subsequent live frames are NOT skipped.
+                nonlocal skip, seen
+                skip = 0
+                seen = 0
+            except Exception:  # noqa: BLE001
+                pass
+
+        outbox = Outbox(ws, maxlen=1024, on_resync=on_resync)
         outbox.start()
         try:
             def on_agent_event(ev_sid: str, item: dict) -> None:
@@ -845,6 +872,26 @@ class Server:
 
             def on_reconnected(*_args) -> None:  # type: ignore[no-untyped-def]
                 outbox.send(json.dumps({"type": "reconnected"}), binary=False)
+
+            # Heartbeat: ping every 25s; if no PONG for 60s the connection is
+            # half-open (backgrounded tab, network partition) — close it so
+            # the client reconnects and resyncs instead of freezing.
+            async def _heartbeat() -> None:
+                import time as _t
+                ws._last_pong_at = _t.monotonic()
+                try:
+                    while True:
+                        await asyncio.sleep(25)
+                        if ws._closed:
+                            return
+                        ws.ping()
+                        if _t.monotonic() - ws.last_pong_at() > 60:
+                            await ws.close(1001, "heartbeat timeout")
+                            return
+                except (asyncio.CancelledError, ConnectionError, OSError):
+                    pass
+
+            hb_task = asyncio.get_event_loop().create_task(_heartbeat())
 
             if is_agent:
                 outbox.send(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}), binary=False)
@@ -860,7 +907,7 @@ class Server:
                 skip = len(recent) if recent else 0
                 seen = 0
                 def on_output(out_sid: str, chunk: bytes) -> None:
-                    nonlocal seen
+                    nonlocal seen, skip
                     if out_sid != sid:
                         return
                     if seen < skip:
@@ -903,6 +950,7 @@ class Server:
             self.sessions.off("agentEvent", on_agent_event)
             self.sessions.off("change", on_change)
             self.sessions.off("reconnected", on_reconnected)
+            hb_task.cancel()
             outbox.stop()
             try:
                 await ws.close()
