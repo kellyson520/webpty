@@ -1,0 +1,51 @@
+"""Parse token usage from agent stream-json lines (realtime source).
+
+Returns None when the line carries no usage → the reconciler picks it up
+later from logs (posthoc source). Business-management layer.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+
+def _extract(usage: dict) -> dict:
+    return {
+        "tokens_in": int(usage.get("input_tokens") or 0),
+        "tokens_out": int(usage.get("output_tokens") or 0),
+        "cached_in": int(usage.get("input_tokens_cached")
+                            or usage.get("cache_creation_input_tokens") or 0),
+    }
+
+
+def parse_usage(line: str, tool: str) -> dict | None:
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    usage = obj.get("usage")
+    if not isinstance(usage, dict):
+        message = obj.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+    if isinstance(usage, dict):
+        u = _extract(usage)
+        if u["tokens_in"] or u["tokens_out"]:
+            return {
+                **u,
+                "cost": None,  # computed by cost_tracker via price_table
+                "model": obj.get("model") or obj.get("message", {}).get("model"),
+                "session_id": obj.get("session_id"),
+            }
+    if obj.get("type") in ("stats", "usage_event") and (
+            obj.get("tokens_in") is not None or obj.get("tokens_out") is not None):
+        return {
+            "tokens_in": int(obj.get("tokens_in") or 0),
+            "tokens_out": int(obj.get("tokens_out") or 0),
+            "cached_in": int(obj.get("cached_in") or 0),
+            "cost": obj.get("cost"),
+            "model": obj.get("model"),
+            "session_id": obj.get("session_id"),
+        }
+    return None
