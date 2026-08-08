@@ -342,3 +342,32 @@ if __name__ == "__main__":
         self.assertFalse(s["busy"])
         self.assertFalse(changes[-1])
         await self.sm.remove(s["id"])
+
+
+class PtyHostClientReadLoopTest(unittest.IsolatedAsyncioTestCase):
+    """read_loop 必须处理超 64KB 的单行（pty-host 大帧 base64）。"""
+
+    def _make_client(self):
+        from pty_host_client import PtyHostClient
+        c = PtyHostClient()
+        received = []
+        c._on_message = lambda msg: received.append(msg)
+        return c, received
+
+    async def test_large_line_over_64kb_does_not_crash(self):
+        import asyncio as _a
+        from pty_host_client import PtyHostClient
+        c = PtyHostClient()
+        received = []
+        c._on_message = lambda msg: received.append(msg)
+        # 构造超 64KB 的单行（StreamReader limit=65536 会触发 LimitOverrunError）
+        big = 'x' * 70000
+        line = '{"ev":"output","id":"s1","data":"%s"}\n' % big
+        reader = _a.StreamReader(limit=4096)  # 故意更小，模拟溢出
+        reader.feed_data(line.encode())
+        reader.feed_eof()
+        c.reader = reader
+        c.writer = None
+        await c._read_loop()
+        # 不应抛异常；行被完整解析（虽然 msg 太大无实际用途，但循环不崩）
+        self.assertTrue(c._connected is False)  # EOF 后清理

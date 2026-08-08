@@ -73,15 +73,32 @@ class PtyHostClient:
     async def _read_loop(self) -> None:
         assert self.reader is not None
         try:
-            async for line in self.reader:
-                line = line.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                self._on_message(msg)
+            # Read without StreamReader's 64KB line limit: pty-host frames can
+            # exceed it when many 32KB merged chunks flush in one line (base64
+            # ≈ 44KB each), which crashed readuntil() with LimitOverrunError
+            # and killed the whole host connection — sessions then went
+            # unresponsive until the monitor reconnected (the reported
+            # "反应不快速" slowness).
+            buf = bytearray()
+            while True:
+                chunk = await self.reader.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    line = bytes(buf[:nl])
+                    del buf[:nl + 1]
+                    line = line.decode("utf-8", "replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self._on_message(msg)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:

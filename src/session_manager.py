@@ -697,7 +697,10 @@ class SessionManager:
             return
         self.host_sessions = {s["id"]: s for s in result.get("sessions", [])}
         self.host_ready = True
-        for sid, session in self.sessions.items():
+        # Iterate over a snapshot: _reattach can mutate self.sessions via
+        # event callbacks, which raised "dictionary changed size during
+        # iteration" inside the monitor loop.
+        for sid, session in list(self.sessions.items()):
             if session.get("engine") != "pty" or session.get("state") != "running":
                 continue
             view = self.host_sessions.get(sid)

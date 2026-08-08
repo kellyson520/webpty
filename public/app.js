@@ -2205,14 +2205,22 @@ function applyViewport() {
   // unlike window.innerHeight which stays at the layout-viewport size.
   const h = window.visualViewport?.height ?? window.innerHeight;
   document.documentElement.style.setProperty('--vvh', h + 'px');
-  for (const [id, entry] of live) {
-    if (!entry.term) continue;
-    try { entry.fit.fit(); } catch {}
-    if (entry.socket?.readyState === WebSocket.OPEN) {
-      entry.socket.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
+  // Only refit + resize when the height actually changed — the keyboard
+  // raising/lowering fires many visualViewport resize events, and every one
+  // would re-fit all terminals and spam the PTY with resize frames (each
+  // triggering a TUI repaint), which is a big part of the "slow to respond
+  // on mobile" problem.
+  if (applyViewport._lastH !== h) {
+    applyViewport._lastH = h;
+    for (const [id, entry] of live) {
+      if (!entry.term) continue;
+      try { entry.fit.fit(); } catch {}
+      if (entry.socket?.readyState === WebSocket.OPEN) {
+        entry.socket.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
+      }
     }
+    scrollToIndex(activeIndex, false);
   }
-  scrollToIndex(activeIndex, false);
 }
 
 // Set --vvh immediately (not only after bootstrap) so the layout has the
