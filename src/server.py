@@ -49,7 +49,7 @@ class HttpError(Exception):
 
 
 class Server:
-    def __init__(self, db=None, notifier=None) -> None:
+    def __init__(self, db=None, notifier=None, cost=None) -> None:
         self.config = load_config()
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
@@ -59,6 +59,7 @@ class Server:
         self._ws_clients: dict[str, list] = {}  # session id -> ws objects
         self.db = db
         self.notifier = notifier
+        self.cost = cost
 
     # --- helpers ------------------------------------------------------------
     def _effective_roots(self) -> list[str]:
@@ -391,6 +392,30 @@ class Server:
             ok = await self.notifier.test_message()
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
+        # --- cost -----------------------------------------------------------
+        if path == "/api/cost/summary" and method == "GET":
+            period = (query.get("period") or ["day"])[0]
+            return await self._send_json(
+                writer, 200, await self.cost.summary(period), headers)
+        m = re.match(r"^/api/cost/by-(project|tool|model|session)$", path)
+        if m and method == "GET":
+            period = (query.get("period") or ["day"])[0]
+            rows = await self.cost.grouped(m.group(1), period)
+            return await self._send_json(writer, 200, rows, headers)
+        if path == "/api/cost/alerts" and method == "GET":
+            return await self._send_json(
+                writer, 200, await self.cost.alerts(), headers)
+        if path == "/api/cost/budget" and method == "PUT":
+            body = await self._read_json(reader, headers)
+            await self.cost.set_budget(float(body.get("limit", 0)))
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if path == "/api/cost/reconcile" and method == "POST":
+            from reconciler import Reconciler
+            claude_dir = os.path.expanduser("~/.claude/projects")
+            rec = Reconciler(self.db, self.config)
+            added = await rec.reconcile(claude_dir)
+            return await self._send_json(writer, 200, {"added": added}, headers)
+
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
             await self._serve_static(writer, method, path, headers)
@@ -660,15 +685,18 @@ async def main() -> None:
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")
 
+    from cost_tracker import CostTracker
     from db import Database
     from notifier import Notifier
     db = Database(os.path.join(data_dir, "webpty.db"))
     db.connect()
     notifier = Notifier(db, config)
-    server = Server(db=db, notifier=notifier)
+    cost = CostTracker(db, config)
+    server = Server(db=db, notifier=notifier, cost=cost)
     await server.sessions.init()
     server.sessions.start_host_monitor()
     server.sessions.on("session_event", notifier.handle_event)
+    server.sessions.on("agentEvent", lambda sid, item: cost.handle_agent_event(item))
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
