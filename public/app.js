@@ -532,6 +532,18 @@ function buildSessionPage(session) {
       }
       updateStripThumb();
     };
+    // rAF-throttle pointer/touch drag: pointermove can fire faster than the
+    // display; coalesce to one dragScroll per frame (last position wins).
+    let dragRaf = 0;
+    let dragY = 0;
+    const queueDrag = (clientY) => {
+      dragY = clientY;
+      if (dragRaf) return;
+      dragRaf = requestAnimationFrame(() => {
+        dragRaf = 0;
+        dragScroll(dragY);
+      });
+    };
     strip.addEventListener('pointerdown', (ev) => {
       ev.preventDefault();
       strip.setPointerCapture?.(ev.pointerId);
@@ -541,13 +553,13 @@ function buildSessionPage(session) {
     strip.addEventListener('pointermove', (ev) => {
       if (!stripDrag) return;
       ev.preventDefault();
-      dragScroll(ev.clientY);
+      queueDrag(ev.clientY);
     });
     strip.addEventListener('pointerup', () => { stripDrag = false; });
     strip.addEventListener('pointercancel', () => { stripDrag = false; });
     // Touch fallback for browsers without pointer capture support.
     strip.addEventListener('touchstart', (ev) => { stripDrag = true; dragScroll(ev.touches[0].clientY); }, { passive: true });
-    strip.addEventListener('touchmove', (ev) => { if (stripDrag) dragScroll(ev.touches[0].clientY); }, { passive: true });
+    strip.addEventListener('touchmove', (ev) => { if (stripDrag) queueDrag(ev.touches[0].clientY); }, { passive: true });
     strip.addEventListener('touchend', () => { stripDrag = false; });
     updateStripThumb();
   }
@@ -610,11 +622,19 @@ function buildSessionPage(session) {
   // dispatch it to the terminal element — xterm forwards it to the TUI,
   // which scrolls its own UI. Non-TUI sessions keep xterm's native touch
   // scrolling (the xterm.js patch made it unconditional).
+  //
+  // Throttling: touchmove fires at 60-120Hz; forwarding every event makes
+  // the TUI repaint its whole screen per frame (stutter). Accumulate the
+  // finger travel and emit one wheel per ~36px (≈ one desktop wheel notch),
+  // at most every 40ms, with the direction locked for the gesture so a
+  // slightly wobbly finger doesn't flip-flop the scroll.
+  const TUI_WHEEL_STEP_PX = 36;
+  const TUI_WHEEL_MIN_MS = 40;
   let touchScroll = null;
   host.addEventListener('touchstart', (ev) => {
     const t = ev.touches[0];
     if (!t) return;
-    touchScroll = { y: t.clientY, last: t.clientY, active: false };
+    touchScroll = { y: t.clientY, last: t.clientY, active: false, acc: 0, dir: 0, lastSent: 0 };
   }, { passive: true });
   host.addEventListener('touchmove', (ev) => {
     if (!touchScroll || !entry.term) return;
@@ -627,19 +647,27 @@ function buildSessionPage(session) {
       touchScroll.active = true;
     }
     if (dy === 0) return;
-    const isTui = entry.term.element.classList.contains('enable-mouse-events');
-    if (isTui) {
+    if (!entry.term.element.classList.contains('enable-mouse-events')) return;
+    // Accumulate travel; lock direction on first significant movement.
+    if (touchScroll.dir === 0 && Math.abs(dy) >= 4) touchScroll.dir = dy > 0 ? 1 : -1;
+    if (touchScroll.dir === 0) return;
+    if (dy * touchScroll.dir < 0) return; // opposite movement ignored this frame
+    touchScroll.acc += dy;
+    const now = performance.now();
+    if (Math.abs(touchScroll.acc) >= TUI_WHEEL_STEP_PX
+        && now - touchScroll.lastSent >= TUI_WHEEL_MIN_MS) {
       // Synthesize a wheel event; xterm (mouse tracking active) forwards it
-      // to the app, e.g. reasonix scrolls its UI. Use the same delta scale
-      // as a desktop wheel notch (deltaY=100) so TUI scrolling feels normal.
+      // to the app, e.g. reasonix scrolls its UI. One notch per step.
       try {
         entry.term.element.dispatchEvent(new WheelEvent('wheel', {
-          deltaY: dy > 0 ? 100 : -100,
+          deltaY: touchScroll.acc > 0 ? 100 : -100,
           deltaMode: WheelEvent.DOM_DELTA_PIXEL,
           bubbles: true,
           cancelable: true,
         }));
       } catch {}
+      touchScroll.acc = 0;
+      touchScroll.lastSent = now;
     }
   }, { passive: true });
   host.addEventListener('touchend', () => { touchScroll = null; }, { passive: true });
