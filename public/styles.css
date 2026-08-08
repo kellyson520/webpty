@@ -1227,3 +1227,18 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
   padding: 10px; font-size: 12px; overflow-x: auto;
   font-family: ui-monospace, "D2Coding", monospace; max-height: 200px; overflow-y: auto;
 }
+
+/* Mobile IME fix: xterm moves its helper textarea to the cursor position
+   when focused (so desktop IMEs show the composition at the caret). iOS
+   Safari shows the in-progress IME characters AT the textarea even though
+   it is opacity:0 — that is the "stray/乱码 input box" seen on phones.
+   Pin it off-screen on touch devices; composition still commits via
+   compositionend → onData, just without the on-screen preview. */
+@media (max-width: 600px) {
+  .xterm .xterm-helper-textarea {
+    left: -9999em !important;
+    top: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+  }
+}
