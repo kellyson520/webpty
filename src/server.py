@@ -364,11 +364,15 @@ class Server:
                 writer, 200, {"rules": await self.db.list_rules()}, headers)
         if path == "/api/notify/rules" and method == "POST":
             body = await self._read_json(reader, headers)
+            if not body.get("name") or not body.get("event_type"):
+                raise HttpError(400, "name and event_type required")
             rid = await self.db.upsert_rule(body)
             return await self._send_json(writer, 201, {"id": rid}, headers)
         m = re.match(r"^/api/notify/rules/(\d+)$", path)
         if m and method == "PUT":
             body = await self._read_json(reader, headers)
+            if not body.get("name") or not body.get("event_type"):
+                raise HttpError(400, "name and event_type required")
             body["id"] = int(m.group(1))
             await self.db.upsert_rule(body)
             return await self._send_json(writer, 200, {"ok": True}, headers)
@@ -376,7 +380,11 @@ class Server:
             await self.db.delete_rule(int(m.group(1)))
             return await self._send_json(writer, 200, {"ok": True}, headers)
         if path == "/api/notify/messages" and method == "GET":
-            page = int(self._query_param(path, "page") or 1)
+            raw = (query.get("page") or ["1"])[0]
+            try:
+                page = int(raw)
+            except ValueError:
+                raise HttpError(400, "Invalid page")
             return await self._send_json(
                 writer, 200, await self.db.list_notifications(page), headers)
         if path == "/api/notify/test" and method == "POST":
@@ -389,16 +397,6 @@ class Server:
             return
 
         raise HttpError(405, "Method not allowed")
-
-    @staticmethod
-    def _query_param(path: str, name: str) -> str | None:
-        if "?" not in path:
-            return None
-        for part in path.split("?", 1)[1].split("&"):
-            k, _, v = part.partition("=")
-            if k == name:
-                return v
-        return None
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0
