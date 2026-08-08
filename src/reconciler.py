@@ -8,6 +8,10 @@ import os
 from price_table import cost_for
 from usage_parser import parse_usage
 
+# Single-file cap for reconcile scans (plan Task 5): skip logs larger than
+# 50MB so one runaway session can't stall the whole scan.
+MAX_SCAN_FILE_BYTES = 50 * 1024 * 1024
+
 
 def scan_claude_logs(projects_dir: str) -> list[dict]:
     out: list[dict] = []
@@ -19,6 +23,13 @@ def scan_claude_logs(projects_dir: str) -> list[dict]:
                 continue
             session_id = fn[:-6]  # strip .jsonl
             path = os.path.join(root, fn)
+            # Single-file cap (plan Task 5): a runaway session log must not
+            # stall the whole reconcile scan.
+            try:
+                if os.path.getsize(path) > MAX_SCAN_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
                     for line in f:

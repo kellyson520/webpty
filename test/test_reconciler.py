@@ -75,5 +75,18 @@ class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s["tokens_out"], 150)
 
 
+    async def test_scan_skips_huge_files(self):
+        """超大日志文件被跳过(单文件上限)。"""
+        import os as _os
+        from reconciler import MAX_SCAN_FILE_BYTES
+        big = _os.path.join(self.projects, "proj-a", "huge.jsonl")
+        # 造一个超过上限的文件(稀疏写)
+        with open(big, "wb") as f:
+            f.seek(MAX_SCAN_FILE_BYTES + 10)
+            f.write(b"{}")
+        items = scan_claude_logs(self.projects)
+        self.assertFalse(any(i["session_id"] == "huge" for i in items))
+
+
 if __name__ == "__main__":
     unittest.main()
