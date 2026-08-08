@@ -415,10 +415,9 @@ class RetryCopyTest(unittest.IsolatedAsyncioTestCase):
         self.host = StubHost()
         self.sm.host = self.host
 
-    async def test_retry_uses_copy_and_continue(self):
-        import os
-        s = self.sm.create(name="rx", cwd="/p", tool="reasonix")
-        # StubHost.start 记录 args
+    async def test_retry_strips_continue_flags(self):
+        """in-use 恢复为纯启动（无 -c/--copy，避免再次锁冲突）。"""
+        s = self.sm.create(name="rx", cwd="/p", tool="reasonix", args="-c")
         calls = []
         orig_start = self.host.start
 
@@ -430,11 +429,9 @@ class RetryCopyTest(unittest.IsolatedAsyncioTestCase):
         await self.sm._start_pty_retry_copy(s)
         self.assertEqual(len(calls), 1)
         args = calls[0]["args"]
-        self.assertIn("--copy", args)
-        self.assertIn("-c", args)
-        self.assertLess(args.index("--copy"), args.index("-c"))
+        self.assertNotIn("-c", args)
+        self.assertNotIn("--copy", args)
+        self.assertNotIn("--continue", args)
         self.assertEqual(s["state"], "running")
         self.assertEqual(s["pid"], 999)
-
-        # 恢复
         self.host.start = orig_start

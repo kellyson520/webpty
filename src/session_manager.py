@@ -222,13 +222,20 @@ class SessionManager:
         return await self._start_pty(session, tool)
 
     async def _start_pty_retry_copy(self, session: dict) -> None:
-        """Restart a reasonix-family session with `-c --copy` after an
-        in-use / no-resumable exit. Called from _on_host_exit."""
+        """Restart a reasonix-family session WITHOUT -c after an in-use hang.
+
+        Called from _emit_output when the terminal printed 'session is in
+        use' (user passed -c explicitly while another process holds the
+        global session lock). A plain start never conflicts — resume stays
+        available to the user via session args later.
+        """
         tool = self.config.get("tools", {}).get(session.get("tool")) or {}
         command = resolve_command(tool.get("command"))
         user_args = split_args(session.get("args", ""))
-        base_args = split_args(tool.get("defaultArgs", "")) + user_args
-        argv = ["--copy", "-c"] + [a for a in base_args if a not in ("-c", "--copy")]
+        # Strip -c/--copy so the retry is a plain, lock-free start.
+        base_args = [a for a in split_args(tool.get("defaultArgs", "")) + user_args
+                     if a not in ("-c", "--continue", "--copy")]
+        argv = list(base_args)
         name_flag = tool.get("nameFlag")
         if name_flag and session.get("name") and name_flag not in user_args:
             argv.append(name_flag)
@@ -236,7 +243,7 @@ class SessionManager:
         log_path = session.get("log_path") or os.path.join(
             logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
         session["log_path"] = log_path
-        _append_log(log_path, f"\r\n===== webpty auto-resume (--copy) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} =====\r\n")
+        _append_log(log_path, f"\r\n===== webpty auto-restart (plain) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} =====\r\n")
         session["state"] = "running"
         try:
             started = await self.host.start({
@@ -268,23 +275,15 @@ class SessionManager:
         user_resume = any(a in RESUME_FLAGS for a in user_args)
         if session.get("tool") == "claude" and not user_resume and has_prior_conversation(session.get("cwd")):
             argv.insert(0, "-c")
-        # reasonix-family: resume the previous conversation of THIS project.
-        # reasonix keeps per-cwd session history, so `-c` restores the exact
-        # project's last session (never reasonix serve's, which runs in a
-        # different cwd). Only add -c when this project actually has history —
-        # with no resumable session reasonix exits code 1 instead of starting
-        # fresh, which would make a first run fail.
-        try_continue = (
-            session.get("tool") in ("reasonix", "opencode")
-            and not user_resume
-            and _reasonix_has_history(session.get("cwd"))
-        )
+        # reasonix-family: do NOT auto-add -c. reasonix keeps a GLOBAL session
+        # lock (one active session at a time); 'reasonix -c' tries to resume
+        # the locked session and errors 'session is in use' (then hangs).
+        # A plain 'reasonix' start never conflicts (verified) — users who
+        # want to continue explicitly pass -c/--continue in session args.
         name_flag = tool.get("nameFlag")
         if name_flag and session.get("name") and name_flag not in user_args:
             argv.insert(0, session.get("name"))
             argv.insert(0, name_flag)
-        if try_continue and "-c" not in argv:
-            argv.insert(0, "-c")
 
         log_path = os.path.join(logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
         session["log_path"] = log_path
@@ -832,6 +831,28 @@ class SessionManager:
                 self._emit("change", self._public(session))
         self._emit("reconnected")
 
+    def _schedule_auto_resume(self, session: dict) -> None:
+        """Kill the hung reasonix session and restart it with `-c --copy`.
+
+        Called when the output stream contains 'session is in use'. The
+        current process printed the error and hangs; kill it, then spawn a
+        duplicated conversation.
+        """
+        sid = session["id"]
+
+        async def _do() -> None:
+            try:
+                await self.stop(sid)
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(0.3)
+            try:
+                await self._start_pty_retry_copy(self.sessions.get(sid))
+            except Exception:  # noqa: BLE001
+                pass
+
+        asyncio.get_event_loop().create_task(_do())
+
     # --- helpers -------------------------------------------------------------------------
     def _inflate(self, stored: dict) -> dict:
         tool = self.config.get("tools", {}).get(stored.get("tool")) or {}
@@ -903,6 +924,27 @@ class SessionManager:
         if session.get("log_path"):
             self._append_log_cached(session, chunk)
         self._emit("output", session["id"], chunk)
+        # reasonix-family: "session is in use" is printed to the terminal and
+        # then the process HANGS (it does not exit) — the session would sit
+        # frozen forever. Detect the error in the output stream and restart
+        # with `-c --copy` (verified: that combination always works, even in
+        # a fresh project dir).
+        if (session.get("tool") in ("reasonix", "opencode")
+                and session.get("state") == "running"
+                and not session.get("_resume_retried")):
+            # "in use" may arrive split across chunks — scan a window of
+            # recent output.
+            window = b""
+            buf = session.get("recent_buf")
+            if buf is not None:
+                try:
+                    window = buf.snapshot()[-512:]
+                except Exception:  # noqa: BLE001
+                    window = b""
+            window += chunk[-512:]
+            if b"in use" in window.lower():
+                session["_resume_retried"] = True
+                self._schedule_auto_resume(session)
 
     # Cached per-session log file handle: opening/closing the log on every
     # output chunk (~60/s on an active terminal) was pure syscall overhead.
