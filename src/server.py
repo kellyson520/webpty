@@ -214,13 +214,18 @@ class Server:
                 await self._handle_ws_upgrade(reader, writer, target, headers)
                 return
 
-            auth = await self._authorize(reader, headers, target)
-            if not auth["ok"]:
-                if target.startswith("/api/"):
-                    await self._send_json(writer, 403, {"error": "forbidden", "reason": auth["reason"]}, headers)
-                else:
-                    await self._send_html(writer, 403, self._denied_page(auth))
-                return
+            # Static assets (HTML/JS/CSS/fonts) are always public: the
+            # front-end must load to render the token-unlock screen. The gate
+            # protects /api data and /ws sessions only. A bare HTML request
+            # must never be answered with a 403 page before the JS can run.
+            if target.startswith("/api/"):
+                auth = await self._authorize(reader, headers, target)
+                if not auth["ok"]:
+                    await self._send_json(writer, 403,
+                                          {"error": "forbidden", "reason": auth["reason"]},
+                                          headers)
+                    return
+            # everything else (static SPA assets) → route directly
 
             await self._route(method, target, headers, reader, writer)
         except HttpError as err:
@@ -600,17 +605,6 @@ class Server:
         writer.write(head.encode("latin-1") + body)
         await writer.drain()
 
-    async def _send_html(self, writer: asyncio.StreamWriter, status: int, html: str) -> None:
-        body = html.encode("utf-8")
-        head = (
-            f"HTTP/1.1 {status} {self._status_text(status)}\r\n"
-            "Content-Type: text/html; charset=utf-8\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "\r\n"
-        )
-        writer.write(head.encode("latin-1") + body)
-        await writer.drain()
-
     @staticmethod
     def _status_text(status: int) -> str:
         return {
@@ -618,19 +612,6 @@ class Server:
             404: "Not Found", 405: "Method Not Allowed", 413: "Payload Too Large",
             500: "Internal Server Error",
         }.get(status, "OK")
-
-    @staticmethod
-    def _denied_page(auth: dict) -> str:
-        peer = auth.get("peer") or {}
-        login = peer.get("login")
-        return (
-            "<!doctype html><meta charset=\"utf-8\"><title>webpty</title>"
-            "<body style=\"font-family:system-ui;background:#0f0f0f;color:#ededed;padding:48px;max-width:600px;margin:0 auto\">"
-            "<h2 style=\"color:#3fbf7f\">webpty — access denied</h2>"
-            f"<p>Peer {peer.get('ip') or '?'} {f'({login}) ' if login else ''}is not authorized.</p>"
-            f"<p style=\"color:#888;font-size:13px\">Reason: {auth.get('reason')}</p>"
-            "</body>"
-        )
 
 
 async def _serve_client(server: Server, reader: asyncio.StreamReader,
