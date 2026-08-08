@@ -37,6 +37,35 @@ class UsageParserTest(unittest.TestCase):
         u = parse_usage(line, "reasonix")
         self.assertIsNotNone(u)
         self.assertEqual(u["model"], "deepseek-v4-flash")
+        self.assertEqual((u["tokens_in"], u["tokens_out"]), (5, 6))
+
+    def test_bad_int_coerces_to_none(self):
+        line = json_line({"type": "usage",
+                          "usage": {"input_tokens": "N/A"}})
+        self.assertIsNone(parse_usage(line, "claude"))
+        line = json_line({"type": "usage",
+                          "usage": {"output_tokens": [1, 2]}})
+        self.assertIsNone(parse_usage(line, "claude"))
+
+    def test_message_usage_fallback(self):
+        line = json_line({"type": "message_start",
+                          "message": {"usage": {"input_tokens": 7},
+                                       "model": "claude-4"}})
+        u = parse_usage(line, "claude")
+        self.assertIsNotNone(u)
+        self.assertEqual(u["tokens_in"], 7)
+        self.assertEqual(u["model"], "claude-4")
+
+    def test_cache_only_event_accepted(self):
+        line = json_line({"type": "usage",
+                          "usage": {"input_tokens_cached": 7}})
+        u = parse_usage(line, "reasonix")
+        self.assertIsNotNone(u)
+        self.assertEqual(u["cached_in"], 7)
+
+    def test_non_string_input_returns_none(self):
+        self.assertIsNone(parse_usage(None, "claude"))
+        self.assertIsNone(parse_usage(42, "claude"))
 
 
 def json_line(obj):
