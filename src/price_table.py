@@ -72,10 +72,11 @@ def get_price(model: str, config: dict) -> dict:
 
 
 def cost_for(model: str, tokens_in: int, tokens_out: int, config: dict,
-             cached_in: int = 0) -> float:
+             cached_in: int = 0, cached_write: int = 0) -> float:
     p = get_price(model, config)
-    fresh = max(tokens_in - max(cached_in, 0), 0)
+    fresh = max(tokens_in - max(cached_in, 0) - max(cached_write, 0), 0)
     total = (fresh * float(p.get("input", 1.0))
              + max(cached_in, 0) * float(p.get("cache_hit", 0.1))
+             + max(cached_write, 0) * float(p.get("input", 1.0))
              + tokens_out * float(p.get("output", 2.0))) / 1_000_000.0
     return max(total, 0.0)

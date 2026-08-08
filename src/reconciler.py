@@ -57,7 +57,8 @@ class Reconciler:
         cost = u.get("cost")
         if cost is None:
             cost = cost_for(model, u["tokens_in"], u["tokens_out"],
-                            self.config, cached_in=u.get("cached_in", 0))
+                            self.config, cached_in=u.get("cached_in", 0),
+                            cached_write=u.get("cached_write", 0))
         await self.db.add_usage({
             "project": u.get("project"), "tool": tool, "model": model,
             "session_id": u.get("session_id"),

@@ -58,7 +58,8 @@ class CostTracker:
         cost = usage.get("cost")
         if cost is None:
             cost = cost_for(model, usage["tokens_in"], usage["tokens_out"],
-                            self.config, cached_in=usage.get("cached_in", 0))
+                            self.config, cached_in=usage.get("cached_in", 0),
+                            cached_write=usage.get("cached_write", 0))
         session_id = usage.get("session_id") or sid or event.get("session_id")
         # Dedup against posthoc rows: if the reconciler already recorded this
         # exact (session, tokens) pair, skip to avoid double billing.

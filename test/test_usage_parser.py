@@ -11,7 +11,9 @@ class UsageParserTest(unittest.TestCase):
         u = parse_usage(line, "claude")
         self.assertIsNotNone(u)
         self.assertEqual(u["tokens_in"], 100)
-        self.assertEqual(u["cached_in"], 50)
+        # cache_creation_input_tokens = 缓存写(按 input 价),归 cached_write
+        self.assertEqual(u["cached_write"], 50)
+        self.assertEqual(u["cached_in"], 0)
 
     def test_claude_message_delta(self):
         line = json_line({"type": "message_delta",
@@ -67,10 +69,35 @@ class UsageParserTest(unittest.TestCase):
         self.assertIsNone(parse_usage(None, "claude"))
         self.assertIsNone(parse_usage(42, "claude"))
 
+    def test_codex_prompt_completion_fields(self):
+        """OpenAI/codex 的 prompt_tokens/completion_tokens 必须被解析。"""
+        u = parse_usage('{"type":"usage","usage":{"prompt_tokens":100,'
+                        '"completion_tokens":50,"total_tokens":150}}', "codex")
+        self.assertIsNotNone(u)
+        self.assertEqual(u["tokens_in"], 100)
+        self.assertEqual(u["tokens_out"], 50)
+
+    def test_cache_read_and_write_split(self):
+        """缓存读(cache_read_input_tokens)与缓存写(cache_creation)分开计。"""
+        u = parse_usage('{"usage":{"input_tokens":100,"output_tokens":10,'
+                        '"cache_read_input_tokens":90,'
+                        '"cache_creation_input_tokens":5}}', "claude")
+        self.assertIsNotNone(u)
+        self.assertEqual(u["cached_in"], 90)
+        self.assertEqual(u["cached_write"], 5)
+
+    def test_message_array_no_crash(self):
+        """message 为数组(非 dict)时 parse_usage 不得抛异常。"""
+        u = parse_usage('{"message":["x"],"usage":{"input_tokens":1,'
+                        '"output_tokens":1}}', "claude")
+        self.assertTrue(u is None or isinstance(u, dict))
+
+
 
 def json_line(obj):
     import json
     return json.dumps(obj)
+
 
 
 if __name__ == "__main__":
