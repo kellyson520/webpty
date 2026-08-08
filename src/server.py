@@ -28,6 +28,10 @@ from config import (  # noqa: E402
 )
 from logging_util import log_error  # noqa: E402
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
+
+# Module-level default resolved from env at import; Server may override via
+# the data_dir constructor argument (main passes the same value).
+_DATA_DIR = data_dir
 from session_manager import SessionManager  # noqa: E402
 from ws import Outbox, accept_websocket  # noqa: E402
 
@@ -49,8 +53,10 @@ class HttpError(Exception):
 
 
 class Server:
-    def __init__(self, db=None, notifier=None, cost=None) -> None:
+    def __init__(self, db=None, notifier=None, cost=None,
+                 data_dir: str | None = None) -> None:
         self.config = load_config()
+        self.data_dir = data_dir if data_dir is not None else _DATA_DIR
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
         self.pkg = package_root()
@@ -422,6 +428,27 @@ class Server:
             added = await rec.reconcile(claude_dir)
             return await self._send_json(writer, 200, {"added": added}, headers)
 
+        # --- backups -----------------------------------------------------------
+        if path == "/api/backup/create" and method == "POST":
+            from backup import create_backup_async
+            b = await create_backup_async(self.data_dir, self.config, self.db)
+            return await self._send_json(writer, 201, {"backup": b}, headers)
+        if path == "/api/backup/list" and method == "GET":
+            from backup import list_backups
+            return await self._send_json(
+                writer, 200, {"backups": await list_backups(self.db)}, headers)
+        m = re.match(r"^/api/backup/restore/(\d+)$", path)
+        if m and method == "POST":
+            from backup import restore_backup
+            res = await restore_backup(int(m.group(1)), self.data_dir, self.db,
+                                       self.config)
+            return await self._send_json(writer, 200, res, headers)
+        m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
+        if m and method == "GET":
+            from backup import diff_backups
+            diff = await diff_backups(int(m.group(1)), int(m.group(2)), self.db)
+            return await self._send_json(writer, 200, diff, headers)
+
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
             await self._serve_static(writer, method, path, headers)
@@ -698,7 +725,7 @@ async def main() -> None:
     db.connect()
     notifier = Notifier(db, config)
     cost = CostTracker(db, config)
-    server = Server(db=db, notifier=notifier, cost=cost)
+    server = Server(db=db, notifier=notifier, cost=cost, data_dir=data_dir)
     await server.sessions.init()
     server.sessions.start_host_monitor()
     server.sessions.on("session_event", notifier.handle_event)
@@ -719,12 +746,29 @@ async def main() -> None:
         print("[webpty] WARNING: no authToken and allowedLogins is empty — anyone who can reach this port can access webpty.", flush=True)
         print("[webpty]          Set config.authToken or add your Tailscale login email(s) to enable a gate.", flush=True)
 
+    async def _backup_loop() -> None:
+        """Periodic auto-backup: first run 30s after startup, then every
+        backup.interval_hours (default 24h); errors are logged, never fatal.
+        """
+        from backup import create_backup_async, rotate
+        interval = float((config.get("backup") or {}).get("interval_hours", 24))
+        retention = int((config.get("backup") or {}).get("retention", 7))
+        await asyncio.sleep(30)  # 启动后 30s 首次
+        while True:
+            try:
+                await create_backup_async(data_dir, config, db)
+                await rotate(db, retention)
+            except Exception as err:  # noqa: BLE001
+                log_error("backup", err)
+            await asyncio.sleep(max(interval, 0.1) * 3600)
+
     async def _autostart() -> None:
         try:
             await server.sessions.autostart()
         except Exception as err:  # noqa: BLE001
             print(f"[webpty] autostart error: {err}", flush=True)
 
+    asyncio.create_task(_backup_loop())
     asyncio.create_task(_autostart())
 
     try:
