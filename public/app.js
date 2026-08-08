@@ -2150,14 +2150,15 @@ async function refreshCostPanel() {
     api(`/api/cost/by-tool?period=${period}`).catch(() => []),
     api('/api/cost/alerts').catch(() => []),
   ]);
+  const alertsArr = Array.isArray(alerts) ? alerts : [];
   document.getElementById('cost-cards').innerHTML =
     `<div class="cost-card"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div>成本</div></div>` +
-    `<div class="cost-card"><div class="v">${sum.tokens_in || 0}</div><div>输入 tokens</div></div>` +
-    `<div class="cost-card"><div class="v">${sum.tokens_out || 0}</div><div>输出 tokens</div></div>` +
-    (alerts.some((a) => a.active) ? `<div class="cost-card" style="border-color:#e5534b"><div class="v">超限</div><div>预算</div></div>` : '');
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_in || 0)}</div><div>输入 tokens</div></div>` +
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_out || 0)}</div><div>输出 tokens</div></div>` +
+    (alertsArr.some((a) => a.active) ? `<div class="cost-card" style="border-color:#e5534b"><div class="v">超限</div><div>预算</div></div>` : '');
   document.getElementById('cost-groups').innerHTML = '<h4>按工具</h4>' +
     ((byTool || []).map((g) => `<div class="notify-item">${esc(g.name)} —
-      $${Number(g.cost || 0).toFixed(4)} (${g.tokens_in}/${g.tokens_out})</div>`).join('') ||
+      $${Number(g.cost || 0).toFixed(4)} (${esc(g.tokens_in ?? 0)}/${esc(g.tokens_out ?? 0)})</div>`).join('') ||
     '<p>暂无数据</p>');
 }
 document.getElementById('cost-close').onclick = () => { costBackdrop.hidden = true; };
@@ -2166,12 +2167,21 @@ costBackdrop.addEventListener('click', (ev) => {
 });
 document.getElementById('cost-period').onchange = refreshCostPanel;
 document.getElementById('cost-budget-set').onclick = async () => {
-  const v = parseFloat(document.getElementById('cost-budget').value || '0');
-  await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: v }) });
-  refreshCostPanel();
+  const n = parseFloat(document.getElementById('cost-budget').value || '0');
+  if (!Number.isFinite(n)) { alert('请输入有效预算'); return; }
+  try {
+    await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: n }) });
+    refreshCostPanel();
+  } catch (e) {
+    alert(e.message);
+  }
 };
 document.getElementById('cost-reconcile').onclick = async () => {
-  const r = await api('/api/cost/reconcile', { method: 'POST' });
-  alert(`日志校对完成，补录 ${r.added} 条`);
-  refreshCostPanel();
+  try {
+    const r = await api('/api/cost/reconcile', { method: 'POST' });
+    alert(`日志校对完成，补录 ${r?.added ?? 0} 条`);
+    refreshCostPanel();
+  } catch (e) {
+    alert(e.message);
+  }
 };
