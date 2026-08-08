@@ -405,8 +405,26 @@ function connectSocket(entry, session, attempt = 0) {
         if (msg.type === 'state') { applySessionState(msg.session); return; }
       } catch {}
     }
-    if (event.data instanceof ArrayBuffer) entry.term.write(new Uint8Array(event.data));
-    else entry.term.write(event.data);
+    // Large frames are chunked into ~8KB writes. term.write() parses
+    // synchronously; a 32KB+ frame (e.g. a TUI full repaint) would block
+    // the main thread for a long task on low-end phones. Chunking lets the
+    // browser yield between writes so rendering stays smooth.
+    const data = event.data instanceof ArrayBuffer
+      ? new Uint8Array(event.data)
+      : event.data;
+    if (typeof data === 'string') {
+      if (data.length <= 8192) { entry.term.write(data); return; }
+      for (let i = 0; i < data.length; i += 8192) {
+        entry.term.write(data.slice(i, i + 8192));
+      }
+    } else if (data instanceof Uint8Array) {
+      if (data.length <= 8192) { entry.term.write(data); return; }
+      for (let i = 0; i < data.length; i += 8192) {
+        entry.term.write(data.subarray(i, i + 8192));
+      }
+    } else {
+      entry.term.write(data);
+    }
   };
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
@@ -631,16 +649,19 @@ function buildSessionPage(session) {
   const TUI_WHEEL_STEP_PX = 36;
   const TUI_WHEEL_MIN_MS = 40;
   let touchScroll = null;
+  let inertiaTimer = null;
   host.addEventListener('touchstart', (ev) => {
     const t = ev.touches[0];
     if (!t) return;
-    touchScroll = { y: t.clientY, last: t.clientY, active: false, acc: 0, dir: 0, lastSent: 0 };
+    if (inertiaTimer) { clearTimeout(inertiaTimer); inertiaTimer = null; }
+    touchScroll = { y: t.clientY, last: t.clientY, prev: t.clientY, active: false, acc: 0, dir: 0, lastSent: 0 };
   }, { passive: true });
   host.addEventListener('touchmove', (ev) => {
     if (!touchScroll || !entry.term) return;
     const t = ev.touches[0];
     if (!t) return;
     const dy = t.clientY - touchScroll.last;
+    touchScroll.prev = touchScroll.last;
     touchScroll.last = t.clientY;
     if (!touchScroll.active) {
       if (Math.abs(t.clientY - touchScroll.y) < 8) return; // still a tap
@@ -670,7 +691,33 @@ function buildSessionPage(session) {
       touchScroll.lastSent = now;
     }
   }, { passive: true });
-  host.addEventListener('touchend', () => { touchScroll = null; }, { passive: true });
+  host.addEventListener('touchend', () => {
+    // Fling inertia: if the finger was moving fast when it lifted, keep
+    // sending a few more scroll notches with decay so the TUI scroll feels
+    // continuous instead of stopping dead (perceived stutter).
+    if (touchScroll && touchScroll.active && touchScroll.dir !== 0
+        && entry.term && entry.term.element.classList.contains('enable-mouse-events')) {
+      const speed = Math.abs(touchScroll.last - (touchScroll.prev || touchScroll.last));
+      if (speed >= 14) { // px per last event — a real flick
+        let n = Math.min(6, Math.round(speed / 10));
+        const dir = touchScroll.dir;
+        const step = () => {
+          if (n-- <= 0) { inertiaTimer = null; return; }
+          try {
+            entry.term.element.dispatchEvent(new WheelEvent('wheel', {
+              deltaY: dir > 0 ? 100 : -100,
+              deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+              bubbles: true,
+              cancelable: true,
+            }));
+          } catch {}
+          inertiaTimer = setTimeout(step, 40);
+        };
+        step();
+      }
+    }
+    touchScroll = null;
+  }, { passive: true });
   host.addEventListener('touchcancel', () => { touchScroll = null; }, { passive: true });
 
   // Right-click: copy selection if there is one, otherwise paste the clipboard.
