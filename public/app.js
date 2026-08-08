@@ -2520,19 +2520,25 @@ async function refreshAgentsPanel() {
   // (add/disable/change) wouldn't show up there until a full page reload.
   config = cfg;
   const tools = cfg.tools || {};
+  const providers = cfg.providers || {};
   const names = Object.keys(tools);
   document.getElementById('agents-count').textContent = names.length;
   agentsList.innerHTML = names.map((name) => {
     const t = tools[name] || {};
     const color = AGENT_TOOL_COLORS[name] || 'var(--accent)';
     const isAgent = t.engine === 'agent' || name === 'claude-chat';
+    const prov = t.provider ? providers[t.provider] : null;
+    const effectiveUrl = t.apiBaseUrl || prov?.baseUrl || '';
+    const hasKey = !!(t.apiKey || prov?.apiKey);
     return `<div class="panel-item agent-row" data-agent="${esc(name)}">
       <span class="dot" style="background:${color}"></span>
       <div class="item-main">
         <div class="item-title">${esc(TOOL_LABEL[name] || name)}
           <span class="badge ${isAgent ? 'ok' : ''}">${isAgent ? 'agent' : 'pty'}</span>
-          ${t.engine ? `<span class="badge">${esc(t.engine)}</span>` : ''}</div>
+          ${t.provider ? `<span class="badge ok">${esc(t.provider)}</span>` : ''}
+          ${hasKey ? '<span class="badge">🔑</span>' : ''}</div>
         <div class="item-sub agent-cmd">${esc(t.command || name)} ${esc(t.defaultArgs || '')}</div>
+        <div class="item-sub">${effectiveUrl ? esc(effectiveUrl) : ''}${hasKey ? ' · 密钥已配置' : ''}</div>
         <div class="agent-edit">
           <div class="row">
             <label>command <input class="inp" data-field="command" value="${esc(t.command || '')}"></label>
@@ -2550,12 +2556,30 @@ async function refreshAgentsPanel() {
             <label>label <input class="inp" data-field="label" placeholder="(默认名)" value="${esc(t.label || '')}"></label>
           </div>
           <div class="row">
+            <label>provider
+              <select class="sel" data-field="provider">
+                ${Object.keys(providers).map((p) =>
+                  `<option value="${esc(p)}" ${t.provider === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+                <option value="" ${!t.provider ? 'selected' : ''}>(无)</option>
+              </select>
+            </label>
+            <label>apiBaseUrl <input class="inp" style="min-width:180px" data-field="apiBaseUrl" placeholder="(用预设)" value="${esc(t.apiBaseUrl || '')}"></label>
+            <label>apiKey <input class="inp" type="password" style="min-width:160px" data-field="apiKey" placeholder="${hasKey ? '已配置（留空不改）' : '(用预设或填)'}" value=""></label>
+          </div>
+          <div class="row">
             <button class="btn sm primary" data-act="save">保存</button>
             <button class="btn sm" data-act="cancel">取消</button>
           </div>
         </div>
       </div>
       <div class="item-side agent-actions">
+        <label class="field">供应商
+          <select class="sel" data-act="provider-switch" style="max-width:110px">
+            <option value="">(无)</option>
+            ${Object.keys(providers).map((p) =>
+              `<option value="${esc(p)}" ${t.provider === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+          </select>
+        </label>
         <button class="btn sm" data-act="edit" type="button">编辑</button>
         <button class="btn sm danger" data-act="disable" type="button">禁用</button>
       </div>
@@ -2577,8 +2601,13 @@ async function refreshAgentsPanel() {
       row.querySelectorAll('[data-field]').forEach((el) => {
         const f = el.dataset.field;
         const v = f === 'engine' ? el.value : el.value.trim();
-        if (f === 'nameFlag') {
-          // empty nameFlag = no name flag (null), not an empty string
+        if (f === 'apiKey') {
+          // empty apiKey = keep the existing key (don't wipe it)
+          if (v !== '') patch[f] = v;
+          return;
+        }
+        if (f === 'nameFlag' || f === 'provider') {
+          // empty → no flag / no provider preset
           patch[f] = v === '' ? null : v;
         } else if (f === 'engine') {
           if (v !== '') patch[f] = v;
@@ -2597,6 +2626,24 @@ async function refreshAgentsPanel() {
         alert('保存失败: ' + e.message);
       }
     };
+    // Quick provider switch: selecting a preset in the row header saves
+    // tool.provider immediately (and clears per-tool apiBaseUrl/apiKey so
+    // the preset's values take effect).
+    const pswitch = row.querySelector('[data-act="provider-switch"]');
+    if (pswitch) {
+      pswitch.onchange = async () => {
+        const p = pswitch.value;
+        try {
+          await api('/api/config/tools', {
+            method: 'PUT', body: JSON.stringify({
+              tools: { [name]: { provider: p === '' ? null : p,
+                                 apiBaseUrl: null, apiKey: null } } }) });
+          refreshAgentsPanel();
+        } catch (e) {
+          alert('切换失败: ' + e.message);
+        }
+      };
+    }
     row.querySelector('[data-act="disable"]').onclick = async () => {
       if (!confirm(`禁用 Agent「${name}」？（可从配置重新启用）`)) return;
       try {
@@ -2629,3 +2676,109 @@ document.getElementById('agents-new-add').onclick = async () => {
     alert('添加失败: ' + e.message);
   }
 };
+
+// ---- Provider presets panel (ext) ----
+const providersBackdrop = document.getElementById('providers-backdrop');
+const providersList = document.getElementById('providers-list');
+
+function openProvidersPanel() {
+  providersBackdrop.hidden = false;
+  refreshProvidersPanel();
+}
+
+async function refreshProvidersPanel() {
+  const cfg = await api('/api/config').catch(() => ({ providers: {} }));
+  config = cfg; // keep module-level in sync (menu tool list reads tools)
+  const providers = cfg.providers || {};
+  const names = Object.keys(providers);
+  document.getElementById('providers-count').textContent = names.length;
+  providersList.innerHTML = names.map((name) => {
+    const p = providers[name] || {};
+    const models = Array.isArray(p.models) ? p.models.join(', ') : '';
+    return `<div class="panel-item provider-row" data-provider="${esc(name)}">
+      <span class="dot" style="background:var(--accent)"></span>
+      <div class="item-main">
+        <div class="item-title">${esc(name)} ${p.apiKey ? '<span class="badge ok">🔑</span>' : '<span class="badge warn">无密钥</span>'}</div>
+        <div class="item-sub agent-cmd">${esc(p.baseUrl || '')} ${models ? '· ' + esc(models) : ''}</div>
+        <div class="provider-edit">
+          <div class="row">
+            <label>baseUrl <input class="inp" style="min-width:240px" data-pfield="baseUrl" value="${esc(p.baseUrl || '')}"></label>
+            <label>apiKey <input class="inp" type="password" style="min-width:160px" data-pfield="apiKey" placeholder="${p.apiKey ? '已配置（留空不改）' : '(填密钥)'}" value=""></label>
+          </div>
+          <div class="row">
+            <label>models <input class="inp" style="min-width:280px" data-pfield="models" placeholder="逗号分隔，如 gpt-5.4,o4-mini" value="${esc(models)}"></label>
+          </div>
+          <div class="row">
+            <button class="btn sm primary" data-pact="save">保存</button>
+            <button class="btn sm" data-pact="cancel">取消</button>
+          </div>
+        </div>
+      </div>
+      <div class="item-side agent-actions">
+        <button class="btn sm" data-pact="edit" type="button">编辑</button>
+        <button class="btn sm danger" data-pact="delete" type="button">删除</button>
+      </div>
+    </div>`;
+  }).join('') ||
+    `<div class="empty-tip">暂无供应商预设 — 点击「添加」创建</div>`;
+
+  providersList.querySelectorAll('.provider-row').forEach((row) => {
+    const name = row.dataset.provider;
+    row.querySelector('[data-pact="edit"]').onclick = () => row.classList.add('editing');
+    row.querySelector('[data-pact="cancel"]').onclick = () => row.classList.remove('editing');
+    row.querySelector('[data-pact="save"]').onclick = async () => {
+      const patch = {};
+      row.querySelectorAll('[data-pfield]').forEach((el) => {
+        const f = el.dataset.pfield;
+        const v = el.value.trim();
+        if (f === 'apiKey') {
+          if (v !== '') patch[f] = v; // empty = keep existing key
+        } else if (f === 'models') {
+          patch[f] = v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
+        } else {
+          patch[f] = v;
+        }
+      });
+      try {
+        await api('/api/config/providers', {
+          method: 'PUT', body: JSON.stringify({ providers: { [name]: patch } }) });
+        row.classList.remove('editing');
+        refreshProvidersPanel();
+        refreshAgentsPanel(); // provider badges in agent list change too
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    };
+    row.querySelector('[data-pact="delete"]').onclick = async () => {
+      if (!confirm(`删除供应商预设「${name}」？（引用它的 Agent 将回到无预设）`)) return;
+      try {
+        await api('/api/config/providers', {
+          method: 'PUT', body: JSON.stringify({ providers: { [name]: null } }) });
+        refreshProvidersPanel();
+        refreshAgentsPanel();
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      }
+    };
+  });
+}
+
+document.getElementById('providers-close').onclick = () => { providersBackdrop.hidden = true; };
+providersBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === providersBackdrop) providersBackdrop.hidden = true;
+});
+document.getElementById('providers-new-add').onclick = async () => {
+  const name = document.getElementById('providers-new-name').value.trim();
+  if (!name) { alert('请填写预设名'); return; }
+  try {
+    await api('/api/config/providers', {
+      method: 'PUT', body: JSON.stringify({
+        providers: { [name]: { baseUrl: '', apiKey: '', models: [] } } }) });
+    document.getElementById('providers-new-name').value = '';
+    refreshProvidersPanel();
+    refreshAgentsPanel();
+  } catch (e) {
+    alert('添加失败: ' + e.message);
+  }
+};
+document.getElementById('agents-providers-btn').onclick = openProvidersPanel;

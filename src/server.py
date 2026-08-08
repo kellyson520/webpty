@@ -139,6 +139,7 @@ class Server:
             "roots": self.config.get("roots", []),
             "projectsRoot": projects_root,
             "tools": enabled,
+            "providers": self.config.get("providers", {}),
             "configPath": config_path,
             "bindHost": self.config.get("bindHost", "0.0.0.0"),
             "port": effective_port(self.config.get("port")),
@@ -380,7 +381,8 @@ class Server:
                     continue
                 base = dict(merged.get(key) or {})
                 for field in ("command", "defaultArgs", "engine", "nameFlag",
-                              "permissionMode", "label"):
+                              "permissionMode", "label", "provider",
+                              "apiBaseUrl", "apiKey"):
                     if field not in val:
                         continue
                     if val[field] is None:
@@ -394,6 +396,28 @@ class Server:
             enabled = {k: v for k, v in merged.items()
                        if v and isinstance(v, dict)}
             return await self._send_json(writer, 200, {"tools": enabled}, headers)
+
+        if path == "/api/config/providers" and method == "PUT":
+            body = await self._read_json(reader, headers)
+            incoming = body.get("providers") if isinstance(body.get("providers"), dict) else {}
+            merged_providers = dict(self.config.get("providers", {}))
+            for name, p in incoming.items():
+                if p is None or not isinstance(p, dict):
+                    # null → delete the preset
+                    merged_providers.pop(name, None)
+                    continue
+                base = dict(merged_providers.get(name, {}))
+                for field in ("baseUrl", "apiKey", "models"):
+                    if field in p:
+                        if p[field] is None:
+                            base.pop(field, None)
+                        else:
+                            base[field] = p[field]
+                merged_providers[name] = base
+            self.config["providers"] = merged_providers
+            save_config(self.config)
+            return await self._send_json(writer, 200,
+                                         {"providers": merged_providers}, headers)
 
         if path == "/api/sessions" and method == "GET":
             return await self._send_json(writer, 200, self.sessions.list(), headers)

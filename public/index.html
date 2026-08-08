@@ -304,6 +304,27 @@
       </div>
     </div>
 
+    <div id="providers-backdrop" class="panel-backdrop" hidden>
+      <div class="panel panel-lg">
+        <div class="panel-head">
+          <h2><span class="panel-icon">🔌</span>供应商预设</h2>
+          <button id="providers-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-toolbar">
+            <label class="field">新预设名
+              <input id="providers-new-name" class="inp" placeholder="my-provider">
+            </label>
+            <button id="providers-new-add" class="btn primary" type="button">＋ 添加</button>
+          </div>
+          <div class="panel-section">
+            <h3>供应商列表 <span class="count" id="providers-count">0</span></h3>
+            <div id="providers-list" class="panel-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="agents-backdrop" class="panel-backdrop" hidden>
       <div class="panel panel-lg">
         <div class="panel-head">
@@ -319,6 +340,7 @@
               <input id="agents-new-cmd" class="inp" placeholder="myagent">
             </label>
             <button id="agents-new-add" class="btn primary" type="button">＋ 添加</button>
+            <button id="agents-providers-btn" class="btn" type="button">供应商预设</button>
           </div>
           <div class="panel-section">
             <h3>已配置 Agent <span class="count" id="agents-count">0</span></h3>

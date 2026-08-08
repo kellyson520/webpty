@@ -81,6 +81,43 @@ DEFAULT_TOOLS = {
     "bash": {"command": "bash", "defaultArgs": "", "nameFlag": None},
 }
 
+# Provider presets: each entry is {baseUrl, apiKey, models}. Tools reference
+# a preset by name via their `provider` field; per-tool apiBaseUrl/apiKey
+# override the preset. apiKey is plaintext here (local single-user tool);
+# it is redacted in backup/migrate exports.
+DEFAULT_PROVIDERS: dict[str, dict] = {
+    "anthropic": {
+        "baseUrl": "https://api.anthropic.com/v1",
+        "apiKey": "",
+        "models": ["claude-opus-4-8", "claude-sonnet-4-5", "claude-haiku-4-5"],
+    },
+    "openai": {
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "",
+        "models": ["gpt-5.4", "gpt-5.2", "o4-mini"],
+    },
+    "deepseek": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKey": "",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    },
+    "zai": {
+        "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+        "apiKey": "",
+        "models": ["zai-opencode-1", "zai-deepseek-v3"],
+    },
+    "opencode": {
+        "baseUrl": "https://opencode.ai/zen/go/v1",
+        "apiKey": "",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    },
+    "local": {
+        "baseUrl": "http://127.0.0.1:11434/v1",
+        "apiKey": "ollama",
+        "models": [],
+    },
+}
+
 
 def default_config() -> dict:
     return {
@@ -91,6 +128,7 @@ def default_config() -> dict:
         "allowedLogins": [],
         "authToken": "",
         "tools": copy.deepcopy(DEFAULT_TOOLS),
+        "providers": copy.deepcopy(DEFAULT_PROVIDERS),
         "sessions": [],
     }
 
@@ -179,6 +217,17 @@ def load_config() -> dict:
     merged.update({k: v for k, v in raw.items() if k != "tools"})
     merged["tools"] = merged_tools
     merged["sessions"] = raw.get("sessions", []) if isinstance(raw.get("sessions"), list) else []
+
+    # providers: user presets override built-ins; non-dict → defaults.
+    raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
+    merged_providers = copy.deepcopy(DEFAULT_PROVIDERS)
+    for name, p in raw_providers.items():
+        if isinstance(p, dict):
+            base = dict(merged_providers.get(name, {}))
+            base.update({k: v for k, v in p.items()
+                         if k in ("baseUrl", "apiKey", "models")})
+            merged_providers[name] = base
+    merged["providers"] = merged_providers
 
     # roots: keep user-configured roots (even explicit []) — only fall back
     # when the field is absent.

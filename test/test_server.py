@@ -198,6 +198,39 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn("codex", j["tools"])  # 工具仍在
         self.assertNotIn("nameFlag", j["tools"]["codex"])  # 字段被清除
 
+    def test_providers_default_and_put(self):
+        # 默认预设存在（config.py DEFAULT_PROVIDERS）
+        _, cfg = self._req("/api/config")
+        self.assertIn("providers", cfg)
+        self.assertIn("anthropic", cfg["providers"])
+        # PUT 更新预设
+        st, j = self._req("/api/config/providers", "PUT",
+                          {"providers": {"anthropic": {"apiKey": "sk-test"},
+                                         "my-provider": {"baseUrl": "https://x.example/v1",
+                                                         "apiKey": "k", "models": ["m1"]}}})
+        self.assertEqual(st, 200)
+        self.assertEqual(j["providers"]["anthropic"]["apiKey"], "sk-test")
+        self.assertEqual(j["providers"]["my-provider"]["baseUrl"], "https://x.example/v1")
+        # 删除预设（null）
+        st, j = self._req("/api/config/providers", "PUT",
+                          {"providers": {"my-provider": None}})
+        self.assertNotIn("my-provider", j["providers"])
+        # 持久化
+        cfg = json.load(open(os.path.join(self.data_dir, "config.json")))
+        self.assertEqual(cfg["providers"]["anthropic"]["apiKey"], "sk-test")
+
+    def test_tools_put_provider_fields(self):
+        # 工具可关联 provider + 覆盖 apiBaseUrl/apiKey
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"reasonix": {"provider": "deepseek",
+                                                  "apiBaseUrl": "https://custom/v1",
+                                                  "apiKey": "sk-custom"}}})
+        self.assertEqual(st, 200)
+        t = j["tools"]["reasonix"]
+        self.assertEqual(t["provider"], "deepseek")
+        self.assertEqual(t["apiBaseUrl"], "https://custom/v1")
+        self.assertEqual(t["apiKey"], "sk-custom")
+
     def test_fs_list(self):
         status, j = self._req("/api/fs/list")
         self.assertEqual(status, 200)
