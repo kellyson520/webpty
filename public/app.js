@@ -1959,7 +1959,7 @@ function onActivate(idx) {
 
 async function loadConfig() { config = await api('/api/config'); }
 async function loadProjects() { projects = await api('/api/projects'); }
-async function loadSessionsRaw() { sessions = await api('/api/sessions'); }
+async function loadSessionsRaw() { return (sessions = await api('/api/sessions')); }
 
 async function refreshSessions() {
   const before = sessions.map((s) => s.id).join(',');
