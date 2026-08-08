@@ -3,8 +3,7 @@ const shell = document.getElementById('shell');
 // See the .shell `overflow: clip` rationale in styles.css.
 const track = document.createElement('div');
 track.className = 'track';
-shell.appendChild(track);
-const tabsEl = document.getElementById('tabs');
+shell.appendChild(track);const tabsEl = document.getElementById('tabs');
 const openDrawerBtn = document.getElementById('open-drawer');
 const openMenuBtn = document.getElementById('open-menu');
 const tplSession = document.getElementById('tpl-session');
@@ -555,6 +554,13 @@ function buildSessionPage(session) {
   // Triple-click: extend xterm's default single-row line selection to the full
   // logical line — i.e. across visually-wrapped continuation rows.
   host.addEventListener('click', (ev) => {
+    // Clicking anywhere in the terminal area must give the terminal focus so
+    // subsequent keystrokes reach the PTY (xterm's own textarea focus can be
+    // missed when the click lands on the .term-host padding or a wrapped
+    // region — the symptom was "prompt visible, but typing does nothing").
+    if (entry.term) {
+      try { entry.term.focus(); } catch {}
+    }
     if (ev.detail !== 3 || !entry.term) return;
     // Defer so xterm's own triple-click handler runs first; we then expand.
     setTimeout(() => expandSelectionToLogicalLine(entry.term), 0);
@@ -1991,9 +1997,13 @@ function applyViewport() {
   }
   scrollToIndex(activeIndex, false);
 }
+
+// Set --vvh immediately (not only after bootstrap) so the layout has the
+// correct viewport height even if a later await stalls.
+try { applyViewport(); } catch {}
+
 window.addEventListener('resize', applyViewport);
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', applyViewport);
+if (window.visualViewport) {  window.visualViewport.addEventListener('resize', applyViewport);
   window.visualViewport.addEventListener('scroll', applyViewport);
 }
 applyViewport();
@@ -2012,9 +2022,14 @@ async function bootstrap() {
   const fontP = (async () => {
     if (!document.fonts?.load) return;
     try {
-      await Promise.all([
-        document.fonts.load('15px "D2Coding"'),
-        document.fonts.load('bold 15px "D2Coding"')
+      await Promise.race([
+        Promise.all([
+          document.fonts.load('15px "D2Coding"'),
+          document.fonts.load('bold 15px "D2Coding"')
+        ]),
+        // Never let a slow/missing font block the first fit + viewport —
+        // the fallback font stack renders fine while D2Coding loads.
+        new Promise((res) => setTimeout(res, 1500))
       ]);
     } catch {}
   })();
@@ -2041,3 +2056,28 @@ async function bootstrap() {
     }
   }
 })();
+
+// ---- Global error visibility (diagnostics) ----
+// Surface any uncaught runtime error on the page so problems are visible
+// instead of silently breaking input/rendering.
+window.addEventListener('error', (ev) => {
+  showFatal(ev.error || ev.message || 'unknown error');
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  showFatal((ev.reason && (ev.reason.message || ev.reason)) || 'unhandled rejection');
+});
+function showFatal(msg) {
+  let el = document.getElementById('webpty-fatal');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'webpty-fatal';
+    el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99999;'
+      + 'background:#2a0f0f;color:#ff8a8a;font:12px/1.5 monospace;'
+      + 'padding:8px 10px;border:1px solid #a33;border-radius:6px;'
+      + 'white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow:auto;';
+    document.body.appendChild(el);
+  }
+  const line = document.createElement('div');
+  line.textContent = '⚠ ' + String(msg).slice(0, 500);
+  el.appendChild(line);
+}
