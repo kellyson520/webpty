@@ -199,6 +199,31 @@
       </div>
     </div>
 
+    <div id="notify-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>通知中心</h2>
+          <button id="notify-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <label>规则
+              <select id="notify-rule-type">
+                <option value="failed">failed</option>
+                <option value="completed">completed</option>
+                <option value="crashed">crashed</option>
+                <option value="terminated">terminated</option>
+              </select>
+            </label>
+            <button id="notify-rule-add" type="button">添加规则</button>
+            <button id="notify-test" type="button">测试发送</button>
+          </div>
+          <div id="notify-rules" class="notify-section"></div>
+          <div id="notify-messages" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/vendor/xterm/lib/xterm.js"></script>
     <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
     <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>

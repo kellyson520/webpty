@@ -24,6 +24,10 @@ const tokenGate = document.getElementById('token-gate');
 const tokenGateInput = document.getElementById('token-gate-input');
 const tokenGateBtn = document.getElementById('token-gate-btn');
 const tokenGateErr = document.getElementById('token-gate-err');
+const notifyBackdrop = document.getElementById('notify-backdrop');
+const notifyRules = document.getElementById('notify-rules');
+const notifyMessages = document.getElementById('notify-messages');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const folderPickerBackdrop = document.getElementById('folder-picker-backdrop');
 const folderPickerList = document.getElementById('folder-picker-list');
 const folderPickerPath = document.getElementById('folder-picker-path');
@@ -1480,6 +1484,13 @@ function openMenu(sessionId) {
   addMenuItem('部署', () => sendToSession(session.id, '请部署。\r'));
 
   addMenuSep();
+  addMenuLabel('扩展');
+  addMenuItem('通知中心', openNotifyPanel);
+  addMenuItem('成本账单', () => { closeMenu(); alert('成本面板（M3 实现）'); });
+  addMenuItem('备份管理', () => { closeMenu(); alert('备份面板（M4 实现）'); });
+  addMenuItem('迁移向导', () => { closeMenu(); alert('迁移面板（M5 实现）'); });
+
+  addMenuSep();
   addMenuLabel('工具');
   const cwd = (session.cwd || '').toLowerCase();
   const project = (projects || []).find((p) => p.path.toLowerCase() === cwd)
@@ -2081,3 +2092,38 @@ function showFatal(msg) {
   line.textContent = '⚠ ' + String(msg).slice(0, 500);
   el.appendChild(line);
 }
+
+// ---- Notification center panel (ext) ----
+function openNotifyPanel() {
+  closeMenu();
+  notifyBackdrop.hidden = false;
+  refreshNotifyPanel();
+}
+async function refreshNotifyPanel() {
+  const [rules, msgs] = await Promise.all([
+    api('/api/notify/rules').catch(() => ({ rules: [] })),
+    api('/api/notify/messages?page=1').catch(() => ({ items: [] })),
+  ]);
+  notifyRules.innerHTML = '<h4>规则</h4>' + (rules.rules || []).map((r) =>
+    `<div class="notify-item">${esc(r.name)} — ${esc(r.event_type)}
+     ${r.enabled ? '' : '(停用)'}</div>`).join('') || '<p>无规则</p>';
+  notifyMessages.innerHTML = '<h4>消息记录</h4>' + (msgs.items || []).slice(0, 20).map((m) =>
+    `<div class="notify-item ${esc(m.level)}">[${esc(m.level)}] ${esc(m.title)}
+     <span class="muted">${esc(m.tool || '')} ${esc(m.project || '')}</span></div>`
+  ).join('') || '<p>暂无消息</p>';
+}
+document.getElementById('notify-close').onclick = () => { notifyBackdrop.hidden = true; };
+notifyBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === notifyBackdrop) notifyBackdrop.hidden = true;
+});
+document.getElementById('notify-rule-add').onclick = async () => {
+  const type = document.getElementById('notify-rule-type').value;
+  await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
+    name: 'rule-' + Date.now(), event_type: type, matcher_json: '{}',
+    action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
+  refreshNotifyPanel();
+};
+document.getElementById('notify-test').onclick = async () => {
+  const r = await api('/api/notify/test', { method: 'POST' });
+  alert(r.ok ? '测试邮件已发送' : 'SMTP 未配置');
+};
