@@ -69,6 +69,18 @@ switch between live sessions with a swipe.
   **Migration wizard** — one-click config export/import (merge/replace/dry-run)
   + environment clone; WorkerInterface reserved for cluster use.
 
+> **迁移包中的 secrets / Secrets in migration packages**：导出包**不包含**任何
+> secret 明文（`authToken`、SMTP 密码、`encryption_key`、`allowedLogins` 等一律
+> 置空，manifest 标注 `secrets_redacted`），因此迁移/克隆后**需在目标机手动重配
+> 这些值**。dry-run 预览同样不回显当前配置值（敏感键只标注 `redacted`）。
+> `sessions` 属运行时状态，不随包迁移。备份恢复（restore）会同时恢复通知规则。
+> Exports never carry secrets in plaintext (authToken, SMTP passwords,
+> `encryption_key`, allowedLogins are blanked; `secrets_redacted` in the
+> manifest) — **re-enter secrets on the target host** after import/clone.
+> dry-run never echoes current values (sensitive keys show as `redacted`);
+> `sessions` are runtime state and are not migrated. Backup restore also
+> restores notification rules.
+
 ### 配置（config.json 新增段） / New config sections
 
 ```json

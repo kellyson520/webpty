@@ -45,11 +45,25 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
             json.dump({"port": 9999}, f)  # 破坏配置
         res = await restore_backup(b["id"], self.data, self.db, self.config)
         self.assertTrue(res["ok"])
+        # 返回合并后的完整 config,供调用方同步内存
+        self.assertEqual(res["config"]["port"], 4790)
         with open(os.path.join(self.data, "config.json")) as f:
             restored = json.load(f)
         self.assertEqual(restored["port"], 4790)
         # merge 保留现有 sessions
         self.assertIn("sessions", restored)
+
+    async def test_restore_imports_notify_rules(self):
+        await self.db.upsert_rule({"name": "r1", "event_type": "failed",
+                                   "matcher_json": "{}", "action": "email",
+                                   "level": "warn"})
+        b = await create_backup_async(self.data, self.config, self.db)
+        await self.db.delete_rule(1)  # 恢复前规则丢失
+        res = await restore_backup(b["id"], self.data, self.db, self.config)
+        self.assertTrue(res["ok"])
+        rules = await self.db.list_rules()
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["name"], "r1")
 
     async def test_rotate_keeps_retention(self):
         made = []

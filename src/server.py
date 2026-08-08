@@ -479,6 +479,10 @@ class Server:
             from backup import restore_backup
             res = await restore_backup(int(m.group(1)), self.data_dir, self.db,
                                        self.config)
+            if res.get("ok") and isinstance(res.get("config"), dict):
+                # 磁盘已写回,同步内存 config,避免运行态与磁盘分裂
+                self.config.clear()
+                self.config.update(res["config"])
             return await self._send_json(writer, 200, res, headers)
         m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
         if m and method == "GET":
@@ -516,6 +520,12 @@ class Server:
     async def _handle_migrate_download(self, writer, filename: str):
         backups_dir = os.path.join(self.data_dir, "backups")
         safe = os.path.basename(filename).replace('"', "")
+        # Only the most recent export() may be downloaded — older exports and
+        # arbitrary files under backups/ are never served (download oracle).
+        if self.migrator is None \
+                or safe != self.migrator.last_export_filename:
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
         path = os.path.realpath(os.path.join(backups_dir, safe))
         if not path.startswith(os.path.realpath(backups_dir) + os.sep) \
                 or not os.path.isfile(path):
@@ -821,6 +831,34 @@ async def _serve_client(server: Server, reader: asyncio.StreamReader,
     await server._handle_request(reader, writer)
 
 
+def _backup_settings(config: dict) -> tuple[float, int]:
+    """Parse backup interval_hours/retention defensively; fall back to
+    defaults (24h / 7) and log on non-numeric config values or a non-dict
+    `backup` section so a bad value can never kill the loop."""
+    backup_cfg = config.get("backup")
+    if not isinstance(backup_cfg, dict):
+        backup_cfg = {}
+    try:
+        interval = float(backup_cfg.get("interval_hours", 24))
+        retention = int(backup_cfg.get("retention", 7))
+        return interval, retention
+    except (TypeError, ValueError) as err:
+        log_error("backup", err)
+        return 24.0, 7
+
+
+async def _notify_retry_loop(notifier, interval_s: float = 300.0) -> None:
+    """Periodically retry undelivered SMTP notifications (delivered=0 rows
+    after a transient SMTP failure). Errors are logged, never fatal —
+    mirrors the _backup_loop pattern."""
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await notifier.send_pending()
+        except Exception as err:  # noqa: BLE001
+            log_error("notifier", err)
+
+
 async def main() -> None:
     config = load_config()
     port = effective_port(config.get("port"))
@@ -863,22 +901,9 @@ async def main() -> None:
         """
         from backup import create_backup_async, rotate
 
-        def _backup_settings() -> tuple[float, int]:
-            """Parse interval_hours/retention defensively; fall back to
-            defaults (24h / 7) and log on non-numeric config values so a
-            bad value can never kill the loop.
-            """
-            try:
-                interval = float((config.get("backup") or {}).get("interval_hours", 24))
-                retention = int((config.get("backup") or {}).get("retention", 7))
-                return interval, retention
-            except (TypeError, ValueError) as err:
-                log_error("backup", err)
-                return 24.0, 7
-
         await asyncio.sleep(30)  # 启动后 30s 首次
         while True:
-            interval, retention = _backup_settings()
+            interval, retention = _backup_settings(config)
             try:
                 await create_backup_async(data_dir, config, db)
                 await rotate(db, retention)
@@ -893,6 +918,8 @@ async def main() -> None:
             print(f"[webpty] autostart error: {err}", flush=True)
 
     backup_task = asyncio.create_task(_backup_loop())
+    # 定时重试未送达的 SMTP 通知(默认每 5 分钟),失败只记日志不退出
+    notify_task = asyncio.create_task(_notify_retry_loop(notifier))
     asyncio.create_task(_autostart())
 
     try:
@@ -900,15 +927,17 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        # Cancel the infinite backup loop before tearing down the db so no
-        # in-flight backup touches a closed connection. _autostart is a
+        # Cancel the infinite loops before tearing down the db so no
+        # in-flight backup/retry touches a closed connection. _autostart is a
         # short-lived one-shot task and needs no handle (matches existing
         # behaviour).
         backup_task.cancel()
-        try:
-            await backup_task
-        except asyncio.CancelledError:
-            pass
+        notify_task.cancel()
+        for task in (backup_task, notify_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()

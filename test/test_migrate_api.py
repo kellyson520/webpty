@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -68,6 +69,57 @@ class MigrateApiTest(unittest.TestCase):
                             {"template": "/nonexistent/x.tar.gz"})
         self.assertEqual(st, 200)
         self.assertEqual(out["status"], "error")
+        self.assertIn("inside backups", out["message"])
+
+    def test_clone_rejects_path_outside_backups(self):
+        # backups 目录外真实存在的文件也不可 clone(防文件 oracle)
+        outside = os.path.join(self.tmp, "outside.tar.gz")
+        with open(outside, "wb") as f:
+            f.write(b"garbage")
+        st, out = self._req("POST", "/api/migrate/clone",
+                            {"template": outside})
+        self.assertEqual(st, 200)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("inside backups", out["message"])
+
+    def test_clone_accepts_export_inside_backups(self):
+        st, out = self._req("POST", "/api/migrate/export")
+        self.assertEqual(st, 201)
+        st2, out2 = self._req("POST", "/api/migrate/clone",
+                              {"template": out["path"]})
+        self.assertEqual(st2, 200)
+        self.assertEqual(out2["status"], "done")
+
+    def test_download_only_latest_export(self):
+        st, out = self._req("POST", "/api/migrate/export")
+        self.assertEqual(st, 201)
+        fn = out["filename"]
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/migrate/download/{fn}",
+                timeout=5) as r:
+            self.assertEqual(r.status, 200)
+            data = r.read()
+        self.assertGreater(len(data), 0)
+        # backups/ 下其他文件(非最近导出)→ 404
+        other = "webpty-migrate-19990101-000000.tar.gz"
+        with open(os.path.join(self.tmp, "backups", other), "wb") as f:
+            f.write(data)
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/migrate/download/{other}",
+                timeout=5)
+            self.fail("expected 404 for non-latest export")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+    def test_download_rejects_traversal(self):
+        try:
+            urllib.request.urlopen(
+                "http://127.0.0.1:%d/api/migrate/download/..%%2f..%%2fetc%%2fpasswd"
+                % self.port, timeout=5)
+            self.fail("expected 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
 
     def test_list(self):
         st, out = self._req("GET", "/api/migrate/list")

@@ -138,7 +138,18 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
     merged.update(cfg)  # merge 语义：备份覆盖冲突键，保留现有新增键
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
-    return {"ok": True, "message": "restored"}
+    # 恢复通知规则:同 id 覆盖,其余新增(sessions 是运行时状态,不恢复)
+    existing_ids = {r["id"] for r in await db.list_rules()}
+    for rule in state.get("notify_rules") or []:
+        if not isinstance(rule, dict) or not rule.get("name") \
+                or not rule.get("event_type"):
+            continue
+        r = dict(rule)
+        if r.get("id") not in existing_ids:
+            r.pop("id", None)
+        await db.upsert_rule(r)
+    # 返回合并后的完整 config,调用方负责同步内存
+    return {"ok": True, "message": "restored", "config": merged}
 
 
 async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
