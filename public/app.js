@@ -518,6 +518,18 @@ function buildSessionPage(session) {
       const target = Math.round(frac * maxY);
       const delta = target - b.viewportY;
       if (delta) { try { entry.term.scrollLines(delta); } catch {} }
+      // TUI sessions (alternate screen, mouse tracking): scrollLines has
+      // nothing to scroll — forward a synthetic wheel so the app scrolls.
+      if (entry.term.element.classList.contains('enable-mouse-events')) {
+        try {
+          entry.term.element.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: delta > 0 ? 100 : -100,
+            deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+            bubbles: true,
+            cancelable: true,
+          }));
+        } catch {}
+      }
       updateStripThumb();
     };
     strip.addEventListener('pointerdown', (ev) => {
@@ -589,6 +601,49 @@ function buildSessionPage(session) {
       try { entry.term.scrollLines(lines); } catch {}
     }
   }, { passive: false });
+
+  // Touch scroll in TUI sessions (reasonix etc.): they run in the alternate
+  // screen buffer (no scrollback) and enable mouse tracking, so xterm's own
+  // touch handler has nothing to scroll. On desktop the mouse wheel reaches
+  // the app because xterm forwards wheel → mouse events when tracking is
+  // active. Touch produces no wheel event, so here we synthesize one and
+  // dispatch it to the terminal element — xterm forwards it to the TUI,
+  // which scrolls its own UI. Non-TUI sessions keep xterm's native touch
+  // scrolling (the xterm.js patch made it unconditional).
+  let touchScroll = null;
+  host.addEventListener('touchstart', (ev) => {
+    const t = ev.touches[0];
+    if (!t) return;
+    touchScroll = { y: t.clientY, last: t.clientY, active: false };
+  }, { passive: true });
+  host.addEventListener('touchmove', (ev) => {
+    if (!touchScroll || !entry.term) return;
+    const t = ev.touches[0];
+    if (!t) return;
+    const dy = t.clientY - touchScroll.last;
+    touchScroll.last = t.clientY;
+    if (!touchScroll.active) {
+      if (Math.abs(t.clientY - touchScroll.y) < 8) return; // still a tap
+      touchScroll.active = true;
+    }
+    if (dy === 0) return;
+    const isTui = entry.term.element.classList.contains('enable-mouse-events');
+    if (isTui) {
+      // Synthesize a wheel event; xterm (mouse tracking active) forwards it
+      // to the app, e.g. reasonix scrolls its UI. Use the same delta scale
+      // as a desktop wheel notch (deltaY=100) so TUI scrolling feels normal.
+      try {
+        entry.term.element.dispatchEvent(new WheelEvent('wheel', {
+          deltaY: dy > 0 ? 100 : -100,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          bubbles: true,
+          cancelable: true,
+        }));
+      } catch {}
+    }
+  }, { passive: true });
+  host.addEventListener('touchend', () => { touchScroll = null; }, { passive: true });
+  host.addEventListener('touchcancel', () => { touchScroll = null; }, { passive: true });
 
   // Right-click: copy selection if there is one, otherwise paste the clipboard.
   // Suppress the browser context menu in both cases.
