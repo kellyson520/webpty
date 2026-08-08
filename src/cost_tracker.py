@@ -22,8 +22,8 @@ class CostTracker:
             (config.get("budget") or {}).get("limit", 0.0) or 0.0)
         self._tasks: set[asyncio.Task] = set()
 
-    def handle_agent_event(self, event: dict) -> None:
-        task = asyncio.create_task(self._record(event))
+    def handle_agent_event(self, event: dict, sid: str | None = None) -> None:
+        task = asyncio.create_task(self._record(event, sid))
         self._tasks.add(task)
         task.add_done_callback(self._on_record_done)
 
@@ -35,7 +35,7 @@ class CostTracker:
         if err is not None:
             log_error("cost_tracker", err)
 
-    async def _record(self, event: dict) -> None:
+    async def _record(self, event: dict, sid: str | None = None) -> None:
         usage = None
         u = event.get("usage")
         if isinstance(u, dict) and u:
@@ -63,7 +63,7 @@ class CostTracker:
             "project": event.get("project"),
             "tool": event.get("tool"),
             "model": model,
-            "session_id": usage.get("session_id") or event.get("session_id"),
+            "session_id": usage.get("session_id") or sid or event.get("session_id"),
             "tokens_in": usage["tokens_in"], "tokens_out": usage["tokens_out"],
             "cost": cost, "source": "realtime"})
 

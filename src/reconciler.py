@@ -43,7 +43,7 @@ class Reconciler:
             key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
             dup = await self.db.query_one(
                 "SELECT 1 AS x FROM token_usage WHERE session_id=? AND "
-                "tokens_in=? AND tokens_out=? AND source='posthoc' LIMIT 1",
+                "tokens_in=? AND tokens_out=? LIMIT 1",
                 key)
             if dup:
                 continue

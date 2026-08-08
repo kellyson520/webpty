@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.request
 
 SRC = os.path.dirname(os.path.abspath(__file__)).replace("/test", "/src")
@@ -55,6 +56,18 @@ class CostApiTest(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read().decode())
 
+    def _req_err(self, method, path, body=None):
+        """Like _req but returns (status, body) for non-2xx responses."""
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers={"content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read().decode())
+
     def test_cost_summary_and_grouped(self):
         st, out = self._req("GET", "/api/cost/summary?period=day")
         self.assertEqual(st, 200)
@@ -66,8 +79,13 @@ class CostApiTest(unittest.TestCase):
     def test_budget_roundtrip(self):
         st, out = self._req("PUT", "/api/cost/budget", {"limit": 12.5})
         self.assertTrue(out["ok"])
-        st, out = self._req("GET", "/api/cost/alerts")
-        self.assertIsInstance(out, list)
+        st, alerts = self._req("GET", "/api/cost/alerts")
+        self.assertIsInstance(alerts, list)
+        self.assertEqual(alerts[0]["budget"], 12.5)
+        st, out = self._req_err("PUT", "/api/cost/budget", {})
+        self.assertEqual(st, 400)
+        st, out = self._req_err("PUT", "/api/cost/budget", {"limit": "abc"})
+        self.assertEqual(st, 400)
 
     def test_reconcile_runs(self):
         st, out = self._req("POST", "/api/cost/reconcile")

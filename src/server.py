@@ -407,7 +407,13 @@ class Server:
                 writer, 200, await self.cost.alerts(), headers)
         if path == "/api/cost/budget" and method == "PUT":
             body = await self._read_json(reader, headers)
-            await self.cost.set_budget(float(body.get("limit", 0)))
+            if "limit" not in body:
+                raise HttpError(400, "limit required")
+            try:
+                limit = float(body["limit"])
+            except (TypeError, ValueError):
+                raise HttpError(400, "Invalid limit")
+            await self.cost.set_budget(limit)
             return await self._send_json(writer, 200, {"ok": True}, headers)
         if path == "/api/cost/reconcile" and method == "POST":
             from reconciler import Reconciler
@@ -696,7 +702,7 @@ async def main() -> None:
     await server.sessions.init()
     server.sessions.start_host_monitor()
     server.sessions.on("session_event", notifier.handle_event)
-    server.sessions.on("agentEvent", lambda sid, item: cost.handle_agent_event(item))
+    server.sessions.on("agentEvent", lambda sid, item: cost.handle_agent_event(item, sid))
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
