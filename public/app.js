@@ -27,6 +27,7 @@ const tokenGateErr = document.getElementById('token-gate-err');
 const notifyBackdrop = document.getElementById('notify-backdrop');
 const notifyRules = document.getElementById('notify-rules');
 const notifyMessages = document.getElementById('notify-messages');
+const costBackdrop = document.getElementById('cost-backdrop');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const folderPickerBackdrop = document.getElementById('folder-picker-backdrop');
 const folderPickerList = document.getElementById('folder-picker-list');
@@ -1486,7 +1487,7 @@ function openMenu(sessionId) {
   addMenuSep();
   addMenuLabel('扩展');
   addMenuItem('通知中心', openNotifyPanel);
-  addMenuItem('成本账单', () => { closeMenu(); alert('成本面板（M3 实现）'); });
+  addMenuItem('成本账单', openCostPanel);
   addMenuItem('备份管理', () => { closeMenu(); alert('备份面板（M4 实现）'); });
   addMenuItem('迁移向导', () => { closeMenu(); alert('迁移面板（M5 实现）'); });
 
@@ -2134,4 +2135,43 @@ document.getElementById('notify-test').onclick = async () => {
   } catch (e) {
     alert(e.message);
   }
+};
+
+// ---- Cost dashboard panel (ext) ----
+function openCostPanel() {
+  closeMenu();
+  costBackdrop.hidden = false;
+  refreshCostPanel();
+}
+async function refreshCostPanel() {
+  const period = document.getElementById('cost-period').value;
+  const [sum, byTool, alerts] = await Promise.all([
+    api(`/api/cost/summary?period=${period}`).catch(() => ({})),
+    api(`/api/cost/by-tool?period=${period}`).catch(() => []),
+    api('/api/cost/alerts').catch(() => []),
+  ]);
+  document.getElementById('cost-cards').innerHTML =
+    `<div class="cost-card"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div>成本</div></div>` +
+    `<div class="cost-card"><div class="v">${sum.tokens_in || 0}</div><div>输入 tokens</div></div>` +
+    `<div class="cost-card"><div class="v">${sum.tokens_out || 0}</div><div>输出 tokens</div></div>` +
+    (alerts.some((a) => a.active) ? `<div class="cost-card" style="border-color:#e5534b"><div class="v">超限</div><div>预算</div></div>` : '');
+  document.getElementById('cost-groups').innerHTML = '<h4>按工具</h4>' +
+    ((byTool || []).map((g) => `<div class="notify-item">${esc(g.name)} —
+      $${Number(g.cost || 0).toFixed(4)} (${g.tokens_in}/${g.tokens_out})</div>`).join('') ||
+    '<p>暂无数据</p>');
+}
+document.getElementById('cost-close').onclick = () => { costBackdrop.hidden = true; };
+costBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === costBackdrop) costBackdrop.hidden = true;
+});
+document.getElementById('cost-period').onchange = refreshCostPanel;
+document.getElementById('cost-budget-set').onclick = async () => {
+  const v = parseFloat(document.getElementById('cost-budget').value || '0');
+  await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: v }) });
+  refreshCostPanel();
+};
+document.getElementById('cost-reconcile').onclick = async () => {
+  const r = await api('/api/cost/reconcile', { method: 'POST' });
+  alert(`日志校对完成，补录 ${r.added} 条`);
+  refreshCostPanel();
 };

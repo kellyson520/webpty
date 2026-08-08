@@ -1046,3 +1046,7 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
 .notify-item.warn { border-color: #d29922; }
 .panel-close { background: none; border: none; font-size: 18px; cursor: pointer; color: var(--muted); }
 .panel .muted { color: var(--muted); }
+.cost-cards { display: flex; gap: 10px; margin-bottom: 12px; }
+.cost-card { flex: 1; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; text-align: center; }
+.cost-card .v { font-size: 20px; font-weight: 700; }

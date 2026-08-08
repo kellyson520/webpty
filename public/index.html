@@ -224,6 +224,33 @@
       </div>
     </div>
 
+    <div id="cost-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>成本账单</h2>
+          <button id="cost-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <label>周期
+              <select id="cost-period">
+                <option value="day">今日</option>
+                <option value="week">本周</option>
+                <option value="month">本月</option>
+              </select>
+            </label>
+            <label>预算 $
+              <input id="cost-budget" type="number" step="0.01" min="0" style="width:90px">
+            </label>
+            <button id="cost-budget-set" type="button">设置</button>
+            <button id="cost-reconcile" type="button">日志校对</button>
+          </div>
+          <div id="cost-cards" class="cost-cards"></div>
+          <div id="cost-groups" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/vendor/xterm/lib/xterm.js"></script>
     <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
     <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>
