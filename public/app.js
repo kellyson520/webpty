@@ -2782,3 +2782,140 @@ document.getElementById('providers-new-add').onclick = async () => {
   }
 };
 document.getElementById('agents-providers-btn').onclick = openProvidersPanel;
+
+// ---- Agent native config files panel (ext) ----
+// Reads & precisely edits each agent CLI's own config (codex config.toml,
+// claude settings.json, reasonix config.toml, ...) via /api/agent-config/*.
+const acfgBackdrop = document.getElementById('acfg-backdrop');
+const acfgTool = document.getElementById('acfg-tool');
+const acfgPath = document.getElementById('acfg-path');
+const acfgFields = document.getElementById('acfg-fields');
+const acfgRaw = document.getElementById('acfg-raw');
+
+// 每工具可编辑字段 → 显示名/类型/占位
+const ACFG_FIELD_META = {
+  model: { label: '模型 model', ph: 'gpt-5.4 / deepseek-v4-flash' },
+  base_url: { label: 'API 地址 base_url', ph: 'https://api.example.com/v1' },
+  api_key: { label: 'API 密钥 api_key', ph: 'sk-...（留空不改）', secret: true },
+  language: { label: '语言 language', ph: 'zh / en' },
+  effort: { label: '推理强度 effort', ph: 'low / high / max' },
+  theme: { label: '主题 theme', ph: 'dark / light' },
+};
+
+let acfgList = null;
+
+async function openAcfgPanel() {
+  acfgBackdrop.hidden = false;
+  const r = await api('/api/agent-config/list').catch(() => ({ tools: {} }));
+  acfgList = r.tools || {};
+  acfgTool.innerHTML = Object.keys(acfgList).map((t) => {
+    const info = acfgList[t];
+    const state = info.exists ? (info.editable ? '' : '（只读）') : '（无配置）';
+    return `<option value="${esc(t)}">${esc(t)} ${state}</option>`;
+  }).join('');
+  acfgTool.onchange = loadAcfgTool;
+  loadAcfgTool();
+}
+
+async function loadAcfgTool() {
+  const tool = acfgTool.value;
+  const info = acfgList[tool] || {};
+  acfgPath.textContent = info.exists ? (info.path || '') : '未找到配置文件';
+  acfgRaw.hidden = true;
+  if (!info.exists) {
+    acfgFields.innerHTML = `<div class="empty-tip">该工具暂无配置文件（webpty 只在发现文件时展示）</div>`;
+    return;
+  }
+  const r = await api(`/api/agent-config/read?tool=${encodeURIComponent(tool)}`).catch(() => ({}));
+  const content = r.content || '';
+  acfgRaw.textContent = content;
+  const fields = await deriveAcfgFields(tool, content);
+  renderAcfgFields(tool, fields, content);
+}
+
+// 从原文提取当前值（TOML 行级 / JSON 扁平）用于表单回显
+async function deriveAcfgFields(tool, content) {
+  const isToml = /^[a-zA-Z_]+\s*=/.test(content.trim().split('\n')[0] || '');
+  const out = {};
+  if (isToml) {
+    for (const line of content.split('\n')) {
+      const m = line.match(/^([a-zA-Z_]+)\s*=\s*"([^"]*)"/);
+      if (m) out[m[1]] = m[2];
+    }
+  } else {
+    try {
+      const obj = JSON.parse(content);
+      const flat = {};
+      const walk = (o, prefix) => {
+        if (o && typeof o === 'object') {
+          for (const [k, v] of Object.entries(o)) {
+            if (v !== null && typeof v === 'object') walk(v, prefix + k + '.');
+            else flat[prefix + k] = v;
+          }
+        }
+      };
+      walk(obj, '');
+      // 映射 claude 的 env 键为通用字段名
+      if (flat['env.ANTHROPIC_BASE_URL'] !== undefined) out.base_url = flat['env.ANTHROPIC_BASE_URL'];
+      if (flat['env.ANTHROPIC_AUTH_TOKEN'] !== undefined) out.api_key = flat['env.ANTHROPIC_AUTH_TOKEN'];
+      if (flat['theme'] !== undefined) out.theme = flat['theme'];
+    } catch {}
+  }
+  return out;
+}
+
+function renderAcfgFields(tool, values, content) {
+  const editable = (acfgList[tool] || {}).editable;
+  if (!editable) {
+    acfgFields.innerHTML = `<div class="empty-tip">该工具配置当前为只读（YAML 等格式暂不支持编辑）</div>`;
+    return;
+  }
+  const keys = Object.keys(ACFG_FIELD_META).filter((k) => k !== 'theme' || values.theme !== undefined || tool === 'claude');
+  acfgFields.innerHTML = keys.map((k) => {
+    const meta = ACFG_FIELD_META[k];
+    const cur = values[k];
+    const secret = meta.secret && cur;
+    return `<div class="panel-item">
+      <span class="dot" style="background:var(--accent)"></span>
+      <div class="item-main">
+        <div class="item-title">${meta.label} ${cur !== undefined ? `<span class="badge">${secret ? '已配置' : esc(String(cur))}</span>` : '<span class="badge warn">未设置</span>'}</div>
+        <div class="row" style="margin-top:6px">
+          <input class="inp" data-akey="${k}" type="${meta.secret ? 'password' : 'text'}"
+            placeholder="${meta.secret && cur ? '已配置（留空不改）' : meta.ph}" value="">
+        </div>
+      </div>
+    </div>`;
+  }).join('') +
+  `<div class="panel-toolbar" style="margin-top:10px">
+     <button id="acfg-save" class="btn primary" type="button">保存修改</button>
+     <span class="muted" style="font-size:12px">只替换上面字段对应行/键，其余内容与注释原样保留</span>
+   </div>`;
+  const saveBtn = document.getElementById('acfg-save');
+  if (saveBtn) {
+    saveBtn.onclick = async () => {
+      const values2 = {};
+      acfgFields.querySelectorAll('[data-akey]').forEach((el) => {
+        const v = el.value.trim();
+        if (v !== '') values2[el.dataset.akey] = v;
+      });
+      if (!Object.keys(values2).length) { alert('没有输入任何修改'); return; }
+      try {
+        const r = await api('/api/agent-config/update', {
+          method: 'PUT', body: JSON.stringify({ tool, values: values2 }) });
+        alert(r.ok ? `已更新：${(r.changed || []).join(', ')}` : '更新失败: ' + (r.error || ''));
+        loadAcfgTool();
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    };
+  }
+}
+
+document.getElementById('acfg-close').onclick = () => { acfgBackdrop.hidden = true; };
+acfgBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === acfgBackdrop) acfgBackdrop.hidden = true;
+});
+document.getElementById('acfg-toggle-raw').onclick = () => {
+  acfgRaw.hidden = !acfgRaw.hidden;
+};
+document.getElementById('agents-acfg-btn').onclick = openAcfgPanel;

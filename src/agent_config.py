@@ -1,0 +1,239 @@
+"""Read & precisely edit each agent CLI's own local config file.
+
+This is separate from webpty's config.json — it manages the agent's
+native configuration (codex ~/.codex/config.toml, claude
+~/.claude/settings.json, reasonix ~/.reasonix/config.toml, ...).
+
+Safety:
+- Only whitelisted paths under $HOME are touched (realpath check).
+- Files are read/written with size caps (read ≤ 256KB).
+- TOML edits are line-level: the target key's line(s) are replaced and
+  everything else (comments, ordering, inline notes) is preserved.
+- JSON edits parse + rewrite with indent=2 (JSON has no comments).
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any
+
+_HOME = os.path.expanduser("~")
+
+# tool -> list of candidate config paths (first existing one wins)
+AGENT_CONFIG_PATHS: dict[str, list[str]] = {
+    "codex": [os.path.join(_HOME, ".codex", "config.toml")],
+    "reasonix": [os.path.join(_HOME, ".reasonix", "config.toml")],
+    "claude": [os.path.join(_HOME, ".claude", "settings.json")],
+    "opencode": [
+        os.path.join(_HOME, ".config", "opencode", "opencode.json"),
+        os.path.join(_HOME, ".opencode.json"),
+    ],
+    "aider": [
+        os.path.join(_HOME, ".aider.conf.yml"),
+        os.path.join(_HOME, ".config", "aider", "conf.yml"),
+    ],
+    "gemini": [
+        os.path.join(_HOME, ".gemini", "settings.json"),
+        os.path.join(_HOME, ".config", "gemini", "settings.json"),
+    ],
+    "copilot": [os.path.join(_HOME, ".config", "github-copilot", "hosts.json")],
+    "cursor-agent": [os.path.join(_HOME, ".config", "cursor-agent", "config.toml")],
+    "agy": [os.path.join(_HOME, ".config", "agy", "config.toml")],
+}
+
+MAX_READ_BYTES = 256 * 1024
+
+# ---- editable key maps ---------------------------------------------------
+# TOML tools: key name in the file -> how to match & replace its line(s).
+# Each entry: (regex that matches the whole key line, value formatter).
+# The regex must anchor ^ and match the value part as group 1.
+TOML_KEYS: dict[str, dict[str, tuple[str, str]]] = {
+    "codex": {
+        "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),
+        "base_url": (r'^openai_base_url\s*=\s*".*?"', 'openai_base_url = "{}"'),
+        "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
+    },
+    "reasonix": {
+        "model": (r'^default_model\s*=\s*".*?"', 'default_model = "{}"'),
+        "language": (r'^language\s*=\s*".*?"', 'language = "{}"'),
+        "effort": (r'^effort\s*=\s*"[a-z]+"', 'effort = "{}"'),
+    },
+    "cursor-agent": {
+        "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),
+        "base_url": (r'^base_url\s*=\s*".*?"', 'base_url = "{}"'),
+        "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
+    },
+    "agy": {
+        "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),
+        "base_url": (r'^base_url\s*=\s*".*?"', 'base_url = "{}"'),
+        "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
+    },
+}
+
+# JSON tools: key name -> dotted path inside the JSON object.
+JSON_KEYS: dict[str, dict[str, str]] = {
+    "claude": {
+        "base_url": "env.ANTHROPIC_BASE_URL",
+        "api_key": "env.ANTHROPIC_AUTH_TOKEN",
+        "theme": "theme",
+    },
+    "gemini": {
+        "api_key": "apiKey",
+        "base_url": "baseUrl",
+    },
+    "copilot": {
+        "api_key": "github.com.oauth_token",
+    },
+}
+
+# YAML tools (read-only for now: no stdlib yaml writer; edits rejected)
+YAML_TOOLS = {"aider"}
+
+
+def _real_home() -> str:
+    return os.path.realpath(_HOME)
+
+
+def config_path(tool: str) -> str | None:
+    """Return the existing config path for a tool, or None."""
+    for cand in AGENT_CONFIG_PATHS.get(tool, []):
+        p = os.path.realpath(cand)
+        home = _real_home()
+        if not (p == home or p.startswith(home + os.sep)):
+            continue  # not under $HOME — skip
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def list_configs() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for tool, cands in AGENT_CONFIG_PATHS.items():
+        path = config_path(tool)
+        out[tool] = {
+            "exists": path is not None,
+            "path": path,
+            "format": "toml" if tool in TOML_KEYS and path else (
+                "json" if tool in JSON_KEYS and path else (
+                    "yaml" if tool in YAML_TOOLS and path else None)),
+            "editable": bool(path) and (tool in TOML_KEYS or tool in JSON_KEYS),
+        }
+    return out
+
+
+def read_config(tool: str) -> dict[str, Any]:
+    path = config_path(tool)
+    if not path:
+        return {"ok": False, "error": "no config file"}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            size = os.fstat(f.fileno()).st_size
+            if size > MAX_READ_BYTES:
+                return {"ok": False, "error": "config too large"}
+            content = f.read()
+    except OSError as err:
+        return {"ok": False, "error": str(err)}
+    return {"ok": True, "path": path, "content": content}
+
+
+def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> tuple[str, bool]:
+    """Replace the key's line in TOML text; preserve everything else."""
+    pattern, template = fmt
+    new_line = template.format(value.replace('"', '\\"'))
+    lines = content.splitlines(keepends=True)
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if not replaced and re.match(pattern, line.strip()):
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f"{indent}{new_line}\n")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        # Key absent — append at the end (or after the last section header).
+        out.append(f"{new_line}\n")
+    return "".join(out), replaced
+
+
+def _set_json_path(obj: Any, path: str, value: Any) -> bool:
+    parts = path.split(".")
+    cur = obj
+    for i, part in enumerate(parts):
+        if i == len(parts) - 1:
+            if isinstance(cur, dict):
+                cur[part] = value
+                return True
+            return False
+        nxt = cur.get(part) if isinstance(cur, dict) else None
+        if not isinstance(nxt, dict):
+            nxt = {}
+            if isinstance(cur, dict):
+                cur[part] = nxt
+            else:
+                return False
+        cur = nxt
+    return False
+
+
+def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Precisely replace the given keys in the tool's config file."""
+    path = config_path(tool)
+    if not path:
+        return {"ok": False, "error": "no config file"}
+    fmt = "toml" if tool in TOML_KEYS else ("json" if tool in JSON_KEYS else None)
+    if fmt is None:
+        return {"ok": False, "error": f"unsupported format for {tool}"}
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError as err:
+        return {"ok": False, "error": str(err)}
+
+    changed: list[str] = []
+    if fmt == "toml":
+        for key, raw in values.items():
+            if key not in TOML_KEYS[tool]:
+                continue
+            content, _ = _replace_toml(content, key, TOML_KEYS[tool][key], str(raw))
+            changed.append(key)
+    else:  # json
+        try:
+            obj = json.loads(content)
+        except json.JSONDecodeError as err:
+            return {"ok": False, "error": f"invalid json: {err}"}
+        if not isinstance(obj, dict):
+            return {"ok": False, "error": "config root is not an object"}
+        for key, raw in values.items():
+            if key not in JSON_KEYS[tool]:
+                continue
+            # strings that look empty are kept as-is (user typed "")
+            val: Any = raw
+            if _set_json_path(obj, JSON_KEYS[tool][key], val):
+                changed.append(key)
+        content = json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+    if not changed:
+        return {"ok": False, "error": "no supported keys provided"}
+
+    # Atomic write: temp file + rename, keep original permissions.
+    try:
+        mode = os.stat(path).st_mode & 0o777
+        tmp = path + ".webpty-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except OSError as err:
+        return {"ok": False, "error": str(err)}
+
+    return {"ok": True, "changed": changed, "path": path}
+
+
+def _redact(value: str) -> str:
+    """Mask a secret for display (keep first 6 chars)."""
+    if len(value) <= 10:
+        return "••••"
+    return value[:6] + "…" + value[-4:]

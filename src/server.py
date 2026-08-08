@@ -44,6 +44,11 @@ mimetypes.add_type("font/woff2", ".woff2")
 # Paths served with immutable long cache (vendor assets never change content).
 _VENDOR_PREFIXES = ("/vendor/",)
 
+# Tools whose native config files webpty can read & edit.
+_AGENT_CONFIG_TOOLS = frozenset(
+    ("codex", "reasonix", "claude", "opencode", "aider",
+     "gemini", "copilot", "cursor-agent", "agy"))
+
 
 class HttpError(Exception):
     def __init__(self, status: int, message: str) -> None:
@@ -418,6 +423,32 @@ class Server:
             save_config(self.config)
             return await self._send_json(writer, 200,
                                          {"providers": merged_providers}, headers)
+
+        # --- agent native config files --------------------------------------
+        if path == "/api/agent-config/list" and method == "GET":
+            from agent_config import list_configs
+            return await self._send_json(writer, 200, {"tools": list_configs()},
+                                         headers)
+
+        if path == "/api/agent-config/read" and method == "GET":
+            from agent_config import read_config
+            tool = self._query_param(path, "tool") or ""
+            if tool not in _AGENT_CONFIG_TOOLS:
+                return await self._send_json(writer, 400,
+                                             {"error": "unknown tool"}, headers)
+            return await self._send_json(writer, 200, read_config(tool), headers)
+
+        if path == "/api/agent-config/update" and method == "PUT":
+            from agent_config import update_config
+            body = await self._read_json(reader, headers)
+            tool = str(body.get("tool") or "")
+            values = body.get("values") if isinstance(body.get("values"), dict) else {}
+            if tool not in _AGENT_CONFIG_TOOLS:
+                return await self._send_json(writer, 400,
+                                             {"error": "unknown tool"}, headers)
+            res = update_config(tool, values)
+            status = 200 if res.get("ok") else 400
+            return await self._send_json(writer, status, res, headers)
 
         if path == "/api/sessions" and method == "GET":
             return await self._send_json(writer, 200, self.sessions.list(), headers)

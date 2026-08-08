@@ -304,6 +304,31 @@
       </div>
     </div>
 
+    <div id="acfg-backdrop" class="panel-backdrop" hidden>
+      <div class="panel panel-lg">
+        <div class="panel-head">
+          <h2><span class="panel-icon">📄</span>Agent 配置文件</h2>
+          <button id="acfg-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-toolbar">
+            <label class="field">工具
+              <select id="acfg-tool" class="sel"></select>
+            </label>
+            <span id="acfg-path" class="muted" style="font-size:12px"></span>
+          </div>
+          <div class="panel-section">
+            <h3>常用字段（精准替换，保留其他内容与注释）</h3>
+            <div id="acfg-fields" class="panel-list"></div>
+          </div>
+          <div class="panel-section">
+            <h3>配置原文 <button id="acfg-toggle-raw" class="btn sm" type="button">查看/隐藏</button></h3>
+            <pre id="acfg-raw" class="result-pre" hidden></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="providers-backdrop" class="panel-backdrop" hidden>
       <div class="panel panel-lg">
         <div class="panel-head">
@@ -341,6 +366,7 @@
             </label>
             <button id="agents-new-add" class="btn primary" type="button">＋ 添加</button>
             <button id="agents-providers-btn" class="btn" type="button">供应商预设</button>
+            <button id="agents-acfg-btn" class="btn" type="button">📄 配置文件</button>
           </div>
           <div class="panel-section">
             <h3>已配置 Agent <span class="count" id="agents-count">0</span></h3>
