@@ -28,6 +28,7 @@ const notifyBackdrop = document.getElementById('notify-backdrop');
 const notifyRules = document.getElementById('notify-rules');
 const notifyMessages = document.getElementById('notify-messages');
 const costBackdrop = document.getElementById('cost-backdrop');
+const backupBackdrop = document.getElementById('backup-backdrop');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const folderPickerBackdrop = document.getElementById('folder-picker-backdrop');
 const folderPickerList = document.getElementById('folder-picker-list');
@@ -1488,7 +1489,7 @@ function openMenu(sessionId) {
   addMenuLabel('扩展');
   addMenuItem('通知中心', openNotifyPanel);
   addMenuItem('成本账单', openCostPanel);
-  addMenuItem('备份管理', () => { closeMenu(); alert('备份面板（M4 实现）'); });
+  addMenuItem('备份管理', openBackupPanel);
   addMenuItem('迁移向导', () => { closeMenu(); alert('迁移面板（M5 实现）'); });
 
   addMenuSep();
@@ -2184,4 +2185,45 @@ document.getElementById('cost-reconcile').onclick = async () => {
   } catch (e) {
     alert(e.message);
   }
+};
+
+// ---- Backup management panel (ext) ----
+function openBackupPanel() {
+  closeMenu();
+  backupBackdrop.hidden = false;
+  refreshBackupPanel();
+}
+async function refreshBackupPanel() {
+  const r = await api('/api/backup/list').catch(() => ({ backups: [] }));
+  document.getElementById('backup-list').innerHTML = '<h4>快照列表</h4>' +
+    ((r.backups || []).map((b) =>
+      `<div class="notify-item">${esc(b.filename)} — ${esc((Number(b.size_bytes || 0) / 1024).toFixed(1))}KB
+       <button data-restore="${esc(b.id)}" type="button">恢复</button></div>`).join('') ||
+    '<p>暂无备份</p>');
+  // Re-bind restore handlers after every refresh (innerHTML replaced above).
+  document.querySelectorAll('#backup-list [data-restore]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('恢复该备份将覆盖当前配置，继续？')) return;
+      try {
+        const r = await api(`/api/backup/restore/${btn.dataset.restore}`, { method: 'POST' });
+        alert(r.ok ? '恢复成功' : '恢复失败: ' + r.message);
+      } catch (e) {
+        alert('恢复失败: ' + e.message);
+      }
+      refreshBackupPanel();
+    };
+  });
+}
+document.getElementById('backup-close').onclick = () => { backupBackdrop.hidden = true; };
+backupBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === backupBackdrop) backupBackdrop.hidden = true;
+});
+document.getElementById('backup-create').onclick = async () => {
+  try {
+    await api('/api/backup/create', { method: 'POST' });
+    alert('备份已创建');
+  } catch (e) {
+    alert('备份失败: ' + e.message);
+  }
+  refreshBackupPanel();
 };
