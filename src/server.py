@@ -23,7 +23,8 @@ sys.path.insert(0, _HERE)
 
 from auth import authorize_peer  # noqa: E402
 from config import (  # noqa: E402
-    config_path, effective_port, load_config, logs_dir, projects_root, save_config,
+    config_path, data_dir, effective_port, load_config, logs_dir, projects_root,
+    save_config,
 )
 from logging_util import log_error  # noqa: E402
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
@@ -48,7 +49,7 @@ class HttpError(Exception):
 
 
 class Server:
-    def __init__(self) -> None:
+    def __init__(self, db=None, notifier=None) -> None:
         self.config = load_config()
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
@@ -56,6 +57,8 @@ class Server:
         self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
         self._ws_clients: dict[str, list] = {}  # session id -> ws objects
+        self.db = db
+        self.notifier = notifier
 
     # --- helpers ------------------------------------------------------------
     def _effective_roots(self) -> list[str]:
@@ -355,12 +358,47 @@ class Server:
             ok = self.sessions.write(m.group(1), body.get("bytes") or "")
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
+        # --- notifications -----------------------------------------------------
+        if path == "/api/notify/rules" and method == "GET":
+            return await self._send_json(
+                writer, 200, {"rules": await self.db.list_rules()}, headers)
+        if path == "/api/notify/rules" and method == "POST":
+            body = await self._read_json(reader, headers)
+            rid = await self.db.upsert_rule(body)
+            return await self._send_json(writer, 201, {"id": rid}, headers)
+        m = re.match(r"^/api/notify/rules/(\d+)$", path)
+        if m and method == "PUT":
+            body = await self._read_json(reader, headers)
+            body["id"] = int(m.group(1))
+            await self.db.upsert_rule(body)
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if m and method == "DELETE":
+            await self.db.delete_rule(int(m.group(1)))
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if path == "/api/notify/messages" and method == "GET":
+            page = int(self._query_param(path, "page") or 1)
+            return await self._send_json(
+                writer, 200, await self.db.list_notifications(page), headers)
+        if path == "/api/notify/test" and method == "POST":
+            ok = await self.notifier.test_message()
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
+
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
             await self._serve_static(writer, method, path, headers)
             return
 
         raise HttpError(405, "Method not allowed")
+
+    @staticmethod
+    def _query_param(path: str, name: str) -> str | None:
+        if "?" not in path:
+            return None
+        for part in path.split("?", 1)[1].split("&"):
+            k, _, v = part.partition("=")
+            if k == name:
+                return v
+        return None
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0
@@ -624,9 +662,15 @@ async def main() -> None:
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")
 
-    server = Server()
+    from db import Database
+    from notifier import Notifier
+    db = Database(os.path.join(data_dir, "webpty.db"))
+    db.connect()
+    notifier = Notifier(db, config)
+    server = Server(db=db, notifier=notifier)
     await server.sessions.init()
     server.sessions.start_host_monitor()
+    server.sessions.on("session_event", notifier.handle_event)
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
@@ -659,6 +703,7 @@ async def main() -> None:
         server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()
+        db.close()
 
 
 if __name__ == "__main__":
