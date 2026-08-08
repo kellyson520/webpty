@@ -23,10 +23,15 @@ sys.path.insert(0, _HERE)
 
 from auth import authorize_peer  # noqa: E402
 from config import (  # noqa: E402
-    config_path, effective_port, load_config, logs_dir, projects_root, save_config,
+    config_path, data_dir, effective_port, load_config, logs_dir, projects_root,
+    save_config,
 )
 from logging_util import log_error  # noqa: E402
 from paths import case_fold, is_path_under_roots, package_root, public_dir  # noqa: E402
+
+# Module-level default resolved from env at import; Server may override via
+# the data_dir constructor argument (main passes the same value).
+_DATA_DIR = data_dir
 from session_manager import SessionManager  # noqa: E402
 from ws import Outbox, accept_websocket  # noqa: E402
 
@@ -47,15 +52,57 @@ class HttpError(Exception):
         self.message = message
 
 
+def parse_multipart(body: bytes, boundary: str) -> tuple[str | None, bytes, str]:
+    """Parse a single-file multipart body (fields `file` + optional `mode`).
+
+    Returns (filename, file_bytes, mode). filename is None / file_bytes empty
+    when the file field is absent; mode falls back to "merge" when missing or
+    not one of merge|replace|dry-run. Only the single trailing CRLF that
+    separates the part from the boundary is stripped, so binary payloads that
+    themselves end in \r or \n survive byte-for-byte.
+    """
+    delim = b"--" + boundary.encode()
+    segs = body.split(delim)
+    filename = None
+    file_bytes = b""
+    mode = "merge"
+    for seg in segs:
+        if b"\r\n\r\n" not in seg:
+            continue
+        head, _, content = seg.partition(b"\r\n\r\n")
+        head_str = head.decode("utf-8", "replace")
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        if 'name="mode"' in head_str:
+            mode = content.decode("utf-8", "replace").strip() or "merge"
+        if 'name="file"' in head_str:
+            for line in head_str.split("\r\n"):
+                if line.lower().startswith("content-disposition:"):
+                    for bit in line.split(";"):
+                        bit = bit.strip()
+                        if bit.startswith("filename="):
+                            filename = bit[len("filename="):].strip('"')
+            file_bytes = content
+    if mode not in ("merge", "replace", "dry-run"):
+        mode = "merge"
+    return filename, file_bytes, mode
+
+
 class Server:
-    def __init__(self) -> None:
+    def __init__(self, db=None, notifier=None, cost=None, migrator=None,
+                 data_dir: str | None = None) -> None:
         self.config = load_config()
+        self.data_dir = data_dir if data_dir is not None else _DATA_DIR
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
         self.pkg = package_root()
         self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
         self._ws_clients: dict[str, list] = {}  # session id -> ws objects
+        self.db = db
+        self.notifier = notifier
+        self.cost = cost
+        self.migrator = migrator
 
     # --- helpers ------------------------------------------------------------
     def _effective_roots(self) -> list[str]:
@@ -355,12 +402,177 @@ class Server:
             ok = self.sessions.write(m.group(1), body.get("bytes") or "")
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
+        # --- notifications -----------------------------------------------------
+        if path == "/api/notify/rules" and method == "GET":
+            return await self._send_json(
+                writer, 200, {"rules": await self.db.list_rules()}, headers)
+        if path == "/api/notify/rules" and method == "POST":
+            body = await self._read_json(reader, headers)
+            if not body.get("name") or not body.get("event_type"):
+                raise HttpError(400, "name and event_type required")
+            rid = await self.db.upsert_rule(body)
+            return await self._send_json(writer, 201, {"id": rid}, headers)
+        m = re.match(r"^/api/notify/rules/(\d+)$", path)
+        if m and method == "PUT":
+            body = await self._read_json(reader, headers)
+            if not body.get("name") or not body.get("event_type"):
+                raise HttpError(400, "name and event_type required")
+            body["id"] = int(m.group(1))
+            await self.db.upsert_rule(body)
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if m and method == "DELETE":
+            await self.db.delete_rule(int(m.group(1)))
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if path == "/api/notify/messages" and method == "GET":
+            raw = (query.get("page") or ["1"])[0]
+            try:
+                page = int(raw)
+            except ValueError:
+                raise HttpError(400, "Invalid page")
+            return await self._send_json(
+                writer, 200, await self.db.list_notifications(page), headers)
+        if path == "/api/notify/test" and method == "POST":
+            ok = await self.notifier.test_message()
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
+
+        # --- cost -----------------------------------------------------------
+        if path == "/api/cost/summary" and method == "GET":
+            period = (query.get("period") or ["day"])[0]
+            return await self._send_json(
+                writer, 200, await self.cost.summary(period), headers)
+        m = re.match(r"^/api/cost/by-(project|tool|model|session)$", path)
+        if m and method == "GET":
+            period = (query.get("period") or ["day"])[0]
+            rows = await self.cost.grouped(m.group(1), period)
+            return await self._send_json(writer, 200, rows, headers)
+        if path == "/api/cost/alerts" and method == "GET":
+            return await self._send_json(
+                writer, 200, await self.cost.alerts(), headers)
+        if path == "/api/cost/budget" and method == "PUT":
+            body = await self._read_json(reader, headers)
+            if "limit" not in body:
+                raise HttpError(400, "limit required")
+            try:
+                limit = float(body["limit"])
+            except (TypeError, ValueError):
+                raise HttpError(400, "Invalid limit")
+            await self.cost.set_budget(limit)
+            return await self._send_json(writer, 200, {"ok": True}, headers)
+        if path == "/api/cost/reconcile" and method == "POST":
+            from reconciler import Reconciler
+            claude_dir = os.path.expanduser("~/.claude/projects")
+            rec = Reconciler(self.db, self.config)
+            added = await rec.reconcile(claude_dir)
+            return await self._send_json(writer, 200, {"added": added}, headers)
+
+        # --- backups -----------------------------------------------------------
+        if path == "/api/backup/create" and method == "POST":
+            from backup import create_backup_async
+            b = await create_backup_async(self.data_dir, self.config, self.db)
+            return await self._send_json(writer, 201, {"backup": b}, headers)
+        if path == "/api/backup/list" and method == "GET":
+            from backup import list_backups
+            return await self._send_json(
+                writer, 200, {"backups": await list_backups(self.db)}, headers)
+        m = re.match(r"^/api/backup/restore/(\d+)$", path)
+        if m and method == "POST":
+            from backup import restore_backup
+            res = await restore_backup(int(m.group(1)), self.data_dir, self.db,
+                                       self.config)
+            if res.get("ok") and isinstance(res.get("config"), dict):
+                # 磁盘已写回,同步内存 config,避免运行态与磁盘分裂
+                self.config.clear()
+                self.config.update(res["config"])
+            return await self._send_json(writer, 200, res, headers)
+        m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
+        if m and method == "GET":
+            from backup import diff_backups
+            diff = await diff_backups(int(m.group(1)), int(m.group(2)), self.db)
+            return await self._send_json(writer, 200, diff, headers)
+
+        # --- migrate --------------------------------------------------------
+        if path == "/api/migrate/export" and method == "POST":
+            p = await self.migrator.export()
+            return await self._send_json(writer, 201, {
+                "path": p, "filename": os.path.basename(p)}, headers)
+        if path == "/api/migrate/list" and method == "GET":
+            return await self._send_json(
+                writer, 200, {"migrations": await self.db.list_migrations()},
+                headers)
+        if path == "/api/migrate/clone" and method == "POST":
+            body = await self._read_json(reader, headers)
+            res = await self.migrator.clone(body.get("template", ""))
+            return await self._send_json(writer, 200, res, headers)
+        if path == "/api/migrate/import" and method == "POST":
+            res = await self._handle_migrate_import(reader, headers)
+            return await self._send_json(writer, 200, res, headers)
+        m = re.match(r"^/api/migrate/download/([^/]+)$", path)
+        if m and method == "GET":
+            return await self._handle_migrate_download(writer, m.group(1))
+
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
             await self._serve_static(writer, method, path, headers)
             return
 
         raise HttpError(405, "Method not allowed")
+
+    async def _handle_migrate_download(self, writer, filename: str):
+        backups_dir = os.path.join(self.data_dir, "backups")
+        safe = os.path.basename(filename).replace('"', "")
+        # Only the most recent export() may be downloaded — older exports and
+        # arbitrary files under backups/ are never served (download oracle).
+        if self.migrator is None \
+                or safe != self.migrator.last_export_filename:
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
+        path = os.path.realpath(os.path.join(backups_dir, safe))
+        if not path.startswith(os.path.realpath(backups_dir) + os.sep) \
+                or not os.path.isfile(path):
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
+        try:
+            size = os.path.getsize(path)
+            body = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: open(path, "rb").read())
+        except OSError:
+            return await self._send_json(
+                writer, 404, {"error": "not found"}, {})
+        headers = {"content-type": "application/gzip",
+                   "content-disposition": f'attachment; filename="{safe}"',
+                   "content-length": str(size)}
+        writer.write(b"HTTP/1.1 200 OK\r\n" +
+                     b"\r\n".join(f"{k}: {v}".encode() for k, v in headers.items()) +
+                     b"\r\n\r\n" + body)
+        await writer.drain()
+        return True
+
+    async def _handle_migrate_import(self, reader, headers) -> dict:
+        length = 0
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 50 * 1024 * 1024:
+            return {"status": "error", "message": "payload too large or empty"}
+        body = await reader.readexactly(length)
+        ct = headers.get("content-type", "")
+        boundary = None
+        for part in ct.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[len("boundary="):].strip('"')
+        if not boundary:
+            return {"status": "error", "message": "missing boundary"}
+        filename, file_bytes, mode = parse_multipart(body, boundary)
+        if not filename or not file_bytes:
+            return {"status": "error", "message": "file field missing"}
+        uploads = os.path.join(self.data_dir, "uploads")
+        os.makedirs(uploads, exist_ok=True)
+        dest = os.path.join(uploads, os.path.basename(filename))
+        with open(dest, "wb") as f:
+            f.write(file_bytes)
+        return await self.migrator.import_package(dest, mode)
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0
@@ -619,14 +831,54 @@ async def _serve_client(server: Server, reader: asyncio.StreamReader,
     await server._handle_request(reader, writer)
 
 
+def _backup_settings(config: dict) -> tuple[float, int]:
+    """Parse backup interval_hours/retention defensively; fall back to
+    defaults (24h / 7) and log on non-numeric config values or a non-dict
+    `backup` section so a bad value can never kill the loop."""
+    backup_cfg = config.get("backup")
+    if not isinstance(backup_cfg, dict):
+        backup_cfg = {}
+    try:
+        interval = float(backup_cfg.get("interval_hours", 24))
+        retention = int(backup_cfg.get("retention", 7))
+        return interval, retention
+    except (TypeError, ValueError) as err:
+        log_error("backup", err)
+        return 24.0, 7
+
+
+async def _notify_retry_loop(notifier, interval_s: float = 300.0) -> None:
+    """Periodically retry undelivered SMTP notifications (delivered=0 rows
+    after a transient SMTP failure). Errors are logged, never fatal —
+    mirrors the _backup_loop pattern."""
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await notifier.send_pending()
+        except Exception as err:  # noqa: BLE001
+            log_error("notifier", err)
+
+
 async def main() -> None:
     config = load_config()
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")
 
-    server = Server()
+    from cost_tracker import CostTracker
+    from db import Database
+    from notifier import Notifier
+    db = Database(os.path.join(data_dir, "webpty.db"))
+    db.connect()
+    notifier = Notifier(db, config)
+    cost = CostTracker(db, config)
+    from migrator import Migrator
+    migrator = Migrator(data_dir, config, db)
+    server = Server(db=db, notifier=notifier, cost=cost, migrator=migrator,
+                    data_dir=data_dir)
     await server.sessions.init()
     server.sessions.start_host_monitor()
+    server.sessions.on("session_event", notifier.handle_event)
+    server.sessions.on("agentEvent", lambda sid, item: cost.handle_agent_event(item, sid))
 
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _serve_client(server, reader, writer)
@@ -643,12 +895,31 @@ async def main() -> None:
         print("[webpty] WARNING: no authToken and allowedLogins is empty — anyone who can reach this port can access webpty.", flush=True)
         print("[webpty]          Set config.authToken or add your Tailscale login email(s) to enable a gate.", flush=True)
 
+    async def _backup_loop() -> None:
+        """Periodic auto-backup: first run 30s after startup, then every
+        backup.interval_hours (default 24h); errors are logged, never fatal.
+        """
+        from backup import create_backup_async, rotate
+
+        await asyncio.sleep(30)  # 启动后 30s 首次
+        while True:
+            interval, retention = _backup_settings(config)
+            try:
+                await create_backup_async(data_dir, config, db)
+                await rotate(db, retention)
+            except Exception as err:  # noqa: BLE001
+                log_error("backup", err)
+            await asyncio.sleep(max(interval, 0.1) * 3600)
+
     async def _autostart() -> None:
         try:
             await server.sessions.autostart()
         except Exception as err:  # noqa: BLE001
             print(f"[webpty] autostart error: {err}", flush=True)
 
+    backup_task = asyncio.create_task(_backup_loop())
+    # 定时重试未送达的 SMTP 通知(默认每 5 分钟),失败只记日志不退出
+    notify_task = asyncio.create_task(_notify_retry_loop(notifier))
     asyncio.create_task(_autostart())
 
     try:
@@ -656,9 +927,21 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        # Cancel the infinite loops before tearing down the db so no
+        # in-flight backup/retry touches a closed connection. _autostart is a
+        # short-lived one-shot task and needs no handle (matches existing
+        # behaviour).
+        backup_task.cancel()
+        notify_task.cancel()
+        for task in (backup_task, notify_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         server.sessions.stop_host_monitor()
         listener.close()
         await listener.wait_closed()
+        db.close()
 
 
 if __name__ == "__main__":

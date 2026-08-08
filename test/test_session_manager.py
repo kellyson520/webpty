@@ -1,6 +1,7 @@
 """Unit tests for src/session_manager.py — SessionManager, RingBuffer,
 normalize_tool_result."""
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -171,6 +172,37 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s["cols"], 100)
         self.assertTrue(any(c[0] == "resize" and c[2] == 100 for c in self.host.calls
                             if isinstance(c, tuple)))
+
+    async def test_agent_line_usage_emits_agent_event(self):
+        """Stream lines that carry usage but no transcript item are
+        re-emitted as {"type": "usage", "raw": ..., "tool": ...} so the
+        CostTracker can meter them (Task 8 integration contract)."""
+        s = self.sm.create(name="t", cwd="/tmp", tool="claude")
+        got = []
+        self.sm.on("agentEvent", lambda sid, item: got.append((sid, item)))
+        line = json.dumps({"type": "message_delta",
+                           "usage": {"output_tokens": 500}})
+        self.assertFalse(self.sm._handle_agent_line(s, line))
+        self.assertEqual(len(got), 1)
+        sid, item = got[0]
+        self.assertEqual(sid, s["id"])
+        self.assertEqual(item, {"type": "usage", "raw": line,
+                                "tool": "claude"})
+
+    async def test_agent_line_transcript_types_do_not_emit_usage(self):
+        """Known transcript types (system/assistant/user/result) keep their
+        existing behavior and do not double-emit usage events."""
+        s = self.sm.create(name="t", cwd="/tmp", tool="claude")
+        got = []
+        self.sm.on("agentEvent", lambda sid, item: got.append((sid, item)))
+        # assistant message with a usage field must still only push a
+        # transcript item, not a usage event
+        line = json.dumps({"type": "assistant", "message": {"id": "m1",
+                          "content": [{"type": "text", "text": "hi"}]},
+                          "usage": {"input_tokens": 10, "output_tokens": 5}})
+        self.assertFalse(self.sm._handle_agent_line(s, line))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][1]["t"], "text")
 
     async def test_host_output_updates_recent(self):
         s = self.sm.create(name="t", cwd="/tmp", tool="bash")

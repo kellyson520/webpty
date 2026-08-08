@@ -24,6 +24,13 @@ const tokenGate = document.getElementById('token-gate');
 const tokenGateInput = document.getElementById('token-gate-input');
 const tokenGateBtn = document.getElementById('token-gate-btn');
 const tokenGateErr = document.getElementById('token-gate-err');
+const notifyBackdrop = document.getElementById('notify-backdrop');
+const notifyRules = document.getElementById('notify-rules');
+const notifyMessages = document.getElementById('notify-messages');
+const costBackdrop = document.getElementById('cost-backdrop');
+const backupBackdrop = document.getElementById('backup-backdrop');
+const migrateBackdrop = document.getElementById('migrate-backdrop');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const folderPickerBackdrop = document.getElementById('folder-picker-backdrop');
 const folderPickerList = document.getElementById('folder-picker-list');
 const folderPickerPath = document.getElementById('folder-picker-path');
@@ -1480,6 +1487,13 @@ function openMenu(sessionId) {
   addMenuItem('部署', () => sendToSession(session.id, '请部署。\r'));
 
   addMenuSep();
+  addMenuLabel('扩展');
+  addMenuItem('通知中心', openNotifyPanel);
+  addMenuItem('成本账单', openCostPanel);
+  addMenuItem('备份管理', openBackupPanel);
+  addMenuItem('迁移向导', openMigratePanel);
+
+  addMenuSep();
   addMenuLabel('工具');
   const cwd = (session.cwd || '').toLowerCase();
   const project = (projects || []).find((p) => p.path.toLowerCase() === cwd)
@@ -2081,3 +2095,178 @@ function showFatal(msg) {
   line.textContent = '⚠ ' + String(msg).slice(0, 500);
   el.appendChild(line);
 }
+
+// ---- Notification center panel (ext) ----
+function openNotifyPanel() {
+  closeMenu();
+  notifyBackdrop.hidden = false;
+  refreshNotifyPanel();
+}
+async function refreshNotifyPanel() {
+  const [rules, msgs] = await Promise.all([
+    api('/api/notify/rules').catch(() => ({ rules: [] })),
+    api('/api/notify/messages?page=1').catch(() => ({ items: [] })),
+  ]);
+  notifyRules.innerHTML = '<h4>规则</h4>' + ((rules.rules || []).map((r) =>
+    `<div class="notify-item">${esc(r.name)} — ${esc(r.event_type)}
+     ${r.enabled ? '' : '(停用)'}</div>`).join('') || '<p>无规则</p>');
+  notifyMessages.innerHTML = '<h4>消息记录</h4>' + ((msgs.items || []).slice(0, 20).map((m) =>
+    `<div class="notify-item ${esc(m.level)}">[${esc(m.level)}] ${esc(m.title)}
+     <span class="muted">${esc(m.tool || '')} ${esc(m.project || '')}</span></div>`
+  ).join('') || '<p>暂无消息</p>');
+}
+document.getElementById('notify-close').onclick = () => { notifyBackdrop.hidden = true; };
+notifyBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === notifyBackdrop) notifyBackdrop.hidden = true;
+});
+document.getElementById('notify-rule-add').onclick = async () => {
+  try {
+    const type = document.getElementById('notify-rule-type').value;
+    await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
+      name: 'rule-' + Date.now(), event_type: type, matcher_json: '{}',
+      action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
+    refreshNotifyPanel();
+  } catch (e) {
+    alert(e.message);
+  }
+};
+document.getElementById('notify-test').onclick = async () => {
+  try {
+    const r = await api('/api/notify/test', { method: 'POST' });
+    alert(r.ok ? '测试邮件已发送' : 'SMTP 未配置');
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+// ---- Cost dashboard panel (ext) ----
+function openCostPanel() {
+  closeMenu();
+  costBackdrop.hidden = false;
+  refreshCostPanel();
+}
+async function refreshCostPanel() {
+  const period = document.getElementById('cost-period').value;
+  const [sum, byTool, alerts] = await Promise.all([
+    api(`/api/cost/summary?period=${period}`).catch(() => ({})),
+    api(`/api/cost/by-tool?period=${period}`).catch(() => []),
+    api('/api/cost/alerts').catch(() => []),
+  ]);
+  const alertsArr = Array.isArray(alerts) ? alerts : [];
+  document.getElementById('cost-cards').innerHTML =
+    `<div class="cost-card"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div>成本</div></div>` +
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_in || 0)}</div><div>输入 tokens</div></div>` +
+    `<div class="cost-card"><div class="v">${esc(sum.tokens_out || 0)}</div><div>输出 tokens</div></div>` +
+    (alertsArr.some((a) => a.active) ? `<div class="cost-card" style="border-color:#e5534b"><div class="v">超限</div><div>预算</div></div>` : '');
+  document.getElementById('cost-groups').innerHTML = '<h4>按工具</h4>' +
+    ((byTool || []).map((g) => `<div class="notify-item">${esc(g.name)} —
+      $${Number(g.cost || 0).toFixed(4)} (${esc(g.tokens_in ?? 0)}/${esc(g.tokens_out ?? 0)})</div>`).join('') ||
+    '<p>暂无数据</p>');
+}
+document.getElementById('cost-close').onclick = () => { costBackdrop.hidden = true; };
+costBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === costBackdrop) costBackdrop.hidden = true;
+});
+document.getElementById('cost-period').onchange = refreshCostPanel;
+document.getElementById('cost-budget-set').onclick = async () => {
+  const n = parseFloat(document.getElementById('cost-budget').value || '0');
+  if (!Number.isFinite(n)) { alert('请输入有效预算'); return; }
+  try {
+    await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: n }) });
+    refreshCostPanel();
+  } catch (e) {
+    alert(e.message);
+  }
+};
+document.getElementById('cost-reconcile').onclick = async () => {
+  try {
+    const r = await api('/api/cost/reconcile', { method: 'POST' });
+    alert(`日志校对完成，补录 ${r?.added ?? 0} 条`);
+    refreshCostPanel();
+  } catch (e) {
+    alert(e.message);
+  }
+};
+
+// ---- Backup management panel (ext) ----
+function openBackupPanel() {
+  closeMenu();
+  backupBackdrop.hidden = false;
+  refreshBackupPanel();
+}
+async function refreshBackupPanel() {
+  const r = await api('/api/backup/list').catch(() => ({ backups: [] }));
+  document.getElementById('backup-list').innerHTML = '<h4>快照列表</h4>' +
+    ((r.backups || []).map((b) =>
+      `<div class="notify-item">${esc(b.filename)} — ${esc((Number(b.size_bytes || 0) / 1024).toFixed(1))}KB
+       <button data-restore="${esc(b.id)}" type="button">恢复</button></div>`).join('') ||
+    '<p>暂无备份</p>');
+  // Re-bind restore handlers after every refresh (innerHTML replaced above).
+  document.querySelectorAll('#backup-list [data-restore]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('恢复该备份将覆盖当前配置，继续？')) return;
+      try {
+        const r = await api(`/api/backup/restore/${btn.dataset.restore}`, { method: 'POST' });
+        alert(r.ok ? '恢复成功' : '恢复失败: ' + r.message);
+      } catch (e) {
+        alert('恢复失败: ' + e.message);
+      }
+      refreshBackupPanel();
+    };
+  });
+}
+document.getElementById('backup-close').onclick = () => { backupBackdrop.hidden = true; };
+backupBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === backupBackdrop) backupBackdrop.hidden = true;
+});
+document.getElementById('backup-create').onclick = async () => {
+  try {
+    await api('/api/backup/create', { method: 'POST' });
+    alert('备份已创建');
+  } catch (e) {
+    alert('备份失败: ' + e.message);
+  }
+  refreshBackupPanel();
+};
+
+// ---- Migration wizard panel (ext) ----
+function openMigratePanel() {
+  closeMenu();
+  migrateBackdrop.hidden = false;
+}
+document.getElementById('migrate-close').onclick = () => { migrateBackdrop.hidden = true; };
+migrateBackdrop.addEventListener('click', (ev) => {
+  if (ev.target === migrateBackdrop) migrateBackdrop.hidden = true;
+});
+document.getElementById('migrate-export').onclick = async () => {
+  try {
+    const r = await api('/api/migrate/export', { method: 'POST' });
+    const a = document.createElement('a');
+    a.href = `/api/migrate/download/${encodeURIComponent(r.filename)}`;
+    a.download = r.filename;
+    a.click();
+    document.getElementById('migrate-result').innerHTML = `<p>已导出 ${esc(r.filename)}，开始下载</p>`;
+  } catch (e) {
+    alert('导出失败: ' + e.message);
+  }
+};
+document.getElementById('migrate-do').onclick = async () => {
+  const file = document.getElementById('migrate-file').files[0];
+  if (!file) { alert('请先选择 .tar.gz 包'); return; }
+  const mode = document.getElementById('migrate-mode').value;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('mode', mode);
+  try {
+    const res = await fetch('/api/migrate/import', {
+      method: 'POST', body: fd,
+      headers: { authorization: `Bearer ${localStorage.getItem('webpty.token') || ''}` },
+    });
+    const out = await res.json().catch(() => ({}));
+    document.getElementById('migrate-result').innerHTML =
+      `<div class="notify-item">状态: ${esc(out.status)} ${out.message ? '— ' + esc(out.message) : ''}
+       ${out.changes ? '<pre>' + esc(JSON.stringify(out.changes, null, 2)) + '</pre>' : ''}</div>`;
+  } catch (e) {
+    alert('导入失败: ' + e.message);
+  }
+};

@@ -199,6 +199,95 @@
       </div>
     </div>
 
+    <div id="notify-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>通知中心</h2>
+          <button id="notify-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <label>规则
+              <select id="notify-rule-type">
+                <option value="failed">failed</option>
+                <option value="completed">completed</option>
+                <option value="crashed">crashed</option>
+                <option value="terminated">terminated</option>
+              </select>
+            </label>
+            <button id="notify-rule-add" type="button">添加规则</button>
+            <button id="notify-test" type="button">测试发送</button>
+          </div>
+          <div id="notify-rules" class="notify-section"></div>
+          <div id="notify-messages" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="cost-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>成本账单</h2>
+          <button id="cost-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <label>周期
+              <select id="cost-period">
+                <option value="day">今日</option>
+                <option value="week">本周</option>
+                <option value="month">本月</option>
+              </select>
+            </label>
+            <label>预算 $
+              <input id="cost-budget" type="number" step="0.01" min="0" style="width:90px">
+            </label>
+            <button id="cost-budget-set" type="button">设置</button>
+            <button id="cost-reconcile" type="button">日志校对</button>
+          </div>
+          <div id="cost-cards" class="cost-cards"></div>
+          <div id="cost-groups" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="backup-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>备份管理</h2>
+          <button id="backup-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <button id="backup-create" type="button">立即备份</button>
+          </div>
+          <div id="backup-list" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="migrate-backdrop" class="panel-backdrop" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>迁移向导</h2>
+          <button id="migrate-close" class="panel-close" type="button">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="notify-toolbar">
+            <button id="migrate-export" type="button">1. 导出配置</button>
+            <label>2. 上传包 <input id="migrate-file" type="file" accept=".tar.gz"></label>
+            <select id="migrate-mode">
+              <option value="merge">merge</option>
+              <option value="replace">replace</option>
+              <option value="dry-run">dry-run</option>
+            </select>
+            <button id="migrate-do" type="button">3. 导入</button>
+          </div>
+          <div id="migrate-result" class="notify-section"></div>
+        </div>
+      </div>
+    </div>
+
     <script src="/vendor/xterm/lib/xterm.js"></script>
     <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
     <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>

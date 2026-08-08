@@ -1,0 +1,79 @@
+import asyncio
+import json
+import os
+import tempfile
+import unittest
+
+from cost_tracker import CostTracker
+from db import Database
+from reconciler import Reconciler, scan_claude_logs
+
+
+class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wp-rec-")
+        self.db = Database(os.path.join(self.tmp, "webpty.db"))
+        self.db.connect()
+        self.cfg = {"prices": {"claude": {"input": 10.0, "output": 20.0,
+                                          "cache_hit": 1.0, "currency": "USD"}}}
+        self.projects = os.path.join(self.tmp, "projects")
+        os.makedirs(os.path.join(self.projects, "proj-a"))
+        with open(os.path.join(self.projects, "proj-a", "session-x.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "message_delta",
+                                "usage": {"output_tokens": 100}}) + "\n")
+            f.write("garbage line\n")
+            f.write(json.dumps({"type": "message_delta",
+                                "usage": {"output_tokens": 50}}) + "\n")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_scan_claude_logs(self):
+        items = scan_claude_logs(self.projects)
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all(i["tokens_out"] > 0 for i in items))
+        # session_id 从文件名推导，project 取日志所在目录
+        self.assertTrue(all(i["session_id"] == "session-x" for i in items))
+        self.assertTrue(all(i["project"] == os.path.join(self.projects, "proj-a")
+                            for i in items))
+
+    async def test_reconcile_persists_posthoc(self):
+        r = Reconciler(self.db, self.cfg)
+        added = await r.reconcile(self.projects)
+        self.assertEqual(added, 2)
+        s = await self.db.usage_summary("day")
+        self.assertEqual(s["tokens_out"], 150)
+        self.assertAlmostEqual(s["cost"], 0.003, places=6)  # 150*20/1e6
+        rows = await self.db.query(
+            "SELECT source, session_id FROM token_usage")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["source"] == "posthoc" for r in rows))
+        self.assertTrue(all(r["session_id"] == "session-x" for r in rows))
+
+    async def test_reconcile_idempotent(self):
+        r = Reconciler(self.db, self.cfg)
+        await r.reconcile(self.projects)
+        added2 = await r.reconcile(self.projects)
+        self.assertEqual(added2, 0)
+        self.assertEqual((await self.db.usage_summary("day"))["entries"], 2)
+
+    async def test_reconcile_no_double_count_after_realtime(self):
+        # realtime 已带 sid 记录同一行（100 tokens）后，reconcile 必须跳过它，
+        # 只补录 realtime 漏掉的行（50 tokens）——防止双重计数。
+        ct = CostTracker(self.db, self.cfg)
+        ct.handle_agent_event(
+            {"raw": json.dumps({"type": "message_delta",
+                                 "usage": {"output_tokens": 100}}),
+             "tool": "claude"},
+            "session-x")
+        while ct._tasks:
+            await asyncio.sleep(0.01)
+        added = await Reconciler(self.db, self.cfg).reconcile(self.projects)
+        self.assertEqual(added, 1)
+        s = await self.db.usage_summary("day")
+        self.assertEqual(s["entries"], 2)
+        self.assertEqual(s["tokens_out"], 150)
+
+
+if __name__ == "__main__":
+    unittest.main()

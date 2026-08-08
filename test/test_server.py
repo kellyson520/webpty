@@ -16,6 +16,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -169,6 +170,28 @@ class ServerIntegrationTest(unittest.TestCase):
         status, _ = self._req("/api/fs/list?path=/definitely/not/here")
         self.assertEqual(status, 400)
 
+    # --- backup restore keeps memory config in sync -----------------------
+    def test_restore_syncs_memory_config(self):
+        # 备份当前 roots → 改 roots → restore → GET /api/config 反映恢复值
+        _, before = self._req("/api/config")
+        st, b = self._req("/api/backup/create", "POST")
+        self.assertEqual(st, 201)
+        bid = b["backup"]["id"]
+        other = os.path.join(self.proj_root, "alpha")
+        st, _ = self._req("/api/config/roots", "PUT", {"roots": [other]})
+        self.assertEqual(st, 200)
+        _, drifted = self._req("/api/config")
+        self.assertEqual(drifted["roots"], [other])
+        st, res = self._req(f"/api/backup/restore/{bid}", "POST")
+        self.assertEqual(st, 200)
+        self.assertTrue(res["ok"])
+        _, after = self._req("/api/config")
+        # 内存 config 已同步为恢复值(而非停留在被改动的状态)
+        self.assertEqual(after["roots"], before["roots"])
+        # 清理:roots 还原为项目根,避免影响其他测试
+        self._req("/api/config/roots", "PUT",
+                  {"roots": [self.proj_root]})
+
     # --- gzip ---------------------------------------------------------------
     def test_gzip_static_asset(self):
         req = urllib.request.Request(f"{self.base}/app.js",
@@ -305,6 +328,50 @@ class ServerIntegrationTest(unittest.TestCase):
                 self.assertEqual(status, 200)
 
         asyncio.run(run())
+
+
+class ServerUnitTest(unittest.IsolatedAsyncioTestCase):
+    """Pure unit tests for server helper functions (no server process)."""
+
+    def test_backup_settings_non_dict_safe(self):
+        from server import _backup_settings
+        # backup 段非 dict → 回退默认,不抛 AttributeError
+        self.assertEqual(_backup_settings({"backup": "not-a-dict"}),
+                         (24.0, 7))
+        self.assertEqual(_backup_settings({"backup": None}), (24.0, 7))
+        self.assertEqual(_backup_settings({}), (24.0, 7))
+        # 正常 dict 解析
+        self.assertEqual(_backup_settings({"backup": {"interval_hours": 2,
+                                                      "retention": 3}}),
+                         (2.0, 3))
+        # 非数值 → 回退默认并记日志
+        with mock.patch("server.log_error") as le:
+            self.assertEqual(_backup_settings({"backup": {"interval_hours": "x"}}),
+                             (24.0, 7))
+            self.assertTrue(le.called)
+
+    async def test_notify_retry_loop_retries_and_survives_errors(self):
+        import asyncio
+
+        from server import _notify_retry_loop
+        calls = []
+
+        class FakeNotifier:
+            async def send_pending(self):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise RuntimeError("smtp down")
+
+        task = asyncio.create_task(_notify_retry_loop(FakeNotifier(),
+                                                      interval_s=0.01))
+        await asyncio.sleep(0.08)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # 首次异常后循环继续,至少再次调用
+        self.assertGreaterEqual(len(calls), 2)
 
 
 async def asyncio_open_conn(port):

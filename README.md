@@ -49,6 +49,68 @@ switch between live sessions with a swipe.
 
 ---
 
+## 扩展能力（合规四大件） / Extension capabilities (four compliance modules)
+
+- **通知中心**：会话 completed/failed/crashed/terminated 事件 → 规则匹配 →
+  SQLite 记录 + SMTP 邮件（可选）+ WebUI 面板；60s 去重、静默时段、失败重试
+  **Notification center** — session events → rule matching → SQLite records +
+  optional SMTP mail + WebUI panel; 60s dedup, quiet hours, retry.
+- **成本账单**：agent stream-json 实时计量（claude/reasonix/opencode 等）+
+  日志事后校对；内置价格表可覆盖；预算限额告警
+  **Cost billing** — real-time stream-json metering + post-hoc log
+  reconciliation; built-in price table overridable; budget alerts.
+- **备份管理**：定时（默认 24h）/手动快照 tar.gz + SHA256 校验 + 可选
+  AES-GCM 加密 + 轮转（默认保留 7 份）+ WebUI 恢复/差异对比
+  **Backup management** — scheduled (default 24h) / manual tar.gz snapshots +
+  SHA256 verification + optional AES-GCM encryption + rotation (default 7) +
+  WebUI restore/diff.
+- **迁移向导**：一键导出/导入配置（merge/replace/dry-run 三种冲突策略）+
+  环境克隆；WorkerInterface 集群预留
+  **Migration wizard** — one-click config export/import (merge/replace/dry-run)
+  + environment clone; WorkerInterface reserved for cluster use.
+
+> **迁移包中的 secrets / Secrets in migration packages**：导出包**不包含**任何
+> secret 明文（`authToken`、SMTP 密码、`encryption_key`、`allowedLogins` 等一律
+> 置空，manifest 标注 `secrets_redacted`），因此迁移/克隆后**需在目标机手动重配
+> 这些值**。dry-run 预览同样不回显当前配置值（敏感键只标注 `redacted`）。
+> `sessions` 属运行时状态，不随包迁移。备份恢复（restore）会同时恢复通知规则。
+> Exports never carry secrets in plaintext (authToken, SMTP passwords,
+> `encryption_key`, allowedLogins are blanked; `secrets_redacted` in the
+> manifest) — **re-enter secrets on the target host** after import/clone.
+> dry-run never echoes current values (sensitive keys show as `redacted`);
+> `sessions` are runtime state and are not migrated. Backup restore also
+> restores notification rules.
+
+### 配置（config.json 新增段） / New config sections
+
+```json
+{
+  "notify": { "smtp": { "host": "", "port": 465, "tls": true,
+                        "user": "", "password": "", "from": "", "to": "" } },
+  "prices": { "claude": { "input": 3.0, "output": 15.0,
+                          "cache_hit": 0.3, "currency": "USD" } },
+  "budget": { "limit": 10.0 },
+  "backup": { "retention": 7, "interval_hours": 24, "encryption_key": "" }
+}
+```
+
+- `encryption_key` 留空 = 不加密（默认）；设置后且环境装有 `cryptography`
+  才启用 AES-GCM
+  Empty `encryption_key` = no encryption (default); AES-GCM is enabled only
+  when set *and* `cryptography` is installed.
+- SMTP 全可选：未配置时通知仅入库 + WebUI 展示
+  SMTP is fully optional: without it notifications are stored and shown in the
+  WebUI only.
+
+### API 一览 / API overview
+
+`/api/notify/rules`、`/api/notify/messages`、`/api/notify/test`、
+`/api/cost/summary|by-{project,tool,model,session}|alerts|budget|reconcile`、
+`/api/backup/create|list|restore/{id}|diff/{a}/{b}`、
+`/api/migrate/export|import|clone|list|download/{filename}`
+
+---
+
 ## Install & deploy / 安装与部署
 
 webpty is deployed from the git repo — the script always syncs to the latest
@@ -338,12 +400,14 @@ mem peak ~24 MiB (VmRSS)
 python3 -m unittest discover -s test
 ```
 
-122 tests cover paths, args parsing, ring buffer, auth, config merging,
-session manager, pty-host crash recovery, and end-to-end HTTP/WebSocket
-behavior (1 platform-skipped on POSIX).
+212 tests cover paths, args parsing, ring buffer, auth, config merging,
+session manager, pty-host crash recovery, end-to-end HTTP/WebSocket
+behavior, plus the four compliance extensions (notify / cost / backup /
+migrate) end-to-end (1 platform-skipped on POSIX).
 
-122 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
-pty-host 崩溃自愈以及端到端 HTTP/WebSocket 行为（1 个平台跳过项）。
+212 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
+pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为，以及四大合规扩展
+（通知/成本/备份/迁移）全链路（1 个平台跳过项）。
 
 ---
 

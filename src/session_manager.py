@@ -83,7 +83,7 @@ class SessionManager:
         self.host = PtyHostClient()
         self.host_sessions: dict[str, dict] = {}
         self.host_ready = False
-        self._listeners: dict[str, list] = {"output": [], "agentEvent": [], "change": [], "remove": []}
+        self._listeners: dict[str, list] = {"output": [], "agentEvent": [], "change": [], "remove": [], "session_event": []}
         for stored in config.get("sessions", []):
             session = self._inflate(stored)
             self.sessions[session["id"]] = session
@@ -396,6 +396,14 @@ class SessionManager:
             else:
                 self._push_agent(session, {"t": "exit", "code": code})
             self._emit("change", self._public(session))
+            self._emit("session_event", {
+                "type": "crashed" if session.get("signal") else
+                        ("completed" if session.get("exit_code") == 0 else "failed"),
+                "session_id": session["id"], "name": session.get("name"),
+                "tool": session.get("tool"), "project": session.get("cwd"),
+                "state": "stopped", "exit_code": session.get("exit_code"),
+                "signal": session.get("signal"), "ts": time.time(),
+            })
 
         session["_tasks"] = [
             asyncio.create_task(read_stdout()),
@@ -466,6 +474,13 @@ class SessionManager:
             self._emit("change", self._public(session))
             return False
 
+        # Lines that carry usage but no transcript item (message_start /
+        # message_delta / ...) are re-emitted verbatim so business-layer
+        # listeners (CostTracker) can meter them in realtime.
+        usage = evt.get("usage")
+        if isinstance(usage, dict) and usage:
+            self._emit("agentEvent", session["id"], {
+                "type": "usage", "raw": line, "tool": session.get("tool")})
         return False
 
     def _push_agent(self, session: dict, item: dict) -> None:
@@ -535,6 +550,12 @@ class SessionManager:
             timer.cancel()
         session["busy"] = False
         self._emit("change", self._public(session))
+        self._emit("session_event", {
+            "type": "terminated", "session_id": session["id"], "name": session.get("name"),
+            "tool": session.get("tool"), "project": session.get("cwd"),
+            "state": "stopped", "exit_code": session.get("exit_code"),
+            "signal": session.get("signal"), "ts": time.time(),
+        })
         return True
 
     async def _wait_host_exit(self, sid: str, ms: int) -> bool:
@@ -620,6 +641,14 @@ class SessionManager:
         if session.get("log_path"):
             _append_log(session["log_path"], f"\r\n[webpty] exited code={code} signal={signal_}\r\n")
         self._emit("change", self._public(session))
+        self._emit("session_event", {
+            "type": "crashed" if session.get("signal") else
+                    ("completed" if session.get("exit_code") == 0 else "failed"),
+            "session_id": session["id"], "name": session.get("name"),
+            "tool": session.get("tool"), "project": session.get("cwd"),
+            "state": "stopped", "exit_code": session.get("exit_code"),
+            "signal": session.get("signal"), "ts": time.time(),
+        })
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False

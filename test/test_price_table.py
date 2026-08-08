@@ -1,0 +1,38 @@
+import unittest
+
+from price_table import DEFAULT_PRICES, cost_for, get_price
+
+
+class PriceTableTest(unittest.TestCase):
+    def test_defaults_present(self):
+        for m in ("claude", "codex", "reasonix", "opencode", "deepseek"):
+            self.assertIn(m, DEFAULT_PRICES)
+
+    def test_unknown_model_falls_back(self):
+        p = get_price("mystery-model", {})
+        self.assertEqual(p["input"], 1.0)
+        self.assertEqual(p["output"], 2.0)
+
+    def test_config_overrides(self):
+        cfg = {"prices": {"claude": {"input": 99.0, "output": 99.0,
+                                     "cache_hit": 0.0, "currency": "CNY"}}}
+        p = get_price("claude", cfg)
+        self.assertEqual(p["input"], 99.0)
+        self.assertEqual(p["currency"], "CNY")
+
+    def test_cost_calculation(self):
+        cfg = {"prices": {"m": {"input": 10.0, "output": 20.0,
+                                "cache_hit": 1.0, "currency": "USD"}}}
+        c = cost_for("m", 1_000_000, 500_000, cfg)
+        self.assertAlmostEqual(c, 20.0, places=6)  # 10 + 10
+        c2 = cost_for("m", 1_000_000, 500_000, cfg, cached_in=1_000_000)
+        self.assertAlmostEqual(c2, 11.0, places=6)  # 1 + 10
+
+    def test_cost_clamps_negative(self):
+        cfg = {"prices": {"m": {"input": 10.0, "output": 20.0,
+                                "cache_hit": 1.0, "currency": "USD"}}}
+        self.assertEqual(cost_for("m", 0, 0, cfg), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
