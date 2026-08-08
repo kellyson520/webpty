@@ -1482,7 +1482,7 @@ function openMenu(sessionId) {
   addMenuSep();
   addMenuLabel('工具');
   const cwd = (session.cwd || '').toLowerCase();
-  const project = projects.find((p) => p.path.toLowerCase() === cwd)
+  const project = (projects || []).find((p) => p.path.toLowerCase() === cwd)
     || { path: session.cwd, name: session.name, claudeMtime: 0 };
   for (const t of Object.keys(config.tools)) {
     addToolMenuItem(t, project, session);
@@ -1963,8 +1963,8 @@ function onActivate(idx) {
   }
 }
 
-async function loadConfig() { config = await api('/api/config'); }
-async function loadProjects() { projects = await api('/api/projects'); }
+async function loadConfig() { return (config = await api('/api/config')); }
+async function loadProjects() { return (projects = await api('/api/projects')); }
 async function loadSessionsRaw() { return (sessions = await api('/api/sessions')); }
 
 async function refreshSessions() {
