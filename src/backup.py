@@ -14,7 +14,7 @@ import time
 from db import Database
 
 
-def _manifest(data_dir: str, config: dict, rules: list[dict]) -> dict:
+def _manifest() -> dict:
     return {
         "schema_version": 1,
         "created_at": time.time(),
@@ -64,7 +64,7 @@ async def create_backup_async(data_dir: str, config: dict, db: Database) -> dict
     backups_dir = os.path.join(data_dir, "backups")
     os.makedirs(backups_dir, exist_ok=True)
     state = await collect_state(data_dir, config, db)
-    manifest = _manifest(data_dir, config, state["notify_rules"])
+    manifest = _manifest()
     raw = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
     payload, encrypted = _maybe_encrypt(raw, config)
     buf = io.BytesIO()
@@ -112,11 +112,17 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
         if not key:
             return {"ok": False, "message": "backup is encrypted, key missing"}
         try:
+            from cryptography.exceptions import InvalidTag
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         except ImportError:
             return {"ok": False, "message": "cryptography not installed"}
         nonce, ct = raw[:12], raw[12:]
-        raw = AESGCM(key.encode()[:32].ljust(32, b"\0")).decrypt(nonce, ct, None)
+        try:
+            raw = AESGCM(key.encode()[:32].ljust(32, b"\0")).decrypt(
+                nonce, ct, None)
+        except InvalidTag:
+            return {"ok": False,
+                    "message": "decrypt failed (wrong key or corrupt)"}
     try:
         state = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -141,7 +147,8 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
         row = await db.get_backup(bid)
         if not row:
             return {}
-        path = os.path.join(os.path.dirname(db.path), "backups", row["filename"])
+        path = os.path.join(os.path.dirname(db.path), "backups",
+                            os.path.basename(row["filename"]))
         if not os.path.exists(path):
             return {}
         with tarfile.open(path, "r:gz") as tf:
@@ -168,7 +175,7 @@ async def rotate(db: Database, retention: int = 7) -> list[int]:
     deleted = []
     for row in doomed:
         path = os.path.join(os.path.dirname(db.path), "backups",
-                            row["filename"])
+                            os.path.basename(row["filename"]))
         if os.path.exists(path):
             os.remove(path)
         await db.delete_backup(row["id"])

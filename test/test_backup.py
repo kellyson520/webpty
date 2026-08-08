@@ -75,6 +75,25 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
         diff = await diff_backups(a["id"], b["id"], self.db)
         self.assertTrue(any(d["key"] == "port" for d in diff))
 
+    async def test_encrypted_roundtrip(self):
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        except ImportError:
+            self.skipTest("cryptography not installed")
+        cfg = dict(self.config)
+        cfg["backup"] = {"retention": 2, "encryption_key": "test-key"}
+        b = await create_backup_async(self.data, cfg, self.db)
+        self.assertTrue(b["encrypted"])
+        # 正确密钥可恢复
+        res = await restore_backup(b["id"], self.data, self.db, cfg)
+        self.assertTrue(res["ok"])
+        # 错误密钥 → ok=False 而非抛 InvalidTag 崩溃
+        bad = dict(cfg)
+        bad["backup"] = {"retention": 2, "encryption_key": "wrong-key"}
+        res2 = await restore_backup(b["id"], self.data, self.db, bad)
+        self.assertFalse(res2["ok"])
+        self.assertIn("decrypt failed", res2["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
