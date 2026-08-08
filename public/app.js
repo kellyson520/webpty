@@ -495,6 +495,51 @@ function buildSessionPage(session) {
     try { entry.term?.scrollToBottom(); } catch {}
   });
 
+  // Right-edge scroll strip: drag vertically to page through xterm scrollback.
+  // Position of the thumb = fraction of scrollback; drag maps to scrollLines.
+  const strip = page.querySelector('.scroll-strip');
+  const stripThumb = strip ? strip.querySelector('.strip-thumb') : null;
+  let stripDrag = null;
+  const updateStripThumb = () => {
+    if (!stripThumb || !entry.term) return;
+    const b = entry.term.buffer.active;
+    const maxY = Math.max(b.baseY, 0);
+    const frac = maxY ? Math.min(b.viewportY / maxY, 1) : 1;
+    stripThumb.style.top = `${frac * 100}%`;
+    stripThumb.style.height = `${Math.max(6, 100 / (maxY + 1) * 30)}%`;
+  };
+  try { entry.term?.onScroll(updateStripThumb); } catch {}
+  if (strip && entry.term) {
+    const dragScroll = (clientY) => {
+      const rect = strip.getBoundingClientRect();
+      const frac = Math.min(Math.max((clientY - rect.top) / Math.max(rect.height, 1), 0), 1);
+      const b = entry.term.buffer.active;
+      const maxY = Math.max(b.baseY, 0);
+      const target = Math.round(frac * maxY);
+      const delta = target - b.viewportY;
+      if (delta) { try { entry.term.scrollLines(delta); } catch {} }
+      updateStripThumb();
+    };
+    strip.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      strip.setPointerCapture?.(ev.pointerId);
+      stripDrag = true;
+      dragScroll(ev.clientY);
+    });
+    strip.addEventListener('pointermove', (ev) => {
+      if (!stripDrag) return;
+      ev.preventDefault();
+      dragScroll(ev.clientY);
+    });
+    strip.addEventListener('pointerup', () => { stripDrag = false; });
+    strip.addEventListener('pointercancel', () => { stripDrag = false; });
+    // Touch fallback for browsers without pointer capture support.
+    strip.addEventListener('touchstart', (ev) => { stripDrag = true; dragScroll(ev.touches[0].clientY); }, { passive: true });
+    strip.addEventListener('touchmove', (ev) => { if (stripDrag) dragScroll(ev.touches[0].clientY); }, { passive: true });
+    strip.addEventListener('touchend', () => { stripDrag = false; });
+    updateStripThumb();
+  }
+
   // Auto-grow textarea
   const resizeCompose = () => {
     composeInput.style.height = 'auto';

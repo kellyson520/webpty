@@ -413,6 +413,8 @@ body.no-input-bar .key-row { display: none; }
 .page[data-tool="powershell"]  { --tool-color: var(--tool-powershell); }
 .term-host .xterm,
 .term-host .xterm-viewport { width: 100% !important; height: 100% !important; }
+/* xterm 5.x viewport handles its own touch scrolling (handleTouchStart/Move +
+   cancel()); pan-y matches the upstream npm release this fork is based on. */
 .term-host .xterm-viewport { touch-action: pan-y; }
 
 /* Right-edge dedicated scroll strip — drag here to scroll xterm scrollback.
@@ -425,11 +427,23 @@ body.no-input-bar .key-row { display: none; }
   bottom: 0;
   width: 28px;
   z-index: 4;
-  touch-action: pan-y;
+  touch-action: none;
   background: transparent;
 }
+.scroll-strip .strip-thumb {
+  position: absolute;
+  right: 4px;
+  width: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.22);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.scroll-strip:active .strip-thumb,
+.scroll-strip:hover .strip-thumb { opacity: 1; }
 @media (max-width: 600px) {
   .scroll-strip { display: block; }
+  .scroll-strip .strip-thumb { opacity: 1; }
   /* On mobile the strip is the scroll affordance — hide the native scrollbar */
   .term-host .xterm-viewport { scrollbar-width: none; }
   .term-host .xterm-viewport::-webkit-scrollbar { display: none; }
