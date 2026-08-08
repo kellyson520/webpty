@@ -2515,6 +2515,10 @@ const AGENT_TOOL_COLORS = {
 
 async function refreshAgentsPanel() {
   const cfg = await api('/api/config').catch(() => ({ tools: {} }));
+  // Keep the module-level config in sync: the session menu's tool list and
+  // the "new session" page read config.tools. Without this, edits made here
+  // (add/disable/change) wouldn't show up there until a full page reload.
+  config = cfg;
   const tools = cfg.tools || {};
   const names = Object.keys(tools);
   document.getElementById('agents-count').textContent = names.length;
@@ -2533,12 +2537,17 @@ async function refreshAgentsPanel() {
           <div class="row">
             <label>command <input class="inp" data-field="command" value="${esc(t.command || '')}"></label>
             <label>defaultArgs <input class="inp" style="min-width:200px" data-field="defaultArgs" value="${esc(t.defaultArgs || '')}"></label>
+            <label>nameFlag <input class="inp" data-field="nameFlag" placeholder="(无)" value="${esc(t.nameFlag || '')}"></label>
+          </div>
+          <div class="row">
             <label>engine
               <select class="sel" data-field="engine">
                 <option value="">pty</option>
                 <option value="agent" ${t.engine === 'agent' ? 'selected' : ''}>agent</option>
               </select>
             </label>
+            <label>permissionMode <input class="inp" data-field="permissionMode" placeholder="(默认)" value="${esc(t.permissionMode || '')}"></label>
+            <label>label <input class="inp" data-field="label" placeholder="(默认名)" value="${esc(t.label || '')}"></label>
           </div>
           <div class="row">
             <button class="btn sm primary" data-act="save">保存</button>
@@ -2567,9 +2576,18 @@ async function refreshAgentsPanel() {
       const patch = {};
       row.querySelectorAll('[data-field]').forEach((el) => {
         const f = el.dataset.field;
-        patch[f] = f === 'engine' ? el.value : el.value.trim();
+        const v = f === 'engine' ? el.value : el.value.trim();
+        if (f === 'nameFlag') {
+          // empty nameFlag = no name flag (null), not an empty string
+          patch[f] = v === '' ? null : v;
+        } else if (f === 'engine') {
+          if (v !== '') patch[f] = v;
+        } else if (v === '') {
+          patch[f] = null; // clear optional fields instead of storing ''
+        } else {
+          patch[f] = v;
+        }
       });
-      if (patch.engine === '') delete patch.engine;
       try {
         await api('/api/config/tools', {
           method: 'PUT', body: JSON.stringify({ tools: { [name]: patch } }) });

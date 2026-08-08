@@ -373,14 +373,20 @@ class Server:
             for key, val in incoming.items():
                 key = str(key)
                 if val is None or val is False:
-                    merged[key] = None  # disabled marker (persisted; hidden by _api_config)
+                    # Tool-level null/false = disable the whole tool.
+                    merged[key] = None
                     continue
                 if not isinstance(val, dict):
                     continue
                 base = dict(merged.get(key) or {})
                 for field in ("command", "defaultArgs", "engine", "nameFlag",
                               "permissionMode", "label"):
-                    if field in val:
+                    if field not in val:
+                        continue
+                    if val[field] is None:
+                        # Field-level null = clear the field (back to default).
+                        base.pop(field, None)
+                    else:
                         base[field] = val[field]
                 merged[key] = base
             self.config["tools"] = merged

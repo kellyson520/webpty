@@ -190,6 +190,14 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIsNone(cfg["tools"]["gemini"])
         self.assertEqual(cfg["tools"]["my-agent"]["command"], "myagent")
 
+    def test_tools_field_null_clears_not_disables(self):
+        # 字段级 null（如 nameFlag=null）只清除字段，不禁用工具
+        st, j = self._req("/api/config/tools", "PUT",
+                          {"tools": {"codex": {"nameFlag": None}}})
+        self.assertEqual(st, 200)
+        self.assertIn("codex", j["tools"])  # 工具仍在
+        self.assertNotIn("nameFlag", j["tools"]["codex"])  # 字段被清除
+
     def test_fs_list(self):
         status, j = self._req("/api/fs/list")
         self.assertEqual(status, 200)

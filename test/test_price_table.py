@@ -13,6 +13,17 @@ class PriceTableTest(unittest.TestCase):
         self.assertEqual(p["input"], 1.0)
         self.assertEqual(p["output"], 2.0)
 
+    def test_prefix_matching(self):
+        # 真实模型 ID 前缀匹配家族价
+        self.assertEqual(get_price("claude-opus-4-8", {})["input"], 15.0)
+        self.assertEqual(get_price("claude-haiku-4-5-20251001", {})["input"], 0.80)
+        self.assertEqual(get_price("gpt-5.4", {})["input"], 1.25)
+        self.assertEqual(get_price("deepseek-v4-flash", {})["input"], 0.27)
+        # 家族回退
+        self.assertEqual(get_price("claude-anything-new", {})["input"], 3.0)
+        # gemini 家族
+        self.assertAlmostEqual(get_price("gemini-2.5-pro", {})["input"], 0.15)
+
     def test_config_overrides(self):
         cfg = {"prices": {"claude": {"input": 99.0, "output": 99.0,
                                      "cache_hit": 0.0, "currency": "CNY"}}}
