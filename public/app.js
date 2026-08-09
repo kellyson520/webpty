@@ -2890,6 +2890,9 @@ const ACFG_FIELD_META = {
   language: { label: '语言 language', ph: 'zh / en' },
   effort: { label: '推理强度 effort', ph: 'low / high / max' },
   theme: { label: '主题 theme', ph: 'dark / light' },
+  model_provider: { label: '模型供应商 model_provider', ph: 'openai / anthropic' },
+  temperature: { label: '温度 temperature', ph: '0.0 - 1.0' },
+  proxy: { label: '代理 proxy', ph: 'http://host:port' },
 };
 
 let acfgList = null;

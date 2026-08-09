@@ -3,6 +3,7 @@ preview via WorkerInterface). Business-management layer.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -196,7 +197,11 @@ class Migrator(WorkerInterface):
         return {"manifest": manifest, "state": state}
 
     async def import_package(self, path: str, mode: str = "merge") -> dict:
-        pkg = self._read_package(path)
+        # 同步解压/解析(可能为大包)移入线程池,避免阻塞事件循环
+        # (reconcile 先例:run_in_executor(None, sync_fn, arg));async 的
+        # db 调用仍留在事件循环。
+        pkg = await asyncio.get_running_loop().run_in_executor(
+            None, self._read_package, path)
         if not pkg:
             return {"status": "error", "message": "invalid package",
                     "mode": mode}

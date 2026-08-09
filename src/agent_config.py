@@ -53,11 +53,17 @@ TOML_KEYS: dict[str, dict[str, tuple[str, str]]] = {
         "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),
         "base_url": (r'^openai_base_url\s*=\s*".*?"', 'openai_base_url = "{}"'),
         "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
+        "model_provider": (r'^model_provider\s*=\s*".*?"', 'model_provider = "{}"'),
+        "temperature": (r'^temperature\s*=\s*"?[^"]*"?', 'temperature = "{}"'),
+        "proxy": (r'^proxy\s*=\s*".*?"', 'proxy = "{}"'),
     },
     "reasonix": {
         "model": (r'^default_model\s*=\s*".*?"', 'default_model = "{}"'),
         "language": (r'^language\s*=\s*".*?"', 'language = "{}"'),
         "effort": (r'^effort\s*=\s*"[a-z]+"', 'effort = "{}"'),
+        "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
+        "base_url": (r'^base_url\s*=\s*".*?"', 'base_url = "{}"'),
+        "provider": (r'^provider\s*=\s*".*?"', 'provider = "{}"'),
     },
     "cursor-agent": {
         "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),

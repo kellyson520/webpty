@@ -149,3 +149,20 @@ class MaskTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertNotIn("sk-super-secret-123", res["content"])
         self.assertIn("****", res["content"])
+
+    def test_toml_new_keys_replaced(self):
+        """codex proxy/temperature 与 reasonix api_key/base_url 可编辑。"""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="wp-keys-")
+        p = os.path.join(tmp, "config.toml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('model = "gpt-5.4"\nproxy = "http://proxy:8080"\n')
+        with mock.patch.object(ac, "AGENT_CONFIG_PATHS", {"codex": [p]}):
+            with mock.patch.object(ac, "_HOME", tmp):
+                res = ac.update_config("codex", {
+                    "proxy": "http://new-proxy:3128",
+                    "temperature": "0.7"})
+        self.assertTrue(res["ok"])
+        content = open(p, encoding="utf-8").read()
+        self.assertIn('proxy = "http://new-proxy:3128"', content)
+        self.assertIn('temperature = "0.7"', content)
