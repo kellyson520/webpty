@@ -71,9 +71,11 @@ class Notifier:
         if not self.mailer.enabled():
             await self.db.mark_delivered(nid, True)
             return
-        self.mailer.send(
-            subject=f"[webpty] {event.get('tool')} {event.get('type')}",
-            html=HTML_TMPL.format(
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, self.mailer.send,
+            f"[webpty] {event.get('tool')} {event.get('type')}",
+            HTML_TMPL.format(
                 title=escape(str(event.get("name", "session"))),
                 body=escape(str(event.get("type", ""))),
                 meta=escape(f"project: {event.get('project')}\n"

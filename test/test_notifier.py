@@ -74,6 +74,29 @@ class NotifierTest(unittest.IsolatedAsyncioTestCase):
         rows = await self.db.query("SELECT delivered FROM notifications WHERE id=?", (nid,))
         self.assertEqual(rows[0]["delivered"], 1)
 
+    async def test_send_mail_runs_in_executor(self):
+        """_send_mail 的 SMTP 调用包在 run_in_executor(不阻塞事件循环)。"""
+        import asyncio as _a
+        calls = []
+        orig_send = self.n.mailer.send
+
+        def spy(subject, html):
+            calls.append((subject, html))
+            return None
+        # mailer 默认未启用(cfg 无 smtp)会提前 return,先启用以到达 send 调用
+        self.n.mailer.host = "smtp.example"
+        self.n.mailer.send = spy
+        # 直接调 _send_mail(已落库一条通知)
+        nid = await self.db.add_notification({
+            "event_type": "failed", "level": "warn", "tool": "t",
+            "project": "/p", "session_id": "s-x", "title": "t",
+            "body": "b", "dedup_key": "k-x"})
+        await self.n._send_mail(nid, {"type": "failed", "name": "n",
+                                      "tool": "t", "project": "/p",
+                                      "exit_code": 1})
+        self.assertEqual(len(calls), 1)
+        self.n.mailer.send = orig_send
+
 
 if __name__ == "__main__":
     unittest.main()
