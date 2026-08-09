@@ -218,6 +218,31 @@ class Server:
         self._claude_mtime_cache[cwd] = (mtime, time.time())
         return mtime
 
+    def _reasonix_history_mtime(self, cwd: str) -> float:
+        # Audit M3: same TTL-cached pattern as claude history — reasonix
+        # sessions live under ~/.reasonix/projects/<encoded-cwd>/sessions.
+        cached = self._claude_mtime_cache.get("rx:" + cwd)
+        if cached is not None:
+            mtime, at = cached
+            if time.time() - at < _CLAUDE_MTIME_TTL:
+                return mtime
+        enc = "-" + str(cwd).replace("/", "-").lstrip("-")
+        d = os.path.join(os.path.expanduser("~"), ".reasonix",
+                         "projects", enc, "sessions")
+        mtime = 0.0
+        try:
+            for f in os.listdir(d):
+                if not f.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = max(mtime, os.path.getmtime(os.path.join(d, f)))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        self._claude_mtime_cache["rx:" + cwd] = (mtime, time.time())
+        return mtime
+
     def _list_projects(self) -> list[dict]:
         seen = set()
         out = []
@@ -236,6 +261,7 @@ class Server:
                 "path": os.path.abspath(full),
                 "mtime": mtime * 1000,
                 "claudeMtime": self._claude_history_mtime(full),
+                "reasonixMtime": self._reasonix_history_mtime(full),
             })
 
         try:
@@ -527,6 +553,16 @@ class Server:
                         # Field-level null = clear the field (back to default).
                         base.pop(field, None)
                     else:
+                        if field == "permissionMode":
+                            # Audit L3: keep the same enum as session create
+                            # — a typo'd mode would make the CLI exit on
+                            # --permission-mode <bad> at every start.
+                            pm = str(val[field])
+                            if pm not in ("bypassPermissions", "acceptEdits",
+                                          "plan", "default", "dontAsk",
+                                          "fullAuto", "noAuto"):
+                                raise HttpError(
+                                    400, f"Unknown permissionMode: {pm}")
                         base[field] = val[field]
                 merged[key] = base
             self.config["tools"] = merged
@@ -1253,7 +1289,16 @@ class Server:
                     # the full transcript as a snapshot (same path as the
                     # initial connect, chunked). Fired async: on_resync is a
                     # sync callback and _send_snapshot awaits the executor.
-                    asyncio.create_task(self._send_snapshot(outbox, sid))
+                    # Audit M2: one in-flight snapshot per session — a slow
+                    # consumer triggering repeated resyncs must not stack
+                    # interleaved chunk streams (they corrupt the client's
+                    # parse buffer and force a reconnect loop).
+                    if session.get("_snapshot_pending"):
+                        return  # already being sent
+                    session["_snapshot_pending"] = True
+                    task = asyncio.create_task(self._send_snapshot(outbox, sid))
+                    task.add_done_callback(
+                        lambda t: session.__setitem__("_snapshot_pending", False))
                     return
                 recent = self.sessions.recent_output(sid)
                 if recent:
@@ -1387,6 +1432,12 @@ class Server:
                                 raise ValueError("not a control message")
                             if msg.get("type") == "user" and isinstance(msg.get("text"), str):
                                 self.sessions.agent_send(sid, msg["text"])
+                                continue
+                            if msg.get("type") == "permission" and isinstance(msg.get("requestId"), str):
+                                # Audit H1: approve/deny a claude permission
+                                # request from the chat UI.
+                                self.sessions.agent_permission_response(
+                                    sid, msg["requestId"], bool(msg.get("accept")))
                                 continue
                             if msg.get("type") == "resize" and isinstance(msg.get("cols"), (int, float)) \
                                     and isinstance(msg.get("rows"), (int, float)):

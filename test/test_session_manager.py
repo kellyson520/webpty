@@ -683,33 +683,28 @@ class PtyHostClientReadLoopTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ReasonixHistoryTest(unittest.TestCase):
-    """_reasonix_has_history 按项目目录精确判断。"""
+    """reasonix 历史按项目目录精确判断（audit M3：_reasonix_history_mtime）。"""
 
     def test_encoding_and_detection(self):
         from unittest import mock
         import os, tempfile
-        import session_manager as sm
+        import server as srv
 
         tmp = tempfile.mkdtemp(prefix="wp-rxhist-")
         # 模拟 ~/.reasonix/projects/-root-webpty/sessions/ 有会话文件
         proj = os.path.join(tmp, ".reasonix", "projects", "-root-webpty", "sessions")
         os.makedirs(proj, exist_ok=True)
         open(os.path.join(proj, "20260808-010000-test.jsonl"), "w").close()
-
-        with mock.patch.object(sm, "os") as mocked_os:
-            # os.path.expanduser 需要真实，patch 其他
-            pass
         # 直接验证编码函数
         enc = "-" + "/root/webpty".replace("/", "-").lstrip("-")
         self.assertEqual(enc, "-root-webpty")
         enc_root = "-" + "/root".replace("/", "-").lstrip("-")
         self.assertEqual(enc_root, "-root")
 
-        # 用 mock expanduser 指向 tmp
-        import session_manager as sm2
-        with mock.patch.object(sm2.os.path, "expanduser", return_value=tmp):
-            self.assertTrue(sm2._reasonix_has_history("/root/webpty"))
-            self.assertFalse(sm2._reasonix_has_history("/nonexistent"))
+        s = srv.Server(config={})
+        with mock.patch.object(srv.os.path, "expanduser", return_value=tmp):
+            self.assertGreater(s._reasonix_history_mtime("/root/webpty"), 0)
+            self.assertEqual(s._reasonix_history_mtime("/nonexistent"), 0.0)
 
 
 class RetryCopyTest(unittest.IsolatedAsyncioTestCase):

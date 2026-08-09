@@ -1309,3 +1309,22 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
   animation: boot-spin 0.9s linear infinite;
 }
 @keyframes boot-spin { to { transform: rotate(360deg); } }
+
+/* Audit H1: permission request card (non-bypass modes) */
+.chat-perm {
+  margin: 8px 0; padding: 10px 12px;
+  border: 1px solid var(--warn, #d29922); border-radius: 8px;
+  background: rgba(210, 153, 34, 0.08);
+  font-size: 13px;
+}
+.chat-perm-head { font-weight: 600; color: #e3b341; margin-bottom: 6px; }
+.chat-perm-row { display: flex; gap: 8px; margin-top: 8px; }
+.perm-btn {
+  padding: 5px 16px; border-radius: 6px; border: none;
+  font-size: 13px; cursor: pointer; color: #fff;
+}
+.perm-btn.ok { background: #2e7d32; }
+.perm-btn.ok:hover { background: #388e3c; }
+.perm-btn.no { background: #b23c3c; }
+.perm-btn.no:hover { background: #c45050; }
+.perm-btn:disabled { opacity: 0.45; cursor: default; }

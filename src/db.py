@@ -54,11 +54,6 @@ class Database:
                 dedup_key TEXT NOT NULL,
                 delivered INTEGER NOT NULL DEFAULT 0
             );
-            CREATE INDEX IF NOT EXISTS idx_notif_dedup
-                ON notifications (dedup_key, ts);
-            CREATE INDEX IF NOT EXISTS idx_notif_ts
-                ON notifications (ts);
-
             CREATE TABLE IF NOT EXISTS notification_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -126,6 +121,42 @@ class Database:
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # Audit L6: schema versioning — ordered migrations run once each
+        # against any DB regardless of how old it is.
+        from db_migrations import MIGRATIONS
+        try:
+            ver = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        except (sqlite3.OperationalError, TypeError, IndexError):
+            ver = 0
+        for v, sql in MIGRATIONS:
+            if v > ver:
+                try:
+                    if v == 1:
+                        # dedup_key exists on fresh DBs (built by CREATE);
+                        # only legacy DBs need the ALTER.
+                        cols = {r[1] for r in self._conn.execute(
+                            "PRAGMA table_info(notifications)")}
+                        if "dedup_key" not in cols:
+                            self._conn.execute(
+                                "ALTER TABLE notifications ADD COLUMN "
+                                "dedup_key TEXT NOT NULL DEFAULT ''")
+                    self._conn.executescript(sql)
+                    self._conn.execute(f"PRAGMA user_version = {v}")
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass  # already applied manually / partial env
+        # dedup_key-dependent indexes — built AFTER migrations so legacy
+        # DBs (column added by v1) can create them too.
+        try:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notif_dedup "
+                "ON notifications (dedup_key, ts)")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notif_ts "
+                "ON notifications (ts)")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
     async def execute(self, sql: str, params: tuple = ()) -> int:
         assert self._conn is not None

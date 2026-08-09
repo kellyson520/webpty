@@ -270,23 +270,32 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
 
 async def rotate(db: Database, retention: int = 7) -> list[int]:
     rows = await db.list_backups()
-    # Only real backups count toward the retention quota — migrate-export
-    # packages are registered too (so they get cleaned up) but must not push
-    # genuine snapshots out of the window.
+    # Audit M1: rotate real backups and migrate-export packages under
+    # INDEPENDENT quotas — the old code only ever deleted real backups, so
+    # export packages accumulated forever (365 files/yr).
     import json as _json
     real = [r for r in rows if not _is_migrate_export_row(r)]
-    if len(real) <= retention:
-        return []
-    doomed_ids = {r["id"] for r in real[retention:]}
+    exports = [r for r in rows if _is_migrate_export_row(r)]
+    doomed_ids: set[int] = set()
+    if len(real) > retention:
+        doomed_ids.update(r["id"] for r in real[retention:])
+    if len(exports) > retention:
+        doomed_ids.update(r["id"] for r in exports[retention:])
     deleted = []
     for row in rows:
         if row["id"] not in doomed_ids:
             continue
         path = os.path.join(os.path.dirname(db.path), "backups",
                             os.path.basename(row["filename"]))
-        if os.path.exists(path):
-            os.remove(path)
-        await db.delete_backup(row["id"])
+        # Audit L5: one unremovable file must not abort the whole sweep.
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            await db.delete_backup(row["id"])
+        except OSError as err:
+            from logging_util import log_error
+            log_error("backup-rotate", err)
+            continue
         deleted.append(row["id"])
     return deleted
 

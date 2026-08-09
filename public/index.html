@@ -195,12 +195,13 @@
             <span>权限模式</span>
             <select name="permissionMode">
               <option value="">默认（工具级）</option>
-              <option value="bypassPermissions">bypassPermissions</option>
-              <option value="acceptEdits">acceptEdits</option>
-              <option value="plan">plan</option>
-              <option value="dontAsk">dontAsk</option>
-              <option value="fullAuto">fullAuto</option>
+              <option value="bypassPermissions">bypassPermissions（跳过全部确认）</option>
+              <option value="acceptEdits">acceptEdits（文件修改免确认）</option>
+              <option value="plan">plan（只读规划）</option>
+              <option value="dontAsk">dontAsk（除敏感外免确认）</option>
+              <option value="fullAuto">fullAuto（全自动）</option>
             </select>
+            <p class="hint">⚠ 非 bypass 模式会在高危工具调用时弹「批准/拒绝」请求，等待你的选择</p>
           </label>
           <button class="primary" type="submit">+ 创建</button>
           <p class="hint" id="add-hint"></p>
@@ -296,6 +297,7 @@
           <div class="panel-toolbar">
             <button id="backup-create" class="btn primary" type="button">＋ 立即备份</button>
           </div>
+          <p class="hint">自动保留最近 7 份快照（迁移导出包独立保留 7 份）；更早的会被自动清理。</p>
           <div class="panel-section">
             <h3>快照列表 <span class="count" id="backup-list-count">0</span></h3>
             <div id="backup-list" class="panel-list"></div>

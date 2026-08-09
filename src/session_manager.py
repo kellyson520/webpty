@@ -70,24 +70,6 @@ def has_prior_conversation(cwd: str) -> bool:
     return bool(glob.glob(os.path.join(base, encode_claude_project(cwd), "*.jsonl")))
 
 
-def _reasonix_has_history(cwd: str) -> bool:
-    """True when reasonix has persisted sessions FOR THIS PROJECT DIRECTORY.
-
-    reasonix stores sessions per working directory under
-    ~/.reasonix/projects/<encoded-cwd>/sessions/ — encoding is
-    '/root' → '-root', '/root/webpty' → '-root-webpty'. Checking the
-    project-scoped dir (not the global store) means `-c` resumes the
-    sessions of THIS project, never the ones held by reasonix serve
-    (which runs in a different cwd and locks its own directory).
-    """
-    import glob
-
-    enc = "-" + str(cwd).replace("/", "-").lstrip("-")
-    base = os.path.join(os.path.expanduser("~"), ".reasonix",
-                        "projects", enc, "sessions")
-    return bool(glob.glob(os.path.join(base, "*.jsonl")))
-
-
 def _append_log(log_path: str, text: str) -> None:
     if not log_path:
         return
@@ -259,6 +241,13 @@ class SessionManager:
                     os.unlink(p)
                 except OSError:
                     pass
+        # Audit L1: the agent transcript JSONL (audit T1) has the same fate.
+        tx_path = session.get("_transcript_path")
+        if tx_path:
+            try:
+                os.unlink(tx_path)
+            except OSError:
+                pass
         self.sessions.pop(sid, None)
         self._restart_counts.pop(sid, None)  # id reuse must not inherit counts
         self._stall_reported.pop(sid, None)
@@ -341,7 +330,10 @@ class SessionManager:
         name_flag = tool.get("nameFlag")
         if name_flag and session.get("name") and name_flag not in user_args:
             argv.append(name_flag)
-            argv.append(session.get("name"))
+            # Audit L2: a name starting with '-' would be parsed as a flag
+            # by the CLI; strip control chars too (non-shell injection —
+            # argv is list-passed — but flag confusion is real).
+            argv.append(safe_name(session.get("name")))
         log_path = session.get("log_path") or os.path.join(
             logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
         session["log_path"] = log_path
@@ -385,7 +377,8 @@ class SessionManager:
         # want to continue explicitly pass -c/--continue in session args.
         name_flag = tool.get("nameFlag")
         if name_flag and session.get("name") and name_flag not in user_args:
-            argv.insert(0, session.get("name"))
+            # Audit L2: sanitize the name before it becomes a CLI arg.
+            argv.insert(0, safe_name(session.get("name")))
             argv.insert(0, name_flag)
 
         log_path = os.path.join(logs_dir, f"{safe_name(session.get('name'))}-{session['id'][:8]}.log")
@@ -725,6 +718,23 @@ class SessionManager:
                     })
             return False
 
+        if etype == "permission_request":
+            # Audit H1: non-bypass permission modes (acceptEdits / plan /
+            # dontAsk / fullAuto / noAuto) make claude emit a permission
+            # request and WAIT. Without forwarding + a response channel the
+            # session hung forever (turn_active stuck) with no UI to answer.
+            req = evt.get("request") or {}
+            self._push_agent(session, {
+                "t": "permission",
+                "requestId": evt.get("request_id"),
+                "action": req.get("action"),
+                "toolName": req.get("tool_name"),
+                "input": req.get("tool_input"),
+                "mode": req.get("permission_mode"),
+                "sessionId": evt.get("session_id") or session.get("agent_session_id"),
+            })
+            return False
+
         if etype == "result":
             session["turn_active"] = False
             if evt.get("session_id"):
@@ -827,6 +837,34 @@ class SessionManager:
             payload = json.dumps({"type": "user", "message": {"role": "user", "content": message}}) + "\n"
             proc.stdin.write(payload.encode("utf-8"))
             self._emit("change", self._public(session))
+            return True
+        except Exception as err:  # noqa: BLE001
+            log_error("session-manager", err)
+            return False
+
+    def agent_permission_response(self, sid: str, request_id: str,
+                                  accept: bool) -> bool:
+        """Audit H1: answer a claude permission_request (stream-json) —
+        without this the session stays blocked forever in non-bypass modes."""
+        session = self.sessions.get(sid)
+        if not session or session.get("engine") != "agent":
+            return False
+        if not request_id:
+            return False
+        proc = session.get("proc")
+        if not proc or session.get("state") != "running" or proc.stdin is None:
+            return False
+        try:
+            payload = json.dumps({
+                "type": "permission_response",
+                "request_id": request_id,
+                "accept": bool(accept),
+            }) + "\n"
+            proc.stdin.write(payload.encode("utf-8"))
+            self._push_agent(session, {
+                "t": "system",
+                "text": f"权限请求已{'批准' if accept else '拒绝'}：{request_id[:8]}",
+            })
             return True
         except Exception as err:  # noqa: BLE001
             log_error("session-manager", err)

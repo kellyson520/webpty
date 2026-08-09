@@ -105,8 +105,25 @@ openMenuBtn.onclick = (ev) => {
   if (s) openMenu(s.id);
 };
 
-const api = async (url, opts = {}) => {
-  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
+// Audit M4: backend errors are English; map the frequent ones for the UI.
+const ERR_ZH = {
+  'Unknown tool': '未知工具',
+  'Path is outside registered roots': '路径不在已注册根目录内',
+  'Already exists': '目标已存在',
+  'Invalid limit': '无效的预算值',
+  'Invalid JSON': '无效的 JSON 请求',
+  'name required': '名称必填',
+  'path required': '路径必填',
+  'session not found or already stopped': '会话不存在或已停止',
+  'nothing to interrupt': '当前没有可中断的回合',
+  'only agent sessions can be reset': '仅 agent 会话支持重置',
+  'session not running': '会话未运行',
+  'Unknown permissionMode': '未知的权限模式',
+  'limit required': '缺少预算值',
+};
+function zhErr(msg) { return ERR_ZH[msg] || msg || ''; }
+
+const api = async (url, opts = {}) => {  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   const token = localStorage.getItem('webpty.token');
   if (token) headers['authorization'] = `Bearer ${token}`;
   // Audit L2: backend hangs must not leave buttons pending forever.
@@ -167,7 +184,7 @@ async function unlockToken() {
     localStorage.removeItem('webpty.token');
     document.cookie = 'webpty_token=; path=/; max-age=0';
     tokenGateBtn.disabled = false;
-    tokenGateErr.textContent = e.message.includes('forbidden') ? '令牌错误，请重试' : e.message;
+    tokenGateErr.textContent = e.message.includes('forbidden') ? '令牌错误，请重试' : zhErr(e.message);
   }
 }
 
@@ -1291,7 +1308,7 @@ function renderChatItem(entry, item) {
       breakText();
       const el = document.createElement('div');
       el.className = 'chat-think';
-      el.textContent = item.text ? `✻ ${item.text}` : '✻ Thinking…';
+      el.textContent = item.text ? `✻ ${item.text}` : '✻ 思考中…';
       entry.logEl.appendChild(el);
       break;
     }
@@ -1321,9 +1338,9 @@ function renderChatItem(entry, item) {
       setChatPending(entry, false);
       const el = document.createElement('div');
       el.className = 'chat-result' + (item.isError ? ' err' : '');
-      const parts = [item.isError ? (item.text || 'error') : 'done'];
+      const parts = [item.isError ? (item.text || '出错') : '完成'];
       if (typeof item.durationMs === 'number') parts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
-      if (typeof item.numTurns === 'number') parts.push(`${item.numTurns} turns`);
+      if (typeof item.numTurns === 'number') parts.push(`${item.numTurns} 回合`);
       if (typeof item.costUsd === 'number') parts.push(`$${item.costUsd.toFixed(4)}`);
       el.textContent = parts.join('  ·  ');
       entry.logEl.appendChild(el);
@@ -1343,7 +1360,48 @@ function renderChatItem(entry, item) {
       setChatPending(entry, false);
       const el = document.createElement('div');
       el.className = 'chat-sys';
-      el.textContent = '— session ended —';
+      el.textContent = '— 会话已结束 —';
+      entry.logEl.appendChild(el);
+      break;
+    }
+    case 'permission': {
+      // Audit H1: non-bypass permission modes ask for approval — render
+      // the request with Approve/Deny buttons wired to the WS.
+      breakText();
+      setChatPending(entry, false);
+      const el = document.createElement('div');
+      el.className = 'chat-perm';
+      const head = document.createElement('div');
+      head.className = 'chat-perm-head';
+      head.textContent = `⚠ 权限请求：${escapeHtml(item.action || '')} ${escapeHtml(item.toolName || '')}`;
+      el.appendChild(head);
+      if (item.input) {
+        const pre = document.createElement('pre');
+        pre.className = 'tool-in';
+        pre.textContent = prettyInput(item.input);
+        el.appendChild(pre);
+      }
+      const row = document.createElement('div');
+      row.className = 'chat-perm-row';
+      const approve = document.createElement('button');
+      approve.className = 'perm-btn ok';
+      approve.textContent = '批准';
+      const deny = document.createElement('button');
+      deny.className = 'perm-btn no';
+      deny.textContent = '拒绝';
+      const send = (accept) => {
+        if (entry.socket && entry.socket.readyState === 1) {
+          entry.socket.send(JSON.stringify({
+            type: 'permission', __ctl: true,
+            requestId: item.requestId, accept,
+          }));
+        }
+        approve.disabled = deny.disabled = true;
+      };
+      approve.onclick = () => send(true);
+      deny.onclick = () => send(false);
+      row.append(approve, deny);
+      el.appendChild(row);
       entry.logEl.appendChild(el);
       break;
     }
@@ -1629,7 +1687,7 @@ function renderTabs() {
         try {
           await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
         } catch (e) {
-          alert(e.message);
+          alert(zhErr(e.message));
           return;
         }
         await refreshSessions();
@@ -1869,9 +1927,9 @@ const TOOL_LABEL = {
 
 async function exitSession(session) {
   if (!session) return;
-  if (!confirm(`Close session "${session.name}"?`)) return;
+  if (!confirm(`关闭会话「${session.name}」？`)) return;
   try { await api(`/api/sessions/${session.id}`, { method: 'DELETE' }); }
-  catch (e) { alert(e.message); return; }
+  catch (e) { alert(zhErr(e.message)); return; }
   await refreshSessions();
 }
 
@@ -1963,7 +2021,7 @@ async function spawnShell(tool, label, cwd) {
     const idx = sessions.findIndex((s) => s.id === created.id);
     if (idx >= 0) scrollToIndex(idx);
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 }
 
@@ -1997,8 +2055,9 @@ function addToolMenuItem(tool, project, session) {
   b.appendChild(label);
 
   let stateText = null;
-  if (sess) stateText = sess.id === session.id ? 'current' : (sess.state === 'running' ? 'active' : 'resume');
-  else if (tool === 'claude' && project.claudeMtime > 0) stateText = 'history';
+  if (sess) stateText = sess.id === session.id ? '当前' : (sess.state === 'running' ? '运行中' : '继续');
+  else if (tool === 'claude' && project.claudeMtime > 0) stateText = '有历史';
+  else if ((tool === 'reasonix' || tool === 'opencode') && project.reasonixMtime > 0) stateText = '有历史';
   if (stateText) {
     const badge = document.createElement('span');
     badge.className = 'menu-state';
@@ -2042,7 +2101,7 @@ function openMenu(sessionId) {
   addMenuLabel('工具');
   const cwd = (session.cwd || '').toLowerCase();
   const project = (projects || []).find((p) => p.path.toLowerCase() === cwd)
-    || { path: session.cwd, name: session.name, claudeMtime: 0 };
+    || { path: session.cwd, name: session.name, claudeMtime: 0, reasonixMtime: 0 };
   for (const t of Object.keys(config.tools)) {
     addToolMenuItem(t, project, session);
   }
@@ -2338,7 +2397,7 @@ async function activateTool(project, tool, existing) {
     const idx = sessions.findIndex((s) => s.id === created.id);
     if (idx >= 0) scrollToIndex(idx);
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 }
 
@@ -2427,7 +2486,7 @@ function buildAddPage() {
       const idx = sessions.findIndex((s) => s.id === created.id);
       if (idx >= 0) scrollToIndex(idx);
     } catch (err) {
-      hint.textContent = err.message;
+      hint.textContent = zhErr(err.message);
     }
   };
   // Show the permission picker only for agent-engine tools.
@@ -2682,7 +2741,7 @@ async function bootstrap() {
       // Token gate is on and we have no (valid) token — prompt for it.
       showTokenGate();
     } else {
-      alert(e.message);
+      alert(zhErr(e.message));
     }
   } finally {
     // Audit L1: hide the boot placeholder whether bootstrap succeeded or
@@ -2839,7 +2898,7 @@ document.getElementById('notify-rule-add').onclick = async () => {
       action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
     refreshNotifyPanel();
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 };
 document.getElementById('notify-test').onclick = async () => {
@@ -2847,7 +2906,7 @@ document.getElementById('notify-test').onclick = async () => {
     const r = await api('/api/notify/test', { method: 'POST' });
     alert(r.ok ? '测试邮件已发送' : 'SMTP 未配置');
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 };
 
@@ -2895,7 +2954,7 @@ document.getElementById('cost-budget-set').onclick = async () => {
     await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: n }) });
     refreshCostPanel();
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 };
 document.getElementById('cost-reconcile').onclick = async () => {
@@ -2904,7 +2963,7 @@ document.getElementById('cost-reconcile').onclick = async () => {
     alert(`日志校对完成，补录 ${r?.added ?? 0} 条`);
     refreshCostPanel();
   } catch (e) {
-    alert(e.message);
+    alert(zhErr(e.message));
   }
 };
 
@@ -3087,7 +3146,17 @@ async function refreshAgentsPanel() {
                 <option value="agent" ${t.engine === 'agent' ? 'selected' : ''}>agent</option>
               </select>
             </label>
-            <label>permissionMode <input class="inp" data-field="permissionMode" placeholder="(默认)" value="${esc(t.permissionMode || '')}"></label>
+            <label>permissionMode
+              <select class="sel" data-field="permissionMode">
+                <option value="" ${!t.permissionMode ? 'selected' : ''}>(默认)</option>
+                <option value="bypassPermissions" ${t.permissionMode === 'bypassPermissions' ? 'selected' : ''}>bypassPermissions（跳过全部确认）</option>
+                <option value="acceptEdits" ${t.permissionMode === 'acceptEdits' ? 'selected' : ''}>acceptEdits（文件修改免确认）</option>
+                <option value="plan" ${t.permissionMode === 'plan' ? 'selected' : ''}>plan（只读规划）</option>
+                <option value="dontAsk" ${t.permissionMode === 'dontAsk' ? 'selected' : ''}>dontAsk（除敏感外免确认）</option>
+                <option value="fullAuto" ${t.permissionMode === 'fullAuto' ? 'selected' : ''}>fullAuto（全自动）</option>
+                <option value="noAuto" ${t.permissionMode === 'noAuto' ? 'selected' : ''}>noAuto（全手动确认）</option>
+              </select>
+            </label>
             <label>label <input class="inp" data-field="label" placeholder="(默认名)" value="${esc(t.label || '')}"></label>
           </div>
           <div class="row">
