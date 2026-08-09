@@ -50,6 +50,8 @@ def sanitize_import_config(cfg: dict) -> dict:
 
     - credentials (authToken / allowedLogins / *key* / *password* / *token*)
       are dropped entirely (the receiver keeps its own)
+    - sessions (runtime state) is never imported — prevents ghost sessions
+      after migrate import / backup restore
     - tools: `command` must be a built-in default command; otherwise the tool
       entry is dropped
     - providers: apiKey is dropped
@@ -59,8 +61,8 @@ def sanitize_import_config(cfg: dict) -> dict:
                     for t in DEFAULT_TOOLS.values() if t}
     out = {}
     for k, v in cfg.items():
-        if _is_sensitive(k):
-            continue  # never import credentials
+        if _is_sensitive(k) or k == "sessions":
+            continue  # 凭据 + 运行时会话列表永不导入
         if k == "tools" and isinstance(v, dict):
             tools = {}
             for name, tv in v.items():

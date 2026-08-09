@@ -214,6 +214,14 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("apiKey", clean["providers"]["deepseek"])
         self.assertEqual(clean["port"], 9999)
 
+    async def test_import_never_restores_sessions(self):
+        """导入配置中的 sessions 键必须被剔除(运行时状态,防幽灵会话)。"""
+        from migrator import sanitize_import_config
+        clean = sanitize_import_config({
+            "port": 4790, "sessions": [{"id": "ghost"}], "tools": {}})
+        self.assertNotIn("sessions", clean)
+        self.assertEqual(clean["port"], 4790)
+
 
 if __name__ == "__main__":
     unittest.main()
