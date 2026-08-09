@@ -352,6 +352,7 @@ body.no-input-bar .key-row { display: none; }
   display: flex;
   gap: 8px;
   padding: 8px 10px;
+  padding-bottom: calc(8px + var(--vvt, 0px)); /* Audit C2: iPad toolbar offset */
   background: var(--panel);
   border-top: 1px solid var(--line);
   align-items: flex-end;
@@ -1261,3 +1262,19 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
   pointer-events: none;
 }
 .status-hint[hidden] { display: none; }
+
+/* Audit C1: stop-turn button inside the chat compose bar. */
+.compose-stop {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 120, 120, 0.4);
+  background: rgba(160, 40, 40, 0.25);
+  color: #ff9a9a;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.compose-stop[hidden] { display: none; }
+.compose-stop:active { background: rgba(200, 60, 60, 0.45); }

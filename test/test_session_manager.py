@@ -3,6 +3,7 @@ normalize_tool_result."""
 import asyncio
 import json
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -435,6 +436,46 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         # result transcript item still pushed
         results = [e for e in events if e.get("t") == "result"]
         self.assertEqual(len(results), 1)
+
+    async def test_interrupt_agent_sends_sigint(self):
+        # C1: interrupt sends SIGINT to the agent proc, waits up to 3s,
+        # escalates to SIGKILL on timeout.
+        import asyncio as _a
+
+        class FakeProc:
+            def __init__(self):
+                self.signals = []
+                self.waited = False
+                self.returncode = None
+
+            def send_signal(self, sig):
+                self.signals.append(sig)
+
+            async def wait(self):
+                self.waited = True
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.signals.append("KILL")
+
+        s1 = self.sm.create(name="ag", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        fake = FakeProc()
+        s1["proc"] = fake
+        ok = await self.sm.interrupt(s1["id"])
+        self.assertTrue(ok)
+        self.assertEqual(fake.signals, [signal.SIGINT])  # SIGINT
+        self.assertTrue(fake.waited)
+
+    async def test_interrupt_pty_sends_ctrl_c(self):
+        s1 = self.sm.create(name="pt", cwd="/a", tool="bash")
+        s1["engine"] = "pty"
+        s1["state"] = "running"
+        self.host.calls.clear()
+        ok = await self.sm.interrupt(s1["id"])
+        self.assertTrue(ok)
+        self.assertEqual(self.host.calls, [("input", s1["id"], "\x03")])
 
 
 class NormalizeToolResultTest(unittest.TestCase):

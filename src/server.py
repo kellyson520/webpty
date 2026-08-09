@@ -573,6 +573,13 @@ class Server:
             ok = await self.sessions.stop(m.group(1))
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
+        m = re.match(r"^/api/sessions/([^/]+)/interrupt$", path)
+        if m and method == "POST":
+            # Audit C1: interrupt the current turn (SIGINT for agents,
+            # Ctrl+C for pty) — graceful vs stop()'s kill.
+            ok = await self.sessions.interrupt(m.group(1))
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
+
         m = re.match(r"^/api/sessions/([^/]+)$", path)
         if m and method == "DELETE":
             ok = await self.sessions.remove(m.group(1))
@@ -1086,6 +1093,22 @@ class Server:
             return
         asyncio.create_task(self._ws_session(ws, sid))
 
+    async def _send_snapshot(self, outbox, sid: str) -> None:
+        """Chunked transcript snapshot (audit 8.1/N1): serialize in the
+        executor, send ~256KB frames; the frontend accumulates + parses
+        once. Used on connect AND on resync after dropped frames."""
+        transcript = self.sessions.transcript(sid)
+        loop = asyncio.get_event_loop()
+        encoded = await loop.run_in_executor(
+            None, lambda: json.dumps(transcript))
+        CHUNK = 256 * 1024
+        for i in range(0, len(encoded), CHUNK):
+            outbox.send(json.dumps({
+                "type": "snapshot",
+                "chunk": encoded[i:i + CHUNK],
+                "done": i + CHUNK >= len(encoded),
+            }), binary=False)
+
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
@@ -1104,6 +1127,14 @@ class Server:
             # and replays it so incremental TUI state is rebuilt instead of
             # showing a garbled, misaligned screen.
             try:
+                if is_agent:
+                    # Audit N1: agent sessions had NO resync path — dropped
+                    # outbox frames silently lost transcript entries. Resend
+                    # the full transcript as a snapshot (same path as the
+                    # initial connect, chunked). Fired async: on_resync is a
+                    # sync callback and _send_snapshot awaits the executor.
+                    asyncio.create_task(self._send_snapshot(outbox, sid))
+                    return
                 recent = self.sessions.recent_output(sid)
                 if recent:
                     import base64 as _b64
@@ -1165,21 +1196,17 @@ class Server:
                 # Audit 8.1: a 4000-item transcript can be MBs — one frame
                 # blocked the event loop (json.dumps) and the client's parse
                 # (single JSON.parse long task). Chunk to ~256KB frames and
-                # serialize in the executor.
-                transcript = self.sessions.transcript(sid)
-                loop = asyncio.get_event_loop()
-                encoded = await loop.run_in_executor(
-                    None, lambda: json.dumps(transcript))
-                CHUNK = 256 * 1024
-                for i in range(0, len(encoded), CHUNK):
-                    outbox.send(json.dumps({
-                        "type": "snapshot",
-                        "chunk": encoded[i:i + CHUNK],
-                        "done": i + CHUNK >= len(encoded),
-                    }), binary=False)
+                # serialize in the executor (shared with resync).
+                await self._send_snapshot(outbox, sid)
                 self.sessions.on("agentEvent", on_agent_event)
             else:
                 recent = self.sessions.recent_output(sid)
+                if not recent:
+                    # Audit S2: after a restart the ring buffer is empty —
+                    # recover the last 128KB from disk so the terminal isn't
+                    # blank. pty-host's own replay may overlap; the skip
+                    # window below dedupes what the host re-broadcasts.
+                    recent = self.sessions.tail_log(sid)
                 if recent:
                     outbox.send(recent, binary=True)
                 # Skip the replay window: pty-host broadcasts the buffer

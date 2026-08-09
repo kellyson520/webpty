@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import time
 import uuid
 
@@ -170,6 +171,37 @@ class SessionManager:
         if not s or not s.get("recent_buf"):
             return None
         return s["recent_buf"].snapshot()
+
+    def tail_log(self, sid: str, max_bytes: int = 128 * 1024) -> bytes | None:
+        """Audit S2: after a server+pty-host restart the in-memory ring
+        buffer is empty and the terminal would come up blank — recover the
+        tail from disk (log + rotated .1), trimming on a UTF-8 boundary."""
+        s = self.sessions.get(sid)
+        if not s or not s.get("log_path"):
+            return None
+        parts: list[bytes] = []
+        total = 0
+        for p in (s["log_path"] + ".1", s["log_path"]):
+            try:
+                size = os.path.getsize(p)
+                read = min(size, max_bytes - total)
+                if read <= 0:
+                    continue
+                with open(p, "rb") as f:
+                    f.seek(size - read)
+                    parts.append(f.read(read))
+                    total += read
+            except OSError:
+                continue
+        if not parts:
+            return None
+        data = b"".join(parts)
+        # Trim to a UTF-8 boundary (avoid a trailing partial char).
+        while data and data[-1] & 0xC0 == 0x80:
+            data = data[:-1]
+        if data and data[-1] & 0x80:
+            data = data[:-1]
+        return data
 
     def create(self, *, name: str, cwd: str, tool: str, args: str = "",
                autostart: bool = False,
@@ -730,6 +762,34 @@ class SessionManager:
                 return await self._stop_locked(sid)
         return await self._stop_locked(sid)
 
+    async def interrupt(self, sid: str) -> bool:
+        """Audit C1: interrupt the current turn — agent sessions get
+        SIGINT (claude aborts the turn and saves its session checkpoint,
+        so --resume keeps working); after a 3s grace it escalates to
+        SIGKILL. PTY sessions just get Ctrl+C."""
+        session = self.sessions.get(sid)
+        if not session:
+            return False
+        if session.get("engine") == "agent":
+            proc = session.get("proc")
+            if not proc or proc.returncode is not None:
+                return False
+            try:
+                proc.send_signal(signal.SIGINT)
+            except (ProcessLookupError, OSError):
+                return False
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+            return True
+        # PTY path: send Ctrl+C into the terminal.
+        self.host.input(sid, "\x03")
+        return True
+
     async def _stop_locked(self, sid: str) -> bool:
         session = self.sessions.get(sid)
         if not session:
@@ -837,12 +897,26 @@ class SessionManager:
                     fast.append(session["id"])
             except Exception as err:  # noqa: BLE001
                 print(f"autostart {session.get('name')} failed: {err}", flush=True)
+                # Audit C3: surface the failure (tab tooltip) + one fast
+                # retry for pty sessions (transient host races).
+                session["last_error"] = str(err)[:200]
+                self._emit("change", self._public(session))
+                if engine != "agent":
+                    await asyncio.sleep(2.0)
+                    try:
+                        await self.start(session["id"])
+                    except Exception as err2:  # noqa: BLE001
+                        print(f"autostart retry {session.get('name')} failed: {err2}", flush=True)
         if fast:
             results = await asyncio.gather(
                 *(self.start(sid) for sid in fast), return_exceptions=True)
             for sid, res in zip(fast, results):
                 if isinstance(res, Exception):
                     print(f"autostart {sid} failed: {res}", flush=True)
+                    session = self.sessions.get(sid)
+                    if session:
+                        session["last_error"] = str(res)[:200]
+                        self._emit("change", self._public(session))
 
     # --- host event handlers ---------------------------------------------------------
     def _on_host_output(self, sid: str, chunk: bytes) -> None:
@@ -1086,6 +1160,7 @@ class SessionManager:
             "tool": stored.get("tool"),
             "args": stored.get("args") or "",
             "permissionMode": stored.get("permissionMode"),
+            "last_error": stored.get("last_error"),
             "autostart": bool(stored.get("autostart")),
             # Serializes start/stop/remove per session (Issue 3: no races
             # where stop kills a freshly restarted process).
@@ -1116,6 +1191,7 @@ class SessionManager:
                 "tool": s.get("tool"), "args": s.get("args"), "autostart": s.get("autostart"),
                 "logPath": s.get("log_path"),
                 "agentSessionId": s.get("agent_session_id"),
+                "permissionMode": s.get("permissionMode"),
             }
             for s in self.sessions.values()
         ]
@@ -1129,6 +1205,7 @@ class SessionManager:
             "tool": session.get("tool"),
             "args": (session.get("args") or "")[:200],
             "permissionMode": session.get("permissionMode"),
+            "last_error": session.get("last_error"),
             "autostart": session.get("autostart"),
             "state": session.get("state"),
             "pid": session.get("pid"),

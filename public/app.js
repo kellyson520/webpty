@@ -197,6 +197,9 @@ function applySessionState(updated) {
   if (i < 0) { schedulePoll(0); return; }
   sessions[i] = updated;
   renderTabs();
+  // Audit C1: reflect turnActive on the chat page's stop button.
+  const e = live.get(updated.id);
+  if (e && typeof e.updateStopBtn === 'function') e.updateStopBtn();
 }
 
 // Chunked replay (audit V5/8.1): 4000 items inserted synchronously is a
@@ -980,6 +983,24 @@ function buildChatPage(session) {
   live.set(session.id, entry);
   resetChat(entry);
 
+  // Audit C1: 'stop' button interrupts the current turn (SIGINT) — visible
+  // only while a turn is active (server sets turnActive in state pushes).
+  const stopBtn = page.querySelector('.compose-stop');
+  stopBtn.onclick = async () => {
+    try {
+      await api(`/api/sessions/${session.id}/interrupt`, { method: 'POST' });
+      showHint('已发送停止信号…');
+    } catch (e) {
+      showHint('停止失败: ' + e.message);
+    }
+  };
+  const updateStopBtn = () => {
+    const s = sessions.find((x) => x.id === session.id);
+    const active = !!(s && s.turnActive) || !entry.pendingEl?.hidden;
+    stopBtn.hidden = !active;
+  };
+  entry.updateStopBtn = updateStopBtn;
+
   const resizeCompose = () => {
     composeInput.style.height = 'auto';
     composeInput.style.height = Math.min(composeInput.scrollHeight, 140) + 'px';
@@ -1051,7 +1072,17 @@ function connectChatSocket(entry, session, attempt = 0) {
         r._snapBuf += msg.chunk;
         if (!msg.done) return;
         let items = [];
-        try { items = JSON.parse(r._snapBuf); } catch { r._snapBuf = ''; return; }
+        try { items = JSON.parse(r._snapBuf); }
+        catch {
+          // Audit S1: chunked snapshot frames can be dropped by the outbox
+          // on a slow connection — a partial buffer won't parse. Force a
+          // reconnect so the whole snapshot is re-sent instead of leaving
+          // the chat silently empty.
+          r._snapBuf = '';
+          try { ws.close(); } catch {}
+          showHint('快照不完整，正在重新同步…', 5000);
+          return;
+        }
         r._snapBuf = '';
         replaySnapshot(entry, items);
         return;
@@ -2473,8 +2504,13 @@ function schedulePoll(delay = 3000) {
 function applyViewport() {
   // visualViewport.height excludes the on-screen keyboard area on iOS / Android,
   // unlike window.innerHeight which stays at the layout-viewport size.
-  const h = window.visualViewport?.height ?? window.innerHeight;
+  const vv = window.visualViewport;
+  const h = vv?.height ?? window.innerHeight;
   document.documentElement.style.setProperty('--vvh', h + 'px');
+  // Audit C2: iPad floating keyboards / toolbars offset the viewport —
+  // reserve the offset as bottom padding so the compose bar stays visible.
+  const offsetTop = vv?.offsetTop ?? 0;
+  document.documentElement.style.setProperty('--vvt', offsetTop + 'px');
   // Only refit + resize when the height actually changed — the keyboard
   // raising/lowering fires many visualViewport resize events, and every one
   // would re-fit all terminals and spam the PTY with resize frames (each
@@ -2482,11 +2518,17 @@ function applyViewport() {
   // on mobile" problem.
   if (applyViewport._lastH !== h) {
     applyViewport._lastH = h;
+    // Audit C2: keyboard raise/lower — snap the active chat page to the
+    // bottom so the newest message stays visible above the keyboard.
+    const active = sessions[activeIndex];
+    const activeId = active ? active.id : null;
+    const activeEntry = activeId ? live.get(activeId) : null;
+    if (activeEntry && activeEntry.kind === 'chat' && activeEntry.scrollEl) {
+      activeEntry.scrollEl.scrollTop = activeEntry.scrollEl.scrollHeight;
+    }
     // Only the ACTIVE session is refit + resized immediately (keyboard
     // raise/lower). Backgrounded sessions' TUIs must not repaint per frame;
     // they'll fit when activated.
-    const active = sessions[activeIndex];
-    const activeId = active ? active.id : null;
     for (const [id, entry] of live) {
       if (id !== activeId) continue;
       if (!entry.term) continue;

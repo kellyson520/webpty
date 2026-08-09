@@ -54,6 +54,19 @@ class NotifierTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertEqual((await self.db.list_notifications(1))["total"], 0)
 
+    async def test_matched_rules_recorded(self):
+        # N2: the notification records which rules matched.
+        await self.db.upsert_rule({
+            "name": "audit-me", "event_type": "failed",
+            "matcher_json": '{"tool": "claude"}', "action": "email",
+            "level": "warn", "quiet_start": "", "quiet_end": "",
+            "enabled": 1})
+        self.n.handle_event(self.event())
+        await asyncio.sleep(0.1)
+        items = (await self.db.list_notifications(1))["items"]
+        self.assertEqual(len(items), 1)
+        self.assertIn("audit-me", items[0]["matched_rules"] or "")
+
     async def test_rule_level_escalation_and_mail(self):
         await self.db.upsert_rule({
             "name": "r", "event_type": "failed",

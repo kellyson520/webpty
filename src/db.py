@@ -110,6 +110,14 @@ class Database:
             """
         )
         self._conn.commit()
+        # Audit N2: matched_rules column for notification auditability —
+        # added lazily so existing DBs migrate without a version bump.
+        try:
+            self._conn.execute(
+                "ALTER TABLE notifications ADD COLUMN matched_rules TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     async def execute(self, sql: str, params: tuple = ()) -> int:
         assert self._conn is not None
@@ -154,11 +162,12 @@ class Database:
         return await self.execute(
             """INSERT INTO notifications
                (ts, event_type, level, tool, project, session_id, title, body,
-                dedup_key, delivered)
-               VALUES (?,?,?,?,?,?,?,?,?,0)""",
+                dedup_key, delivered, matched_rules)
+               VALUES (?,?,?,?,?,?,?,?,?,0,?)""",
             (n.get("ts", _ts()), n["event_type"], n.get("level", "info"),
              n.get("tool"), n.get("project"), n.get("session_id"),
-             n["title"], n.get("body"), n["dedup_key"]))
+             n["title"], n.get("body"), n["dedup_key"],
+             n.get("matched_rules")))
 
     async def list_notifications(self, page: int, page_size: int = 20) -> dict:
         total = await self.query_one(

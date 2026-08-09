@@ -66,6 +66,9 @@ class Notifier:
             "level": level,
             "tool": event.get("tool"),
             "project": event.get("project"),
+            # Audit N2: record which rules matched (for the UI audit trail).
+            "matched_rules": ",".join(sorted(
+                {r.get("name") or r.get("event_type") or "?" for r in matched})),
             "session_id": event.get("session_id"),
             "title": f"{event.get('tool', 'session')} "
                      f"{event.get('type', 'event')}",
