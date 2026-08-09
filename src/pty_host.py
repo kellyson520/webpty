@@ -513,7 +513,15 @@ def main() -> None:
     try:
         while True:
             _reap_children()
-            events = sel.select(timeout=FLUSH_DELAY)
+            # Adaptive select timeout: 16ms when there is pending output to
+            # flush (keeps latency low), 1s when idle — a host with no
+            # sessions was waking 62×/s doing nothing (low-footprint core).
+            _now = time.monotonic()
+            has_pending = any(
+                s.get("pending") and _now - s.get("last_flush", 0) >= FLUSH_DELAY
+                for s in sessions.values())
+            timeout = FLUSH_DELAY if has_pending else 1.0
+            events = sel.select(timeout=timeout)
             _flush_expired(time.monotonic())
             for key, _mask in events:
                 kind = key.data
