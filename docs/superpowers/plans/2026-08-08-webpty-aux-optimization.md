@@ -1,6 +1,6 @@
 # WebPty 附属功能优化实施计划（8 项修复）
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 修复附属功能（通知/成本/备份/迁移/供应商/Agent 配置面板）的 8 项剩余差距，以五大核心（高效/快速/低占用/兼容/稳定）为导向。
 
@@ -29,7 +29,7 @@
 - Consumes: `_AGENT_CONFIG_TOOLS`（frozenset，含 codex/reasonix/claude 等 9 工具）、`read_config(tool) -> dict`
 - Produces: 修复后 `/api/agent-config/read?tool=codex` 返回 200（此前必现 AttributeError → 连接重置）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `test/test_server.py` 的 `ServerIntegrationTest` 类内追加:
 
@@ -42,12 +42,12 @@
         self.assertIn("ok", j)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_server.ServerIntegrationTest.test_agent_config_read_returns_ok -v`
 Expected: FAIL — `AttributeError: 'ServerIntegrationTest' object has no attribute '_query_param'`（或连接重置导致 0 响应）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `src/server.py:499` 改为:
 
@@ -63,12 +63,12 @@ Expected: FAIL — `AttributeError: 'ServerIntegrationTest' object has no attrib
 
 （`query` 变量在 `_handle_request` 已定义：`query = urllib.parse.parse_qs(...)`，与 574/588 行的 `query.get("path", [""])[0]` 模式一致。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_server.ServerIntegrationTest.test_agent_config_read_returns_ok -v`
 Expected: PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 271 tests OK
@@ -91,7 +91,7 @@ git commit -m "fix(ext): agent-config/read used undefined _query_param (Attribut
 - Consumes: `sanitize_import_config(cfg: dict) -> dict`（已有：剔除敏感键 + 非内置 command 工具 + providers apiKey）
 - Produces: `sessions` 键永不被导入（防重启幽灵/丢会话）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `test/test_migrator.py` 的 `MigratorTest` 类内追加:
 
@@ -118,12 +118,12 @@ git commit -m "fix(ext): agent-config/read used undefined _query_param (Attribut
         self.assertNotIn("sessions", restored)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_migrator.MigratorTest.test_import_never_restores_sessions test.test_backup.BackupTest.test_restore_drops_sessions_key -v`
 Expected: FAIL — `sessions` 仍在 clean 结果中
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `src/migrator.py` 的 `sanitize_import_config` 中，循环开始前加:
 
@@ -134,12 +134,12 @@ Expected: FAIL — `sessions` 仍在 clean 结果中
             continue  # 凭据 + 运行时会话列表永不导入
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_migrator test.test_backup -v`
 Expected: 全 PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 273 tests OK
@@ -161,7 +161,7 @@ git commit -m "fix(ext): never import sessions key — prevents ghost/missing se
 - Consumes: `Mailer.send(subject, html) -> None`（smtplib 同步,15s 超时）
 - Produces: SMTP 调用不再阻塞事件循环
 
-- [ ] **Step 1: 写失败测试（行为保护）**
+- [x] **Step 1: 写失败测试（行为保护）**
 
 在 `test/test_notifier.py` 的 `NotifierTest` 类内追加:
 
@@ -190,12 +190,12 @@ git commit -m "fix(ext): never import sessions key — prevents ghost/missing se
 
 （此测试验证调用发生;executor 包装本身由实现保证,测试通过 spy 确认 send 被调用即绿——它是回归保护,在 Step 3 实现前同样通过,故 Step 2 的"红"以手工确认当前实现同步阻塞为准,不强求失败。）
 
-- [ ] **Step 2: 确认现状（同步阻塞）**
+- [x] **Step 2: 确认现状（同步阻塞）**
 
 Run: `cd /root/webpty && grep -n "self.mailer.send" src/notifier.py`
 Expected: 两处 `self.mailer.send(...)` 直接调用（无 executor）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/notifier.py`:
 
@@ -235,12 +235,12 @@ Expected: 两处 `self.mailer.send(...)` 直接调用（无 executor）
                 continue
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_notifier test.test_mailer -v`
 Expected: 全 PASS（mock 不受 executor 影响）
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 274 tests OK
@@ -263,7 +263,7 @@ git commit -m "perf(ext): SMTP send in executor — slow/unreachable mail no lon
 - Consumes: `save_config(config)`、`_atomic_write_json(path, obj)`
 - Produces: 两处 tmp 文件名互不冲突（restore 与 save_config 并发安全）
 
-- [ ] **Step 1: 写失败测试（并发安全回归）**
+- [x] **Step 1: 写失败测试（并发安全回归）**
 
 在 `test/test_config.py` 追加:
 
@@ -280,12 +280,12 @@ git commit -m "perf(ext): SMTP send in executor — slow/unreachable mail no lon
 
 （此用例验证 tmp 命名;Step 2 红阶段:当前 tmp 名是 `<path>.tmp`,若存在并发残留无法区分。）
 
-- [ ] **Step 2: 确认现状**
+- [x] **Step 2: 确认现状**
 
 Run: `cd /root/webpty && grep -n '"\.tmp"' src/config.py src/backup.py`
 Expected: 两处 `+ ".tmp"`（无 pid）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/config.py` 的 `save_config`:
 
@@ -317,12 +317,12 @@ def _atomic_write_json(path: str, obj) -> None:
     os.replace(tmp, path)
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_config test.test_backup -v`
 Expected: 全 PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 275 tests OK
@@ -345,7 +345,7 @@ git commit -m "fix(ext): unique pid-suffixed tmp for atomic writes — restore v
 - Consumes: `_handle_request(reader, writer, ...)` 现有 try/except
 - Produces: 未捕获异常返回 500 JSON + log_error（前端可见错误而非连接重置）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `test/test_notify_api.py` 的 `NotifyApiTest` 类内追加:
 
@@ -360,12 +360,12 @@ git commit -m "fix(ext): unique pid-suffixed tmp for atomic writes — restore v
         self.assertIn("error", j)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_notify_api.NotifyApiTest.test_rules_invalid_matcher_json_returns_400 -v`
 Expected: FAIL — 500（sqlite3.ProgrammingError 绑定 dict 参数）或连接重置
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/server.py` notify rules POST/PUT 处（`await self.db.upsert_rule(body)` 前）:
 
@@ -394,12 +394,12 @@ Expected: FAIL — 500（sqlite3.ProgrammingError 绑定 dict 参数）或连接
 
 （确认 `log_error` 已 import；`_send_json` 的 headers 参数签名——若 500 分支的 headers 结构不同,参考现有 403/400 分支的写法。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_notify_api -v`
 Expected: 全 PASS（含新 400 用例）
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 276 tests OK
@@ -422,7 +422,7 @@ git commit -m "fix(ext): 500 JSON fallback in HTTP handler + matcher_json type c
 - Consumes: `Migrator.import_package(path, mode)`、`Database.add_backup(...)`
 - Produces: 上传临时文件导入后删除;migrate export 包进入 backups 表(rotate 可清理)
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test/test_migrator.py` 追加（export 登记）:
 
@@ -437,12 +437,12 @@ git commit -m "fix(ext): 500 JSON fallback in HTTP handler + matcher_json type c
 
 `test/test_migrate_api.py` 追加（上传文件清理——先确认 uploads 目录 API 可用,若无直接读目录则跳过服务端测试,改断言 DB 无残留记录）。
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_migrator.MigratorTest.test_export_registers_in_backups -v`
 Expected: FAIL — backups 表无该包记录
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/migrator.py` 的 `export()` 末尾（`return path` 前）:
 
@@ -469,12 +469,12 @@ Expected: FAIL — backups 表无该包记录
                 pass
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_migrator test.test_migrate_api -v`
 Expected: 全 PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 277 tests OK
@@ -497,7 +497,7 @@ git commit -m "fix(ext): delete uploaded migrate packages after import; register
 - Consumes: `remove(sid)`（现有删除路径）、`cost.on_session_event(event)`
 - Produces: 会话删除后 `_last_usage[sid]` 被清理（防缓慢内存泄漏）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `test/test_cost_tracker.py` 的 `CostTrackerTest` 类内追加:
 
@@ -512,12 +512,12 @@ git commit -m "fix(ext): delete uploaded migrate packages after import; register
         self.assertNotIn("sid-rm", self.c._last_usage)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_cost_tracker.CostTrackerTest.test_removed_session_clears_cumulative -v`
 Expected: FAIL — on_session_event 不识别 removed 类型
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/cost_tracker.py`:
 
@@ -544,12 +544,12 @@ Expected: FAIL — on_session_event 不识别 removed 类型
 
 （确认 `time` 已 import;`session` 变量在 remove 内可用。）
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_cost_tracker test.test_session_manager -v`
 Expected: 全 PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"`
 Expected: 278 tests OK
@@ -573,7 +573,7 @@ git commit -m "fix(ext): clear cost cumulative state on session remove (slow lea
 - Consumes: `Migrator.import_package(path, mode)`、`TOML_KEYS`/`ACFG_FIELD_META`
 - Produces: 大包导入不阻塞事件循环;codex/reasonix 可编辑 proxy/temperature/api_key/base_url
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test/test_agent_config.py` 追加:
 
@@ -596,12 +596,12 @@ git commit -m "fix(ext): clear cost cumulative state on session remove (slow lea
         self.assertIn('temperature = "0.7"', content)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_agent_config.MaskTest.test_toml_new_keys_replaced -v`
 Expected: FAIL — `proxy`/`temperature` 不在 TOML_KEYS["codex"] 中
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/agent_config.py` 的 `TOML_KEYS`:
 
@@ -646,12 +646,12 @@ Expected: FAIL — `proxy`/`temperature` 不在 TOML_KEYS["codex"] 中
 
 （若 executor 内 async 调用复杂,替代方案:`import_package` 的同步部分(解压/解析)单独抽成同步函数,executor 只跑同步部分,async 的 db 调用留在事件循环——实现时以最小改动为准,优先直接 `run_in_executor(None, ...)` 包住整个 await 不可行时,参考 Task 5 的 reconcile 先例:`items = await asyncio.get_event_loop().run_in_executor(None, scan_fn, arg)` 模式,把 `_read_package` 抽为同步函数放进 executor,`import_package` 内部 await 它。)
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cd /root/webpty && python3 -m unittest test.test_agent_config test.test_migrate_api -v`
 Expected: 全 PASS
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [x] **Step 5: 全量回归 + 提交**
 
 Run: `cd /root/webpty && python3 -m unittest discover -s test 2>&1 | grep -E "^(Ran|OK|FAILED)"` && `node --check public/app.js`
 Expected: 279 tests OK + JS 语法 OK
@@ -665,7 +665,7 @@ git commit -m "feat(ext): editable proxy/temperature/base_url keys + non-blockin
 
 ## 里程碑验收
 
-- [ ] 8 个 Task 全部提交,每项独立 commit
-- [ ] 全量测试 270 → 279（+9 新用例）
-- [ ] `node --check public/app.js` 通过
-- [ ] 生产部署后冒烟:`/api/agent-config/read?tool=codex` 200、notify rules 非法 matcher_json 400、import 后 uploads 空
+- [x] 8 个 Task 全部提交,每项独立 commit
+- [x] 全量测试 270 → 279（+9 新用例）
+- [x] `node --check public/app.js` 通过
+- [x] 生产部署后冒烟:`/api/agent-config/read?tool=codex` 200、notify rules 非法 matcher_json 400、import 后 uploads 空
