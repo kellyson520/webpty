@@ -215,14 +215,24 @@ class MigrateImportHandlerTest(unittest.IsolatedAsyncioTestCase):
                 b"name=\"file\"; filename=\"pkg.tar.gz\"\r\n"
                 b"Content-Type: application/octet-stream\r\n\r\n"
                 + payload + b"\r\n--zz--\r\n")
+
+        async def _capture(dest, mode):
+            # 在导入(即删除)发生前读取上传内容,验证 byte-exact 落盘
+            with open(dest, "rb") as f:
+                return {"status": "done", "mode": mode,
+                        "captured": f.read()}
+
+        self.migrator.import_package = AsyncMock(side_effect=_capture)
         res = await self._call(body, "multipart/form-data; boundary=zz",
                                len(body))
-        self.assertEqual(res, {"status": "done", "mode": "merge"})
+        self.assertEqual(res["status"], "done")
+        self.assertEqual(res["mode"], "merge")
         dest, mode = self.migrator.import_package.await_args.args
         self.assertEqual(mode, "merge")
         self.assertTrue(dest.startswith(os.path.join(self.tmp, "uploads")))
-        with open(dest, "rb") as f:
-            self.assertEqual(f.read(), payload)
+        self.assertEqual(res["captured"], payload)
+        # 上传临时文件在导入后删除,不留残留
+        self.assertFalse(os.path.exists(dest))
 
     async def test_import_oversize(self):
         res = await self._call(b"", "multipart/form-data; boundary=zz",

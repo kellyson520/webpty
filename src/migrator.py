@@ -153,6 +153,13 @@ class Migrator(WorkerInterface):
         with open(path, "wb") as f:
             f.write(buf.getvalue())
         self.last_export_filename = os.path.basename(path)
+        await self.db.add_backup({
+            "filename": os.path.basename(path),
+            "size_bytes": os.path.getsize(path),
+            "sha256": "",
+            "manifest_json": json.dumps({
+                "kind": "migrate-export",
+                "created_at": time.time()}), "encrypted": 0, "retained": 1})
         return path
 
     def _read_package(self, path: str) -> dict | None:

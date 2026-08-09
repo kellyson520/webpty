@@ -35,6 +35,13 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("webpty-migrate-", os.path.basename(path))
         self.assertGreater(os.path.getsize(path), 0)
 
+    async def test_export_registers_in_backups(self):
+        """export 生成的包登记进 backups 表(rotate 可清理,防孤儿文件)。"""
+        path = await self.m.export()
+        rows = await self.db.list_backups()
+        self.assertTrue(any(r["filename"] == os.path.basename(path)
+                            for r in rows))
+
     async def test_import_merge_preserves_existing(self):
         path = await self.m.export()
         # 修改现有配置制造冲突

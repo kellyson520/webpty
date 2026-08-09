@@ -742,7 +742,13 @@ class Server:
         dest = os.path.join(uploads, os.path.basename(filename))
         with open(dest, "wb") as f:
             f.write(file_bytes)
-        return await self.migrator.import_package(dest, mode)
+        try:
+            return await self.migrator.import_package(dest, mode)
+        finally:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0
