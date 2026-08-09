@@ -676,6 +676,9 @@ class SessionManager:
                 "t": "result", "isError": bool(evt.get("is_error")),
                 "costUsd": evt.get("total_cost_usd"), "durationMs": evt.get("duration_ms"),
                 "numTurns": evt.get("num_turns"),
+                # Audit B: forward model/project so actual rows group by
+                # model and project instead of falling back to tool name.
+                "model": evt.get("model"), "project": session.get("cwd"),
                 "text": None if evt.get("subtype") == "success" else (evt.get("result") or evt.get("subtype") or "error"),
             })
             self._emit("change", self._public(session))
@@ -1353,6 +1356,14 @@ class SessionManager:
         if not session.get("busy"):
             session["busy"] = True
             self._emit("change", self._public(session))
+        # Audit K: reasonix/opencode sessions stay "engaged" (busy dot
+        # keeps blinking) while their process is alive — a long silent
+        # think would otherwise look idle with the 5s window.
+        if session.get("tool") in ("reasonix", "opencode"):
+            if not session.get("_engaged"):
+                session["_engaged"] = True
+                self._emit("change", self._public(session))
+            return  # no idle deadline while the agent is running
         # call_later is far lighter than create_task (no coroutine/task
         # object churn at ~60 frames/s on an active terminal). Cancel +
         # reschedule the deadline instead of stacking tasks.
@@ -1367,6 +1378,8 @@ class SessionManager:
 
     def _mark_idle(self, session: dict) -> None:
         session["_busy_handle"] = None
+        if session.get("tool") in ("reasonix", "opencode"):
+            session["_engaged"] = False  # process exited or stalled
         if session.get("busy"):
             session["busy"] = False
             self._emit("change", self._public(session))

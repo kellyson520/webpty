@@ -33,6 +33,7 @@ class CostTracker:
         self.config = config
         self._budget: float = float(
             (config.get("budget") or {}).get("limit", 0.0) or 0.0)
+        self._last_over: bool | None = None  # audit C: flip detection
         self._tasks: set[asyncio.Task] = set()
         # Per-session last cumulative usage (codex/reasonix send cumulative
         # values; only the delta is billed — see _record).
@@ -217,3 +218,16 @@ class CostTracker:
         # 预算对比实际+估算合计(否则无 actual 上报时会话永不触发告警)
         total = float(s.get("cost", 0)) + float(s.get("estimated", 0))
         return total > self._budget
+
+    async def check_budget(self, on_change=None) -> bool:
+        """Audit C: poll the budget and fire on_change only on a state
+        flip (over → under or under → over) so notifications don't spam."""
+        over = await self.over_budget()
+        if over != self._last_over:
+            self._last_over = over
+            if on_change is not None:
+                try:
+                    await on_change(over)
+                except Exception:  # noqa: BLE001
+                    pass
+        return over

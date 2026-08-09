@@ -111,7 +111,17 @@ const api = async (url, opts = {}) => {
 function showTokenGate() {
   tokenGate.hidden = false;
   tokenGateErr.textContent = '';
+  // Audit L: entering the gate with a stale token only guarantees 403s —
+  // clear it so the next attempt starts clean.
+  localStorage.removeItem('webpty.token');
+  document.cookie = 'webpty_token=; path=/; max-age=0';
   requestAnimationFrame(() => tokenGateInput.focus());
+}
+
+function clearToken() {
+  localStorage.removeItem('webpty.token');
+  document.cookie = 'webpty_token=; path=/; max-age=0';
+  location.reload();
 }
 
 async function unlockToken() {
@@ -138,6 +148,10 @@ async function unlockToken() {
 }
 
 tokenGateBtn.onclick = unlockToken;
+document.getElementById('token-gate-clear').onclick = (ev) => {
+  ev.preventDefault();
+  clearToken();
+};
 tokenGateInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') unlockToken();
 });
@@ -1900,7 +1914,7 @@ function addMenuSep() {
 
 async function spawnShell(tool, label, cwd) {
   if (!config.tools[tool]) {
-    alert(`Tool "${tool}" is not configured on the server.`);
+    alert(`工具「${tool}」未在服务器上配置。`);
     return;
   }
   try {

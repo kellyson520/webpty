@@ -184,6 +184,30 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         s = await self.db.usage_summary("month")
         self.assertAlmostEqual(s["cost"], 1.23, places=6)
         self.assertEqual(s["tokens_in"], 1000)  # tokens 仍计入
+        # Audit A: the realtime 9.9 belongs to an actual-reported session —
+        # it must NOT appear in estimated (double-count).
+        self.assertAlmostEqual(s["estimated"], 0.0, places=6)
+
+    async def test_check_budget_fires_once_on_flip(self):
+        """Audit C: check_budget fires the callback only on state flips."""
+        await self.db.add_usage({
+            "project": "/p", "tool": "reasonix", "model": "m",
+            "session_id": "s-bud", "tokens_in": 100, "tokens_out": 0,
+            "cost": 5.0, "source": "realtime"})
+        await self.c.set_budget(0.01)
+        flips: list[bool] = []
+        over = await self.c.check_budget(lambda o: flips.append(o))
+        self.assertTrue(over)
+        self.assertEqual(flips, [True])
+        # Same state again — no second callback.
+        over = await self.c.check_budget(lambda o: flips.append(o))
+        self.assertTrue(over)
+        self.assertEqual(flips, [True])
+        # Under → callback with False.
+        await self.c.set_budget(1e9)
+        over = await self.c.check_budget(lambda o: flips.append(o))
+        self.assertFalse(over)
+        self.assertEqual(flips, [True, False])
 
 
 if __name__ == "__main__":

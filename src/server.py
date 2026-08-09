@@ -1404,6 +1404,19 @@ async def main() -> None:
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")
 
+    # Audit G/H: fail with a clear message before starting anything if the
+    # data directory isn't writable (DB, logs, backups all live there).
+    for d in (data_dir, logs_dir):
+        try:
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".webpty-write-test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.unlink(probe)
+        except OSError as err:
+            print(f"[webpty] data dir not writable: {d}: {err}", flush=True)
+            raise SystemExit(1)
+
     # Single-instance lock (audit V3): two servers (e.g. a manual
     # --port run beside systemd) would each spawn their own pty-host
     # fighting over the Unix socket and overwrite config.json's session
@@ -1453,7 +1466,15 @@ async def main() -> None:
             "authToken/allowedLogins is configured (remote RCE risk). "
             "Set config.authToken (or allowedLogins) or bind 127.0.0.1.")
 
-    listener = await asyncio.start_server(on_client, bind_host, port)
+    try:
+        listener = await asyncio.start_server(on_client, bind_host, port)
+    except OSError as err:
+        # Audit G: EADDRINUSE / permission errors deserve a clear message.
+        print(f"[webpty] cannot bind http://{bind_host}:{port}: {err}", flush=True)
+        if getattr(err, "errno", None) == 98:  # EADDRINUSE
+            print("[webpty]   Port already in use — another webpty instance, "
+                  "or set WEBPTY_PORT to change the port.", flush=True)
+        raise SystemExit(1)
 
     print(f"[webpty] listening on http://{bind_host}:{port}", flush=True)
     print(f"[webpty] config: {config_path}", flush=True)
@@ -1515,6 +1536,32 @@ async def main() -> None:
     # 定时重试未送达的 SMTP 通知(默认每 5 分钟),失败只记日志不退出
     notify_task = asyncio.create_task(_notify_retry_loop(notifier))
     asyncio.create_task(_autostart())
+
+    async def _budget_loop() -> None:
+        """Audit C: budget flip → notification (every 5 min, cheap query)."""
+        from notifier import Notifier  # noqa: F401
+
+        async def _on_flip(over: bool) -> None:
+            if over:
+                notifier.handle_event({
+                    "type": "budget_over", "session_id": "", "name": "webpty",
+                    "tool": "cost", "project": "", "state": "over",
+                    "exit_code": None, "signal": None, "ts": time.time()})
+            else:
+                notifier.handle_event({
+                    "type": "budget_ok", "session_id": "", "name": "webpty",
+                    "tool": "cost", "project": "", "state": "ok",
+                    "exit_code": None, "signal": None, "ts": time.time()})
+
+        await asyncio.sleep(30)
+        while True:
+            try:
+                await cost.check_budget(_on_flip)
+            except Exception as err:  # noqa: BLE001
+                log_error("budget", err)
+            await asyncio.sleep(300)
+
+    asyncio.create_task(_budget_loop())
 
     try:
         await listener.serve_forever()

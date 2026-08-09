@@ -286,7 +286,10 @@ class Database:
                       COALESCE(SUM(CASE WHEN source='actual'
                                         THEN cost ELSE 0 END),0) AS cost,
                       COALESCE(SUM(CASE WHEN source!='actual'
-                                        THEN cost ELSE 0 END),0) AS estimated,
+                              AND NOT EXISTS (SELECT 1 FROM token_usage t2
+                                   WHERE t2.session_id = token_usage.session_id
+                                     AND t2.source='actual')
+                                THEN cost ELSE 0 END),0) AS estimated,
                       COUNT(*) AS entries
                FROM token_usage WHERE ts>=?""",
             (self._period_start(period),))
@@ -302,7 +305,12 @@ class Database:
                        COALESCE(SUM(tokens_in),0) AS tokens_in,
                        COALESCE(SUM(tokens_out),0) AS tokens_out,
                        COALESCE(SUM(CASE WHEN source='actual'
-                                         THEN cost ELSE 0 END),0) AS cost
+                                         THEN cost ELSE 0 END),0) AS cost,
+                       COALESCE(SUM(CASE WHEN source!='actual'
+                               AND NOT EXISTS (SELECT 1 FROM token_usage t2
+                                    WHERE t2.session_id = token_usage.session_id
+                                      AND t2.source='actual')
+                                 THEN cost ELSE 0 END),0) AS estimated
                 FROM token_usage WHERE ts>=? GROUP BY {col}
                 ORDER BY cost DESC""",
             (self._period_start(period),))

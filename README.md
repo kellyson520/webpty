@@ -105,9 +105,16 @@ switch between live sessions with a swipe.
 ### API 一览 / API overview
 
 `/api/notify/rules`、`/api/notify/messages`、`/api/notify/test`、
-`/api/cost/summary|by-{project,tool,model,session}|alerts|budget|reconcile`、
+`/api/cost/summary|by-{project,tool,model,session}|alerts|budget|reconcile|export`、
 `/api/backup/create|list|restore/{id}|diff/{a}/{b}`、
-`/api/migrate/export|import|clone|list|download/{filename}`
+`/api/migrate/export|import|clone|list|download/{filename}`、
+`/api/sessions`（GET/POST，`?limit=`）、`/api/sessions/{id}/start|stop|interrupt|reset|input`、
+`/api/sessions/order`、`/api/agent-config/list|update`、`/api/errors`
+
+> `interrupt` = 中断当前回合（agent 走 SIGINT 优雅保存，pty 走 Ctrl+C）；
+> `reset` = 开始全新对话（丢弃 --resume 续聊）；`cost/export` = CSV 导出
+> （支持 `?from=&to=` 日期范围）；`/api/errors` = 后端错误环形缓冲
+> （备份/通知/校对等后台失败可见）。
 
 ---
 
