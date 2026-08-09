@@ -80,6 +80,10 @@ switch between live sessions with a swipe.
 > dry-run never echoes current values (sensitive keys show as `redacted`);
 > `sessions` are runtime state and are not migrated. Backup restore also
 > restores notification rules.
+> **Merge 语义（restore 与 migrate merge 模式）**：冲突键按**顶层**合并——
+> 备份覆盖顶层冲突键，目标机在恢复后新增的**嵌套**键（如
+> tools/notify/backup 段内）会随整段覆盖而丢失。需要保留嵌套新增时请用
+> dry-run 预览核对，或恢复后在目标机重配。
 
 ### 配置（config.json 新增段） / New config sections
 

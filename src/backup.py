@@ -82,18 +82,23 @@ def _derive_key(key: str) -> bytes:
     return hashlib.sha256(key.encode("utf-8")).digest()
 
 
-def _maybe_encrypt(data: bytes, config: dict) -> tuple[bytes, bool]:
+def _maybe_encrypt(data: bytes, config: dict) -> tuple[bytes, bool, str]:
+    """Returns (payload, encrypted, warning). Audit L6: a configured
+    encryption key that silently falls back to plaintext deserves a
+    visible warning."""
     key = (config.get("backup") or {}).get("encryption_key") or ""
     if not key:
-        return data, False
+        return data, False, ""
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
-        return data, False
+        return data, False, (
+            "encryption_key 已配置但 cryptography 未安装——备份将以明文保存！"
+            "（pip install cryptography 后重试）")
     nonce = os.urandom(12)
     ct = AESGCM(_derive_key(key)).encrypt(
         nonce, data, None)
-    return nonce + ct, True
+    return nonce + ct, True, ""
 
 
 async def create_backup_async(data_dir: str, config: dict, db: Database) -> dict:
@@ -102,7 +107,7 @@ async def create_backup_async(data_dir: str, config: dict, db: Database) -> dict
     state = await collect_state(data_dir, config, db)
     manifest = _manifest()
     raw = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
-    payload, encrypted = _maybe_encrypt(raw, config)
+    payload, encrypted, warning = _maybe_encrypt(raw, config)
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         data = payload if encrypted else raw
@@ -122,8 +127,13 @@ async def create_backup_async(data_dir: str, config: dict, db: Database) -> dict
         "encrypted": 1 if encrypted else 0, "retained": 1})
     manifest["sha256"] = sha
     manifest["size_bytes"] = len(blob)
-    return {"id": bid, "filename": filename, "sha256": sha,
-            "size_bytes": len(blob), "encrypted": encrypted}
+    res = {"id": bid, "filename": filename, "sha256": sha,
+           "size_bytes": len(blob), "encrypted": encrypted}
+    if warning:
+        # Audit L6: configured-key-but-plaintext is a security-relevant
+        # condition — surface it in the API response.
+        res["warning"] = warning
+    return res
 
 
 async def list_backups(db: Database) -> list[dict]:

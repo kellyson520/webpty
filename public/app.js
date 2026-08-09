@@ -10,6 +10,20 @@ const tplSession = document.getElementById('tpl-session');
 const tplChat = document.getElementById('tpl-chat');
 const tplAdd = document.getElementById('tpl-add');
 const menuBackdrop = document.getElementById('menu-backdrop');
+// Audit M6: Escape closes the topmost open panel (dialog semantics).
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  const panelIds = ['notify-backdrop', 'cost-backdrop', 'backup-backdrop',
+                    'migrate-backdrop', 'acfg-backdrop', 'providers-backdrop',
+                    'agents-backdrop', 'folder-picker-backdrop', 'menu-backdrop'];
+  for (const id of panelIds) {
+    const el = document.getElementById(id);
+    if (el && !el.hidden) {
+      el.hidden = true;
+      return;
+    }
+  }
+});
 const menuPop = document.getElementById('menu-pop');
 const drawer = document.getElementById('drawer');
 const drawerFolders = document.getElementById('drawer-folders');
@@ -2670,6 +2684,11 @@ async function bootstrap() {
     } else {
       alert(e.message);
     }
+  } finally {
+    // Audit L1: hide the boot placeholder whether bootstrap succeeded or
+    // fell back to the token gate.
+    const boot = document.getElementById('boot-loading');
+    if (boot) boot.remove();
   }
 })();
 

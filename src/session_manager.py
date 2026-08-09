@@ -28,6 +28,10 @@ TOOL_RESULT_MAX = 8000
 BUSY_IDLE_MS = 5000  # keep the tab dot blinking this long after the last output
 RECENT_BUF_CAP = 128 * 1024
 MAX_AGENT_BUF = 2 * 1024 * 1024  # audit M6: partial-line cap per session
+# Audit M2: reasonix-family CLIs hold a process-global session lock — two
+# parallel starts would collide ("session is in use") and one would get
+# duplicated via the -c --copy retry.
+SERIAL_TOOLS = frozenset({"reasonix", "opencode"})
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 30
 
@@ -110,6 +114,8 @@ class SessionManager:
         self.host_sessions: dict[str, dict] = {}
         self.host_ready = False
         self._listeners: dict[str, list] = {"output": [], "agentEvent": [], "change": [], "remove": [], "session_event": []}
+        # Audit M2: process-wide serialization for reasonix-family starts.
+        self._serial_lock = asyncio.Lock()
         # autostart 会话非 0 退出自动重启(带退避);挂起检测去重
         self._restart_counts: dict[str, int] = {}
         self._restart_config = config.get("restart") or {}
@@ -288,11 +294,20 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return None
+        # Audit M2: serialize process-wide starts of serial tools — two
+        # manual starts (or autostart + manual) must not race the CLI's
+        # global session lock.
+        if session.get("tool") in SERIAL_TOOLS:
+            async with self._serial_lock:
+                return await self._start_with_lock(session)
+        return await self._start_with_lock(session)
+
+    async def _start_with_lock(self, session: dict) -> dict | None:
         lock = session.get("_lock")
         if lock is not None:
             async with lock:
-                return await self._start_locked(sid)
-        return await self._start_locked(sid)
+                return await self._start_locked(session["id"])
+        return await self._start_locked(session["id"])
 
     async def _start_locked(self, sid: str) -> dict | None:
         session = self.sessions.get(sid)
@@ -391,6 +406,7 @@ class SessionManager:
             _append_log(log_path, message)
             session["state"] = "stopped"
             session["exit_code"] = -1
+            session["last_error"] = str(err)[:200]  # audit M5: visible in UI
             self._emit("output", session["id"], message.encode("utf-8"))
             self._emit("change", self._public(session))
             raise err
@@ -527,6 +543,7 @@ class SessionManager:
             session["state"] = "stopped"
             session["exit_code"] = -1
             session["proc"] = None
+            session["last_error"] = str(err)[:200]  # audit M5: visible in UI
             self._push_agent(session, {"t": "error", "message": f"failed to spawn {command}: {err}"})
             self._emit("change", self._public(session))
             raise err
@@ -767,6 +784,7 @@ class SessionManager:
             session["transcript"].append(item)
         if len(session["transcript"]) > AGENT_MAX_ITEMS:
             del session["transcript"][:len(session["transcript"]) - AGENT_MAX_ITEMS]
+            session["_transcript_truncated"] = True  # audit L2
         # Audit T1: persist the transcript incrementally (JSONL) so a server
         # restart doesn't wipe the chat history — the WS snapshot is built
         # from memory only today.
@@ -817,6 +835,13 @@ class SessionManager:
     def transcript(self, sid: str) -> list:
         session = self.sessions.get(sid)
         return session.get("transcript", []) if session else []
+
+    def transcript_truncated(self, sid: str) -> bool:
+        """Audit L2: True when this session's in-memory transcript was
+        trimmed (AGENT_MAX_ITEMS) — the reconnect snapshot is then not the
+        full history and the client should say so."""
+        session = self.sessions.get(sid)
+        return bool(session and session.get("_transcript_truncated"))
 
     async def stop(self, sid: str) -> bool:
         session = self.sessions.get(sid)
@@ -967,7 +992,6 @@ class SessionManager:
         # reasonix-family CLIs hold a global session lock — starting them in
         # parallel would trip "session is in use"; everything else can boot
         # concurrently (audit F4b: N serial host.start RTTs → ~1 RTT).
-        serial_tools = {"reasonix", "opencode"}
         fast: list[str] = []
         for session in list(self.sessions.values()):
             tool = self.config.get("tools", {}).get(session.get("tool"))
@@ -983,7 +1007,7 @@ class SessionManager:
                         continue
                 if not session.get("autostart"):
                     continue
-                if session.get("tool") in serial_tools:
+                if session.get("tool") in SERIAL_TOOLS:
                     await self.start(session["id"])
                 else:
                     fast.append(session["id"])
@@ -1105,7 +1129,26 @@ class SessionManager:
         # burned all 3 retries in 30s against a transient failure (reasonix
         # global lock, API rate limit). 10/30/90s covers a wider window.
         wait = backoff * (2 ** (n - 1))
-        loop.call_later(wait, lambda: asyncio.create_task(self.start(key)))
+
+        def _restart_now() -> None:
+            # Audit L4: a failing restart (host down etc.) must be logged,
+            # not left as an unretrieved Task exception.
+            try:
+                task = asyncio.create_task(self.start(key))
+            except Exception as err:  # noqa: BLE001
+                log_error("session-manager", f"restart {key}: {err}")
+                return
+
+            def _on_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                err = t.exception()
+                if err is not None:
+                    log_error("session-manager", f"restart {key}: {err}")
+
+            task.add_done_callback(_on_done)
+
+        loop.call_later(wait, _restart_now)
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False
@@ -1270,6 +1313,9 @@ class SessionManager:
             "permissionMode": stored.get("permissionMode"),
             "last_error": stored.get("last_error"),
             "autostart": bool(stored.get("autostart")),
+            # Audit L3: restore the resume-retry marker (avoids a repeat
+            # -c --copy duplicate after a server restart).
+            "_resume_retried": bool(stored.get("resumeRetried")),
             # Serializes start/stop/remove per session (Issue 3: no races
             # where stop kills a freshly restarted process).
             "_lock": _aio.Lock(),
@@ -1326,6 +1372,9 @@ class SessionManager:
                 "logPath": s.get("log_path"),
                 "agentSessionId": s.get("agent_session_id"),
                 "permissionMode": s.get("permissionMode"),
+                # Audit L3: persist the resume-retry marker so a server
+                # restart doesn't re-trigger a -c --copy duplicate.
+                "resumeRetried": bool(s.get("_resume_retried")),
             }
             for s in self.sessions.values()
         ]

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>webpty</title>
@@ -10,11 +10,15 @@
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icon.svg" />
     <meta name="theme-color" content="#1a1a1a" />
-    <link rel="preload" href="/fonts/D2Coding.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <!-- Audit L1: visible loading placeholder until bootstrap renders the app. -->
+    <div id="boot-loading" class="boot-loading">
+      <div class="spinner"></div>
+      <div>正在启动 webpty…</div>
+    </div>
     <header id="tabbar" class="tabbar">
       <button class="drawer-btn" id="open-drawer" title="项目" aria-label="打开项目">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 6h18v2H3zM3 11h18v2H3zM3 16h7v2H3z"/></svg>
@@ -215,11 +219,11 @@
       </div>
     </div>
 
-    <div id="notify-backdrop" class="panel-backdrop" hidden>
+    <div id="notify-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="通知中心" hidden>
       <div class="panel">
         <div class="panel-head">
           <h2><span class="panel-icon">🔔</span>通知中心</h2>
-          <button id="notify-close" class="panel-close" type="button">×</button>
+          <button id="notify-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -251,11 +255,11 @@
       </div>
     </div>
 
-    <div id="cost-backdrop" class="panel-backdrop" hidden>
+    <div id="cost-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="成本账单" hidden>
       <div class="panel">
         <div class="panel-head">
           <h2><span class="panel-icon">💰</span>成本账单</h2>
-          <button id="cost-close" class="panel-close" type="button">×</button>
+          <button id="cost-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -282,11 +286,11 @@
       </div>
     </div>
 
-    <div id="backup-backdrop" class="panel-backdrop" hidden>
+    <div id="backup-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="备份管理" hidden>
       <div class="panel">
         <div class="panel-head">
           <h2><span class="panel-icon">💾</span>备份管理</h2>
-          <button id="backup-close" class="panel-close" type="button">×</button>
+          <button id="backup-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -300,11 +304,11 @@
       </div>
     </div>
 
-    <div id="migrate-backdrop" class="panel-backdrop" hidden>
+    <div id="migrate-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="数据迁移" hidden>
       <div class="panel">
         <div class="panel-head">
           <h2><span class="panel-icon">🚀</span>迁移向导</h2>
-          <button id="migrate-close" class="panel-close" type="button">×</button>
+          <button id="migrate-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -325,11 +329,11 @@
       </div>
     </div>
 
-    <div id="acfg-backdrop" class="panel-backdrop" hidden>
+    <div id="acfg-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="Agent 配置" hidden>
       <div class="panel panel-lg">
         <div class="panel-head">
           <h2><span class="panel-icon">📄</span>Agent 配置文件</h2>
-          <button id="acfg-close" class="panel-close" type="button">×</button>
+          <button id="acfg-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -350,11 +354,11 @@
       </div>
     </div>
 
-    <div id="providers-backdrop" class="panel-backdrop" hidden>
+    <div id="providers-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="模型供应商" hidden>
       <div class="panel panel-lg">
         <div class="panel-head">
           <h2><span class="panel-icon">🔌</span>供应商预设</h2>
-          <button id="providers-close" class="panel-close" type="button">×</button>
+          <button id="providers-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">
@@ -371,11 +375,11 @@
       </div>
     </div>
 
-    <div id="agents-backdrop" class="panel-backdrop" hidden>
+    <div id="agents-backdrop" class="panel-backdrop" role="dialog" aria-modal="true" aria-label="已配置工具" hidden>
       <div class="panel panel-lg">
         <div class="panel-head">
           <h2><span class="panel-icon">🤖</span>Agent 管理</h2>
-          <button id="agents-close" class="panel-close" type="button">×</button>
+          <button id="agents-close" class="panel-close" type="button" aria-label="关闭">×</button>
         </div>
         <div class="panel-body">
           <div class="panel-toolbar">

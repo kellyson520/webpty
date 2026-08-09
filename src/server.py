@@ -419,18 +419,29 @@ class Server:
             if os.path.exists(target):
                 raise HttpError(400, "Already exists")
             try:
-                os.makedirs(target, exist_ok=True)
+                # Audit M4: os.makedirs without exist_ok → FileExistsError
+                # on a concurrent duplicate create (TOCTOU-safe 409).
+                os.makedirs(target)
                 if body.get("gitInit") is True:
                     import subprocess
 
-                    try:
+                    def _git_init() -> None:
                         subprocess.run(["git", "init", "-b", "main"], cwd=target,
                                        capture_output=True, check=True)
+
+                    try:
+                        # git init is blocking I/O — off the event loop.
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, _git_init)
                     except Exception as err:  # noqa: BLE001
                         import shutil
 
                         shutil.rmtree(target, ignore_errors=True)
                         raise HttpError(500, f"git init failed: {err}")
+            except FileExistsError:
+                # Audit M4: concurrent duplicate create → 409, and never
+                # rmtree a directory another request is now using.
+                raise HttpError(409, "Already exists")
             except HttpError:
                 raise
             except OSError as err:
@@ -586,9 +597,20 @@ class Server:
         if path == "/api/sessions" and method == "POST":
             body = await self._read_json(reader, headers)
             session = self.sessions.create(**self._validate_session_input(body))
+            start_error = None
             if body.get("start"):
-                await self.sessions.start(session["id"])
-            return await self._send_json(writer, 201, self.sessions.public(session["id"]), headers)
+                try:
+                    await self.sessions.start(session["id"])
+                except Exception as err:  # noqa: BLE001
+                    # Audit M5: the session WAS created — don't 500 the whole
+                    # request (front-end would show a bogus failure and the
+                    # user would click again, duplicating sessions). Report
+                    # the start failure alongside the created session.
+                    start_error = str(err)[:200]
+            return await self._send_json(writer, 201, {
+                **self.sessions.public(session["id"]),
+                "startError": start_error,
+            }, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/start$", path)
         if m and method == "POST":
@@ -777,10 +799,15 @@ class Server:
             # F3: sha256 + gunzip run in a thread inside restore_backup.
             res = await restore_backup(int(m.group(1)), self.data_dir, self.db,
                                        self.config)
-            if res.get("ok") and isinstance(res.get("config"), dict):
-                # 磁盘已写回,同步内存 config,避免运行态与磁盘分裂
+            if res.get("ok"):
+                # Audit M3: reload from disk instead of applying the merged
+                # snapshot captured at restore start — a concurrent PUT
+                # (/api/config/*, budget) may have written newer state into
+                # the file while restore ran; the stale snapshot would roll
+                # the running config back and split memory from disk.
+                fresh = load_config()
                 self.config.clear()
-                self.config.update(res["config"])
+                self.config.update(fresh)
             return await self._send_json(writer, 200, res, headers)
         m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
         if m and method == "GET":
@@ -1184,6 +1211,13 @@ class Server:
         executor, send ~256KB frames; the frontend accumulates + parses
         once. Used on connect AND on resync after dropped frames."""
         transcript = self.sessions.transcript(sid)
+        # Audit L2: when the in-memory history was trimmed, be explicit —
+        # the snapshot is not the full conversation.
+        if self.sessions.transcript_truncated(sid):
+            transcript = transcript + [{
+                "t": "system",
+                "text": "历史已截断（仅保留最近 4000 条）——完整记录见服务器会话日志",
+            }]
         loop = asyncio.get_event_loop()
         encoded = await loop.run_in_executor(
             None, lambda: json.dumps(transcript))
