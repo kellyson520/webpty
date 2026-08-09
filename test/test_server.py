@@ -337,6 +337,20 @@ class ServerIntegrationTest(unittest.TestCase):
         with urllib.request.urlopen(f"{self.base}/app.js?v=deadbeef") as resp:
             self.assertEqual(resp.headers.get("Cache-Control"), "no-store")
 
+    def test_font_never_gzip_compressed(self):
+        # WOFF2 is already compressed; gzip attempts (100-300ms sync) are
+        # skipped AND negatively cached so repeat requests never re-try.
+        import http.client
+        for _ in range(2):  # second request hits the negative cache
+            conn = http.client.HTTPConnection("127.0.0.1", self.port)
+            conn.request("GET", "/fonts/D2Coding.woff2",
+                         headers={"Accept-Encoding": "gzip"})
+            resp = conn.getresponse()
+            resp.read()
+            self.assertIsNone(resp.headers.get("Content-Encoding"))
+            self.assertEqual(resp.status, 200)
+            conn.close()
+
     # --- WebSocket -----------------------------------------------------------
     async def _ws_roundtrip(self, sid, payload):
         reader, writer = await asyncio_open_conn(self.port)

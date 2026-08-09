@@ -840,9 +840,24 @@ class Server:
         if not self._accepts_gzip(headers.get("accept-encoding", "")):
             return body, None
         if cache_key is not None and cache_key in self._gzip_cache:
-            return self._gzip_cache[cache_key], "gzip"
+            cached = self._gzip_cache[cache_key]
+            if cached is not None:
+                return cached, "gzip"
+            return body, None  # negative cache: known incompressible
+        # Skip compression entirely for formats that are already compressed:
+        # attempting WOFF2 (1.4MB) at level 6 costs ~100-300ms of SYNCHRONOUS
+        # event-loop time per request — and it never pays off, so without
+        # this check every request re-compressed it (no negative cache).
+        ctype = mimetypes.guess_type(cache_key or "")[0] or ""
+        if ctype.split("/")[0] in ("font", "image", "audio", "video") \
+                or ctype in ("application/zip", "application/gzip", "application/pdf"):
+            if cache_key is not None:
+                self._gzip_cache[cache_key] = None  # negative cache
+            return body, None
         compressed = _gzip.compress(body, compresslevel=6)
         if len(compressed) >= len(body):
+            if cache_key is not None:
+                self._gzip_cache[cache_key] = None  # negative cache
             return body, None  # 压缩无收益（如已压缩的 WOFF2 字体）
         if cache_key is not None:
             self._gzip_cache[cache_key] = compressed
