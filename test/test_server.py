@@ -440,6 +440,13 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn("ok", j)
 
 
+
+    def test_agent_config_unknown_tool_400(self):
+        """未知工具名 → 400(而非 500/重置)。"""
+        st, j = self._req("/api/agent-config/read?tool=nope")
+        self.assertEqual(st, 400)
+        self.assertIn("error", j)
+
     def test_fs_list_restricted_to_roots(self):
         # roots 内路径允许
         st, _ = self._req(f"/api/fs/list?path={self.proj_root}")
