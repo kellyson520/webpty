@@ -2149,6 +2149,14 @@ function rebuildTrack(preserveId) {
     if (last && sessions.some((s) => s.id === last)) preserveId = last;
   }
   trackInitialized = true;
+  // Dispose old terminals / close their sockets BEFORE wiping the track.
+  // Without this, every session delete leaked an xterm instance (canvas,
+  // renderer, listeners) plus a live WebSocket (the server-side _ws_session
+  // task and outbox stayed resident too) — unbounded growth on multi-open.
+  for (const [, entry] of live) {
+    try { entry.socket?.close(); } catch {}
+    try { entry.term?.dispose(); } catch {}
+  }
   track.innerHTML = '';
   live.clear();
   for (const s of sessions) {
@@ -2279,7 +2287,13 @@ function applyViewport() {
   // on mobile" problem.
   if (applyViewport._lastH !== h) {
     applyViewport._lastH = h;
+    // Only the ACTIVE session is refit + resized immediately (keyboard
+    // raise/lower). Backgrounded sessions' TUIs must not repaint per frame;
+    // they'll fit when activated.
+    const active = sessions[activeIndex];
+    const activeId = active ? active.id : null;
     for (const [id, entry] of live) {
+      if (id !== activeId) continue;
       if (!entry.term) continue;
       try { entry.fit.fit(); } catch {}
       if (entry.socket?.readyState === WebSocket.OPEN) {
