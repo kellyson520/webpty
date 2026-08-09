@@ -195,7 +195,7 @@ class SessionManager:
             except Exception as err:  # noqa: BLE001
                 log_error("session-manager", err)
             self.host_sessions.pop(sid, None)
-        timer = session.get("_busy_timer")
+        timer = session.get("_busy_handle")
         if timer:
             timer.cancel()
         self._close_log_fh(session)
@@ -686,7 +686,7 @@ class SessionManager:
                     log_error("session-manager", err)
         session["state"] = "stopped"
         session["pid"] = None
-        timer = session.get("_busy_timer")
+        timer = session.get("_busy_handle")
         if timer:
             timer.cancel()
         session["busy"] = False
@@ -819,7 +819,7 @@ class SessionManager:
         session["exit_code"] = code
         session["signal"] = signal_
         session["pid"] = None
-        timer = session.get("_busy_timer")
+        timer = session.get("_busy_handle")
         if timer:
             timer.cancel()
         session["busy"] = False
@@ -1099,7 +1099,7 @@ class SessionManager:
         try:
             fh = session.get("_log_fh")
             if fh is None:
-                fh = open(session["log_path"], "ab", buffering=0)
+                fh = open(session["log_path"], "ab", buffering=8192)
                 session["_log_fh"] = fh
             fh.write(chunk)
         except OSError:
@@ -1117,16 +1117,20 @@ class SessionManager:
         if not session.get("busy"):
             session["busy"] = True
             self._emit("change", self._public(session))
-        timer = session.get("_busy_timer")
-        if timer and not timer.done():
-            timer.cancel()
-        elif timer:
-            # previous timer finished but session still busy — reuse slot
-            pass
+        # call_later is far lighter than create_task (no coroutine/task
+        # object churn at ~60 frames/s on an active terminal). Cancel +
+        # reschedule the deadline instead of stacking tasks.
+        handle = session.get("_busy_handle")
+        if handle is not None:
+            handle.cancel()
 
-        async def _clear() -> None:
-            await asyncio.sleep(BUSY_IDLE_MS / 1000)
+        loop = asyncio.get_event_loop()
+        session["_busy_handle"] = loop.call_later(
+            BUSY_IDLE_MS / 1000,
+            lambda: self._mark_idle(session))
+
+    def _mark_idle(self, session: dict) -> None:
+        session["_busy_handle"] = None
+        if session.get("busy"):
             session["busy"] = False
             self._emit("change", self._public(session))
-
-        session["_busy_timer"] = asyncio.get_event_loop().create_task(_clear())
