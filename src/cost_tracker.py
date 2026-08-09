@@ -26,9 +26,10 @@ class CostTracker:
         self._last_usage: dict[str, dict] = {}
 
     def on_session_event(self, event: dict) -> None:
-        """Clear per-session cumulative state when the session ends."""
+        """Clear per-session cumulative state when the session ends or is
+        removed (deleted tab — no exit event fires)."""
         if event.get("type") in ("completed", "failed", "crashed",
-                                 "terminated"):
+                                 "terminated", "removed"):
             self._last_usage.pop(event.get("session_id"), None)
 
     def handle_agent_event(self, event: dict, sid: str | None = None) -> None:

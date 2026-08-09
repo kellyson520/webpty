@@ -94,6 +94,15 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1]["tokens_in"], 200)  # 全量,非增量
 
+    async def test_removed_session_clears_cumulative(self):
+        """会话 removed 事件清除 _last_usage(防缓慢泄漏)。"""
+        await self.c._record({
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            "tool": "codex", "project": "/p", "session_id": "sid-rm"}, "sid-rm")
+        self.assertIn("sid-rm", self.c._last_usage)
+        self.c.on_session_event({"type": "removed", "session_id": "sid-rm"})
+        self.assertNotIn("sid-rm", self.c._last_usage)
+
 
     async def test_summary_and_grouped(self):
         for i, tool in enumerate(("claude", "codex")):

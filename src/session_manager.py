@@ -202,6 +202,12 @@ class SessionManager:
         self._stall_reported.pop(sid, None)
         self._persist()
         self._emit("remove", sid)
+        self._emit("session_event", {
+            "type": "removed", "session_id": sid,
+            "name": session.get("name"), "tool": session.get("tool"),
+            "project": session.get("cwd"), "state": "removed",
+            "exit_code": None, "signal": None, "ts": time.time(),
+        })
         return True
 
     def reorder(self, ids: list) -> bool:
