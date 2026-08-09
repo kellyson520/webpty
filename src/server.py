@@ -44,6 +44,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 # Paths served with immutable long cache (vendor assets never change content).
 _VENDOR_PREFIXES = ("/vendor/",)
 _LOCK_FD = None  # single-instance flock fd (held in main)
+MAX_WS_CONNECTIONS = 128  # audit K1: concurrent WS cap
 
 _CLAUDE_MTIME_TTL = 30.0  # claude history mtime cache TTL (seconds)
 
@@ -123,6 +124,7 @@ class Server:
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
         self._asset_hash_cache: dict[str, str] = {}  # /app.js -> sha256[:16]
         self._asset_hash_meta: dict[str, tuple[int, int]] = {}
+        self._ws_count = 0
         # claude history mtime cache: key = abs project path, value =
         # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
         self._claude_mtime_cache: dict[str, tuple[float, float]] = {}
@@ -578,6 +580,12 @@ class Server:
             # Audit C1: interrupt the current turn (SIGINT for agents,
             # Ctrl+C for pty) — graceful vs stop()'s kill.
             ok = await self.sessions.interrupt(m.group(1))
+            return await self._send_json(writer, 200, {"ok": ok}, headers)
+
+        m = re.match(r"^/api/sessions/([^/]+)/reset$", path)
+        if m and method == "POST":
+            # Audit A1: start a brand-new agent conversation (drop --resume).
+            ok = await self.sessions.reset(m.group(1))
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)$", path)
@@ -1056,6 +1064,15 @@ class Server:
                     return
             except ValueError:
                 pass
+        # Audit K1: cap concurrent WS connections (each holds recv + drain +
+        # heartbeat tasks). With the token gate off and the port reachable,
+        # an unbound peer could exhaust fds — refuse past MAX_WS.
+        if self._ws_count >= MAX_WS_CONNECTIONS:
+            writer.write(b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
+        self._ws_count += 1
         path = urllib.parse.urlparse(target).path
         m = re.match(r"^/ws/sessions/([^/]+)$", path)
         if not m:
@@ -1286,6 +1303,8 @@ class Server:
             self.sessions.off("reconnected", on_reconnected)
             hb_task.cancel()
             outbox.stop()
+            if self._ws_count > 0:
+                self._ws_count -= 1
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001
@@ -1425,12 +1444,23 @@ async def main() -> None:
         await asyncio.sleep(30)  # 启动后 30s 首次
         while True:
             interval, retention = _backup_settings(config)
+            # Audit D1/D2: rotate runs even when create fails (stale
+            # packages must still be cleaned); a failed create retries in
+            # 10min instead of waiting a full interval; NaN/∞ intervals are
+            # clamped so the loop can never die.
+            import math as _m
+            interval = max(interval if _m.isfinite(interval) else 24.0, 0.1)
+            ok = True
             try:
                 await create_backup_async(data_dir, config, db)
-                await rotate(db, retention)
             except Exception as err:  # noqa: BLE001
                 log_error("backup", err)
-            await asyncio.sleep(max(interval, 0.1) * 3600)
+                ok = False
+            try:
+                await rotate(db, retention)
+            except Exception as err:  # noqa: BLE001
+                log_error("backup-rotate", err)
+            await asyncio.sleep((interval if ok else 10 / 60) * 3600)
 
     async def _autostart() -> None:
         try:

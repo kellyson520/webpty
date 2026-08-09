@@ -99,9 +99,28 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         await self.c._record({
             "usage": {"prompt_tokens": 100, "completion_tokens": 50},
             "tool": "codex", "project": "/p", "session_id": "sid-rm"}, "sid-rm")
-        self.assertIn("sid-rm", self.c._last_usage)
+        self.assertIn(("sid-rm", "codex"), self.c._last_usage)
         self.c.on_session_event({"type": "removed", "session_id": "sid-rm"})
-        self.assertNotIn("sid-rm", self.c._last_usage)
+        self.assertNotIn(("sid-rm", "codex"), self.c._last_usage)
+        self.assertEqual(self.c._last_usage, {})
+
+    async def test_model_switch_mid_session_not_misbilled(self):
+        # C1: model switch must reset the delta baseline (keyed by
+        # (session, model)), not silently under-bill the new model.
+        await self.c._record({
+            "usage": {"input_tokens": 100, "output_tokens": 50,
+                      "model": "claude-opus-4-8"},
+            "tool": "claude", "project": "/p", "session_id": "sid-m"}, "sid-m")
+        await self.c._record({
+            "usage": {"input_tokens": 100, "output_tokens": 50,
+                      "model": "claude-haiku-4-5"},
+            "tool": "claude", "project": "/p", "session_id": "sid-m"}, "sid-m")
+        rows = await self.db.query(
+            "SELECT tokens_in FROM token_usage WHERE session_id='sid-m' ORDER BY id")
+        # Both rows must exist and bill fully (haiku baseline is fresh).
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["tokens_in"], 100)
+        self.assertEqual(rows[1]["tokens_in"], 100)
 
 
     async def test_summary_and_grouped(self):

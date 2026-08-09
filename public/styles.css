@@ -1278,3 +1278,18 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
 }
 .compose-stop[hidden] { display: none; }
 .compose-stop:active { background: rgba(200, 60, 60, 0.45); }
+
+/* Audit A1: 'new chat' button next to the stop button. */
+.compose-newchat {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 170, 255, 0.4);
+  background: rgba(40, 80, 160, 0.25);
+  color: #9ab8ff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.compose-newchat:active { background: rgba(60, 110, 200, 0.45); }

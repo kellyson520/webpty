@@ -331,6 +331,7 @@ class SessionManager:
         except Exception as err:  # noqa: BLE001
             session["state"] = "stopped"
             session["exit_code"] = -1
+            session["last_error"] = str(err)[:200]
             _append_log(log_path, f"[webpty] auto-resume failed: {err}\r\n")
             self._emit("change", self._public(session))
 
@@ -737,6 +738,14 @@ class SessionManager:
         proc = session.get("proc")
         if not proc or session.get("state") != "running" or proc.stdin is None:
             return False
+        # Audit A2: reject messages while a turn is active — two tabs
+        # sending into one agent process would interleave turns.
+        if session.get("turn_active"):
+            self._push_agent(session, {
+                "t": "system",
+                "text": "（上一回合仍在进行，等待完成或点 ■ 停止）",
+            })
+            return False
         try:
             self._push_agent(session, {"t": "user", "text": message})
             session["turn_active"] = True
@@ -788,6 +797,20 @@ class SessionManager:
             return True
         # PTY path: send Ctrl+C into the terminal.
         self.host.input(sid, "\x03")
+        return True
+
+    async def reset(self, sid: str) -> bool:
+        """Audit A1: start a brand-new conversation for an agent session —
+        clears agent_session_id so the next start() runs without --resume
+        (the old transcript stays in the UI until a reload)."""
+        session = self.sessions.get(sid)
+        if not session:
+            return False
+        if session.get("engine") != "agent":
+            return False
+        session["agent_session_id"] = None
+        self._persist()
+        self._emit("change", self._public(session))
         return True
 
     async def _stop_locked(self, sid: str) -> bool:

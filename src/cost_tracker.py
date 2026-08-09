@@ -43,7 +43,11 @@ class CostTracker:
         removed (deleted tab — no exit event fires)."""
         if event.get("type") in ("completed", "failed", "crashed",
                                  "terminated", "removed"):
-            self._last_usage.pop(event.get("session_id"), None)
+            sid = event.get("session_id")
+            # Audit C1: purge every (session, model) key — the tool field
+            # may be absent on lifecycle events, so pop by session prefix.
+            for k in [k for k in self._last_usage if k[0] == sid]:
+                self._last_usage.pop(k, None)
 
     def handle_agent_event(self, event: dict, sid: str | None = None) -> None:
         # reasonix result 事件自带 total_cost_usd(真实账单)— 直接记 actual。
@@ -116,7 +120,9 @@ class CostTracker:
         # Cumulative-delta billing: codex/reasonix report per-event usage as
         # running totals for the conversation. Only the increase over the
         # last recorded event is billed; equal values are idempotent (skipped).
-        last = self._last_usage.get(session_id)
+        # (Audit C1: keyed by (session, model) so a model switch mid-session
+        # doesn't corrupt the delta baseline.)
+        last = self._last_usage.get((session_id, model))
         if last:
             delta_in = max(usage["tokens_in"] - last["tokens_in"], 0)
             delta_out = max(usage["tokens_out"] - last["tokens_out"], 0)
@@ -131,7 +137,7 @@ class CostTracker:
             delta_in, delta_out = usage["tokens_in"], usage["tokens_out"]
             delta_cached = usage.get("cached_in", 0)
             delta_cwrite = usage.get("cached_write", 0)
-        self._last_usage[session_id] = {
+        self._last_usage[(session_id, model)] = {
             "tokens_in": usage["tokens_in"], "tokens_out": usage["tokens_out"],
             "cached_in": usage.get("cached_in", 0),
             "cached_write": usage.get("cached_write", 0),
@@ -141,11 +147,11 @@ class CostTracker:
         cost = cost_for(model, delta_in, delta_out, self.config,
                         cached_in=delta_cached, cached_write=delta_cwrite)
         # Dedup against posthoc rows: if the reconciler already recorded this
-        # exact (session, tokens) pair, skip to avoid double billing.
+        # exact (session, tokens, model) pair, skip to avoid double billing.
         dup = await self.db.query_one(
             "SELECT 1 AS x FROM token_usage WHERE session_id=? AND "
-            "tokens_in=? AND tokens_out=? AND source='posthoc' LIMIT 1",
-            (session_id or "", delta_in, delta_out))
+            "tokens_in=? AND tokens_out=? AND model=? AND source='posthoc' LIMIT 1",
+            (session_id or "", delta_in, delta_out, model))
         if dup:
             return
         await self.db.add_usage({

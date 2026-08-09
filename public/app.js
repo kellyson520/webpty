@@ -1001,6 +1001,20 @@ function buildChatPage(session) {
   };
   entry.updateStopBtn = updateStopBtn;
 
+  // Audit A1: 'new chat' clears the resume id so the next start is a
+  // fresh conversation.
+  const newChatBtn = page.querySelector('.compose-newchat');
+  newChatBtn.onclick = async () => {
+    if (!confirm('开始新对话？将不再续接当前上下文。')) return;
+    try {
+      await api(`/api/sessions/${session.id}/reset`, { method: 'POST' });
+      resetChat(entry);
+      showHint('已开始新对话（下次启动为新会话）');
+    } catch (e) {
+      showHint('操作失败: ' + e.message);
+    }
+  };
+
   const resizeCompose = () => {
     composeInput.style.height = 'auto';
     composeInput.style.height = Math.min(composeInput.scrollHeight, 140) + 'px';
@@ -1017,6 +1031,11 @@ function buildChatPage(session) {
       showHint('会话未运行，正在重启…');
       api(`/api/sessions/${session.id}/start`, { method: 'POST' }).catch(() => {});
       composeInput.value = '';
+      return;
+    }
+    // Audit A2: don't queue into a busy turn (server also rejects).
+    if (sess && sess.turnActive) {
+      showHint('上一回合仍在进行，请等待或点 ■ 停止');
       return;
     }
     // Optimistic local echo: render the user bubble immediately; the
@@ -2667,6 +2686,7 @@ function openNotifyPanel() {
   refreshNotifyPanel();
 }
 async function refreshNotifyPanel() {
+  notifyPage = 1;
   const [rules, msgs] = await Promise.all([
     api('/api/notify/rules').catch(() => ({ rules: [] })),
     api('/api/notify/messages?page=1').catch(() => ({ items: [] })),
@@ -2686,7 +2706,7 @@ async function refreshNotifyPanel() {
        </div>
      </div>`).join('') ||
     `<div class="empty-tip">暂无规则 — 点击「添加规则」创建第一条通知规则</div>`;
-  notifyMessages.innerHTML = msgList.slice(0, 20).map((m) => {
+  notifyMessages.innerHTML = msgList.map((m) => {
     const t = new Date((m.ts || 0) * 1000);
     const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
     const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
@@ -2699,8 +2719,40 @@ async function refreshNotifyPanel() {
     </div>`;
   }).join('') ||
     `<div class="empty-tip">暂无消息 — 会话事件触发后将显示在这里</div>`;
+  // Audit F1: pagination — the API pages at 20; show a load-more button
+  // when more pages exist.
+  const total = msgs.total ?? msgList.length;
+  const hasMore = total > (notifyPage * 20);
+  const moreEl = document.getElementById('notify-load-more');
+  if (moreEl) moreEl.hidden = !hasMore;
 }
-document.getElementById('notify-close').onclick = () => { notifyBackdrop.hidden = true; };
+let notifyPage = 1;
+async function loadMoreNotify() {
+  notifyPage += 1;
+  try {
+    const msgs = await api(`/api/notify/messages?page=${notifyPage}`).catch(() => ({ items: [] }));
+    const items = msgs.items || [];
+    const html = items.map((m) => {
+      const t = new Date((m.ts || 0) * 1000);
+      const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
+      const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
+      return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')}">
+        <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
+        <div class="item-main">
+          <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
+          <div class="item-sub">${esc(m.tool || '')} ${esc(m.project || '')} · ${when} · ${m.delivered ? '已发送' : '待重试'}</div>
+        </div>
+      </div>`;
+    }).join('');
+    notifyMessages.insertAdjacentHTML('beforeend', html);
+    const total = msgs.total ?? (notifyPage * 20);
+    const moreEl = document.getElementById('notify-load-more');
+    if (moreEl) moreEl.hidden = !(total > (notifyPage * 20));
+  } catch (e) {
+    notifyPage -= 1;
+  }
+}
+document.getElementById('notify-load-more').onclick = loadMoreNotify;
 notifyBackdrop.addEventListener('click', (ev) => {
   if (ev.target === notifyBackdrop) notifyBackdrop.hidden = true;
 });

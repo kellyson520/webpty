@@ -214,6 +214,10 @@ def load_config() -> dict:
         base = copy.deepcopy(DEFAULT_TOOLS.get(key, {}))
         if isinstance(user_val, dict):
             base.update(user_val)
+        # Audit I2: command must be a non-empty string — a number/null would
+        # crash resolve_command (os.path.isabs(123)) with a confusing error.
+        if not isinstance(base.get("command"), str) or not base["command"].strip():
+            base["command"] = (DEFAULT_TOOLS.get(key) or {}).get("command", "")
         merged_tools[key] = base
     # Persist disable markers so a disabled tool stays disabled across restarts.
     for key, val in raw_tools.items():
@@ -224,6 +228,12 @@ def load_config() -> dict:
     merged.update({k: v for k, v in raw.items() if k != "tools"})
     merged["tools"] = merged_tools
     merged["sessions"] = raw.get("sessions", []) if isinstance(raw.get("sessions"), list) else []
+    # Audit I1: restart/budget must be dicts — a hand-edited string would
+    # make _maybe_restart / CostTracker crash with AttributeError and
+    # silently disable auto-restart + budget alerts.
+    for seg in ("restart", "budget"):
+        if not isinstance(merged.get(seg), dict):
+            merged[seg] = default_config().get(seg)
 
     # providers: user presets override built-ins; non-dict → defaults.
     raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}

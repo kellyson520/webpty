@@ -477,6 +477,42 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(self.host.calls, [("input", s1["id"], "\x03")])
 
+    async def test_reset_clears_agent_session_id(self):
+        # A1: reset drops --resume (brand-new conversation).
+        s1 = self.sm.create(name="ag2", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        s1["agent_session_id"] = "abc123"
+        ok = await self.sm.reset(s1["id"])
+        self.assertTrue(ok)
+        self.assertIsNone(s1["agent_session_id"])
+        # pty sessions are not resettable.
+        s2 = self.sm.create(name="pt2", cwd="/a", tool="bash")
+        self.assertFalse(await self.sm.reset(s2["id"]))
+
+    async def test_agent_send_rejected_while_turn_active(self):
+        # A2: no interleaved turns — messages are rejected with a system
+        # hint while turn_active is set.
+        import json as _json
+        s1 = self.sm.create(name="ag3", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        s1["state"] = "running"
+        s1["turn_active"] = True
+
+        class FakeStdin:
+            def __init__(self):
+                self.data = []
+
+            def write(self, b):
+                self.data.append(b)
+
+        s1["proc"] = type("P", (), {"stdin": FakeStdin(), "state": "running"})()
+        events = []
+        self.sm.on("agentEvent", lambda sid, item: events.append(item))
+        ok = self.sm.agent_send(s1["id"], "hello")
+        self.assertFalse(ok)
+        self.assertEqual(s1["proc"].stdin.data, [])  # nothing written
+        self.assertTrue(any(e.get("t") == "system" for e in events))
+
 
 class NormalizeToolResultTest(unittest.TestCase):
     def test_string_passthrough_truncated(self):

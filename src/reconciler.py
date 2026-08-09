@@ -60,27 +60,34 @@ class Reconciler:
         rows = list(scan_claude_logs(projects_dir))
         if not rows:
             return 0
-        keys = [(u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
+        # Audit C1: dedup key includes model — two independent calls in the
+        # same session with identical token counts (very common for short
+        # queries) are distinct billable events; (session,tokens) alone
+        # silently dropped the second one forever.
+        keys = [(u.get("session_id") or "", u["tokens_in"], u["tokens_out"],
+                 u.get("model") or tool)
                 for u in rows]
         seen = set()
         # Chunk the key query to stay inside SQLite's variable limit.
         CHUNK = 500
         for i in range(0, len(keys), CHUNK):
             part = keys[i:i + CHUNK]
-            placeholders = ",".join(["(?,?,?)"] * len(part))
+            placeholders = ",".join(["(?,?,?,?)"] * len(part))
             flat = [x for k in part for x in k]
             existing = await self.db.query(
-                f"SELECT session_id, tokens_in, tokens_out FROM token_usage "
-                f"WHERE (session_id, tokens_in, tokens_out) IN ({placeholders})",
+                f"SELECT session_id, tokens_in, tokens_out, model FROM token_usage "
+                f"WHERE (session_id, tokens_in, tokens_out, model) IN ({placeholders})",
                 tuple(flat))
             for r in existing:
-                seen.add((r["session_id"] or "", r["tokens_in"], r["tokens_out"]))
+                seen.add((r["session_id"] or "", r["tokens_in"], r["tokens_out"],
+                          r["model"] or tool))
         batch = []
         for u in rows:
-            key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
+            model = u.get("model") or tool
+            key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"],
+                   model)
             if key in seen:
                 continue
-            model = u.get("model") or tool
             cost = u.get("cost")
             if cost is None:
                 cost = cost_for(model, u["tokens_in"], u["tokens_out"],
