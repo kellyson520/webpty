@@ -1281,8 +1281,7 @@ async function sendTextChunked(entry, text) {
     return;
   }
   const totalKB = Math.ceil(bytes.length / 1024);
-  const hint = document.getElementById('status-hint');
-  if (hint) hint.textContent = `正在粘贴 ${totalKB} KB…`;
+  showHint(`正在粘贴 ${totalKB} KB…`, 10000);
   try {
     for (let i = 0; i < bytes.length; i += PASTE_CHUNK) {
       if (entry.socket?.readyState !== WebSocket.OPEN) break;
@@ -1296,7 +1295,7 @@ async function sendTextChunked(entry, text) {
       await new Promise((r) => setTimeout(r, 50));
     }
   } finally {
-    if (hint) hint.textContent = '';
+    showHint('', 0); // clear immediately
   }
 }
 
@@ -1619,9 +1618,27 @@ async function exitSession(session) {
   await refreshSessions();
 }
 
+// Transient status hint chip — show a message, auto-hide after ms.
+let _hintTimer = null;
+function showHint(msg, ms = 2000) {
+  const hint = document.getElementById('status-hint');
+  if (!hint) return;
+  hint.textContent = msg;
+  hint.hidden = false;
+  clearTimeout(_hintTimer);
+  _hintTimer = setTimeout(() => { hint.hidden = true; hint.textContent = ''; }, ms);
+}
+
 function sendToSession(id, text) {
   const entry = live.get(id);
   const session = sessions.find((s) => s.id === id);
+  // Input to a stopped session was silently dropped (server write() returns
+  // false, WS path is a no-op) — auto-restart + brief hint instead.
+  if (session && session.state !== 'running') {
+    showHint('会话未运行，正在重启…');
+    startSession(id).catch(() => {});
+    return false;
+  }
   if (isAgent(session)) {
     // Agent sessions speak the stream-json user-message protocol, not raw bytes.
     if (entry?.socket?.readyState === WebSocket.OPEN) {
