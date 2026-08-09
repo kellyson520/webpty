@@ -150,6 +150,22 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(res2["ok"])
         self.assertIn("decrypt failed", res2["message"])
 
+    async def test_diff_encrypted_backup_returns_friendly_error(self):
+        # S1: diffing an encrypted backup must not raise JSONDecodeError
+        # (500) — it reports the limitation instead.
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography not installed")
+        cfg = dict(self.config)
+        cfg["backup"] = {"retention": 2, "encryption_key": "k"}
+        b = await create_backup_async(self.data, cfg, self.db)
+        b2 = await create_backup_async(self.data, cfg, self.db)
+        diff = await diff_backups(b["id"], b2["id"], self.db)
+        self.assertTrue(any(d.get("key") == "_error" for d in diff))
+        msg = next(d.get("message", "") for d in diff if d.get("key") == "_error")
+        self.assertIn("encrypted", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

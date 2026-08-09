@@ -1090,11 +1090,19 @@ class Server:
                 ws._last_pong_at = _t.monotonic()
                 try:
                     while True:
-                        await asyncio.sleep(25)
+                        # Adaptive cadence (audit L1): an idle tab gets a ping
+                        # every 60s instead of 25s — ~3500 2-byte frames/day
+                        # per idle connection saved; active sessions keep the
+                        # 25s cadence because their own traffic is the
+                        # keepalive. Timeout scales with the interval.
+                        idle = _t.monotonic() - ws._last_activity_at
+                        interval = 60.0 if idle > 30 else 25.0
+                        await asyncio.sleep(interval)
                         if ws._closed:
                             return
                         ws.ping()
-                        if _t.monotonic() - ws.last_pong_at() > 60:
+                        timeout = 150.0 if interval == 60.0 else 60.0
+                        if _t.monotonic() - ws.last_pong_at() > timeout:
                             await ws.close(1001, "heartbeat timeout")
                             return
                 except (asyncio.CancelledError, ConnectionError, OSError):

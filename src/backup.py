@@ -76,6 +76,12 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _derive_key(key: str) -> bytes:
+    """SHA-256 key derivation (audit S2): raw truncation/padding left weak
+    passphrases brute-forceable; hashing spreads entropy over all 32 bytes."""
+    return hashlib.sha256(key.encode("utf-8")).digest()
+
+
 def _maybe_encrypt(data: bytes, config: dict) -> tuple[bytes, bool]:
     key = (config.get("backup") or {}).get("encryption_key") or ""
     if not key:
@@ -85,7 +91,7 @@ def _maybe_encrypt(data: bytes, config: dict) -> tuple[bytes, bool]:
     except ImportError:
         return data, False
     nonce = os.urandom(12)
-    ct = AESGCM(key.encode()[:32].ljust(32, b"\0")).encrypt(
+    ct = AESGCM(_derive_key(key)).encrypt(
         nonce, data, None)
     return nonce + ct, True
 
@@ -152,11 +158,18 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
             return {"ok": False, "message": "cryptography not installed"}
         nonce, ct = raw[:12], raw[12:]
         try:
-            raw = AESGCM(key.encode()[:32].ljust(32, b"\0")).decrypt(
+            raw = AESGCM(_derive_key(key)).decrypt(
                 nonce, ct, None)
         except InvalidTag:
-            return {"ok": False,
-                    "message": "decrypt failed (wrong key or corrupt)"}
+            # Backward compat (audit S2): backups encrypted by older webpty
+            # used the raw truncated key — try that derivation before
+            # reporting failure.
+            try:
+                raw = AESGCM(key.encode()[:32].ljust(32, b"\0")).decrypt(
+                    nonce, ct, None)
+            except InvalidTag:
+                return {"ok": False,
+                        "message": "decrypt failed (wrong key or corrupt)"}
     try:
         state = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -198,8 +211,11 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
                             os.path.basename(row["filename"]))
         if not os.path.exists(path):
             return {}
-        with tarfile.open(path, "r:gz") as tf:
-            return json.loads(tf.extractfile("manifest.json").read())
+        try:
+            with tarfile.open(path, "r:gz") as tf:
+                return json.loads(tf.extractfile("manifest.json").read())
+        except Exception:  # noqa: BLE001 — encrypted manifests are ciphertext
+            return {}
 
     a = await db.get_backup(a_id)
     b = await db.get_backup(b_id)
@@ -208,6 +224,12 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
     if _is_migrate_export(a) or _is_migrate_export(b):
         return [{"key": "_error",
                  "message": "migrate package — use /api/migrate/import instead"}]
+    if a.get("encrypted") or b.get("encrypted"):
+        # Audit S1: encrypted manifests are AES ciphertext — JSON parse used
+        # to raise and bubble up as a bare 500. Report it clearly instead.
+        return [{"key": "_error",
+                 "message": "encrypted backups cannot be diffed — "
+                            "decrypt (restore) them first"}]
     sa = await _load(a_id)
     sb = await _load(b_id)
     ca = sa.get("config") or {}

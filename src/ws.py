@@ -76,11 +76,14 @@ class WebSocket:
         self._recv_buf = bytearray()
         self._closed = False
         self.outbox = None
+        self._last_activity_at = 0.0  # monotonic; heartbeat adapts to it
 
     # --- outbound ----------------------------------------------------------
     def _send_frame(self, opcode: int, payload: bytes) -> None:
         if self._closed:
             return
+        import time as _t
+        self._last_activity_at = _t.monotonic()
         header = bytearray()
         header.append(0x80 | opcode)
         n = len(payload)
@@ -284,6 +287,8 @@ class WebSocket:
             # Fragmented frames — not needed by the webpty client; treat as
             # a protocol error rather than buffer indefinitely.
             raise WebSocketError("fragmented frames not supported")
+        import time as _t
+        self._last_activity_at = _t.monotonic()
         return opcode, payload
 
 

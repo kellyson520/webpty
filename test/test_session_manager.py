@@ -395,6 +395,47 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [e["text"] for e in events if e.get("t") == "text"][-1], "fresh")
 
+    def test_usage_forwarding_all_shapes(self):
+        # H1: usage arrives as top-level, message.usage (claude
+        # message_start), or flat stats lines — all must reach the
+        # business layer as {type:'usage'} agentEvents.
+        events: list[dict] = []
+        self.sm.on("agentEvent", lambda sid, item: events.append(item))
+        s1 = self.sm.create(name="u1", cwd="/a", tool="bash")
+        # top-level usage (message_delta)
+        self.assertFalse(self.sm._handle_agent_line(s1, json.dumps(
+            {"type": "message_delta", "usage": {"output_tokens": 5}})))
+        # nested message.usage (message_start)
+        self.assertFalse(self.sm._handle_agent_line(s1, json.dumps(
+            {"type": "message_start", "message": {
+                "usage": {"input_tokens": 100,
+                          "cache_creation_input_tokens": 10}}})))
+        # flat stats line (reasonix style)
+        self.assertFalse(self.sm._handle_agent_line(s1, json.dumps(
+            {"type": "stats", "tokens_in": 7, "tokens_out": 3})))
+        usages = [e for e in events if e.get("type") == "usage"]
+        self.assertEqual(len(usages), 3)
+        self.assertEqual(usages[0]["tool"], "bash")
+        self.assertIn("output_tokens", usages[0]["raw"])
+        self.assertIn("cache_creation_input_tokens", usages[1]["raw"])
+        self.assertIn("tokens_in", usages[2]["raw"])
+
+    def test_result_usage_falls_through(self):
+        # H2: result events with usage must forward it even when the tool
+        # omits total_cost_usd.
+        events: list[dict] = []
+        self.sm.on("agentEvent", lambda sid, item: events.append(item))
+        s1 = self.sm.create(name="r1", cwd="/a", tool="bash")
+        self.assertFalse(self.sm._handle_agent_line(s1, json.dumps(
+            {"type": "result", "is_error": False,
+             "usage": {"input_tokens": 50, "output_tokens": 20}})))
+        usages = [e for e in events if e.get("type") == "usage"]
+        self.assertEqual(len(usages), 1)
+        self.assertIn("input_tokens", usages[0]["raw"])
+        # result transcript item still pushed
+        results = [e for e in events if e.get("t") == "result"]
+        self.assertEqual(len(results), 1)
+
 
 class NormalizeToolResultTest(unittest.TestCase):
     def test_string_passthrough_truncated(self):

@@ -104,9 +104,17 @@ class Notifier:
     async def test_message(self) -> bool:
         if not self.mailer.enabled():
             return False
-        try:
-            self.mailer.send(subject="[webpty] test notification",
-                             html="<p>test</p>")
-            return True
-        except Exception:  # noqa: BLE001
-            return False
+        # Audit F2: smtplib send blocks up to 15s (mailer timeout); running
+        # it inline froze the whole event loop on "测试邮件". Same
+        # executor path as _send_mail.
+        loop = asyncio.get_event_loop()
+
+        def _send() -> bool:
+            try:
+                self.mailer.send(subject="[webpty] test notification",
+                                 html="<p>test</p>")
+                return True
+            except Exception:  # noqa: BLE001
+                return False
+
+        return await loop.run_in_executor(None, _send)

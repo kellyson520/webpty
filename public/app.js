@@ -227,7 +227,14 @@ function ensureAddons(term) {
     try { term.loadAddon(new WebLinksAddon.WebLinksAddon((ev, uri) => window.open(uri, '_blank', 'noopener'))); } catch {}
   });
   load('CanvasAddon', '/vendor/xterm-canvas/lib/addon-canvas.js', () => {
-    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch {}
+    try {
+      term.loadAddon(new CanvasAddon.CanvasAddon());
+    } catch (e) {
+      // Audit C1: canvas renderer failure (script load error or xterm
+      // private-API drift) falls back to DOM silently — surface it so TUI
+      // performance issues are diagnosable later.
+      console.warn('[webpty] canvas renderer unavailable, using DOM:', e);
+    }
   });
 }
 
@@ -955,7 +962,7 @@ function buildChatPage(session) {
 
 function resetChat(entry) {
   entry.logEl.innerHTML = '';
-  entry.render = { curTextEl: null, curTextId: null, toolCards: new Map(), systemShown: false };
+  entry.render = { curTextEl: null, curTextId: null, toolCards: new Map(), systemShown: false, curTextBuf: '', curTextRenderedLen: 0 };
   setChatPending(entry, false);
 }
 
@@ -1082,11 +1089,22 @@ function renderChatItem(entry, item) {
       // may split markdown syntax (```, **bold**, lists) — rendering each
       // delta standalone leaves unclosed/glitched blocks. Accumulate the
       // full text and re-render once 200ms passes without new deltas.
+      // (Audit F1) Past TEXT_RENDER_CAP, full re-renders become O(n²):
+      // switch to append-only for the tail so the main thread stays smooth.
       r.curTextBuf += item.text;
       clearTimeout(r.curTextTimer);
       r.curTextTimer = setTimeout(() => {
-        if (r.curTextEl) {
-          r.curTextEl.innerHTML = renderMarkdown(r.curTextBuf);
+        if (!r.curTextEl) return;
+        const buf = r.curTextBuf;
+        const prevLen = r.curTextRenderedLen || 0;
+        if (buf.length > 65536 && prevLen > 0) {
+          // Append the tail delta (no full DOM rebuild).
+          const delta = buf.slice(prevLen);
+          r.curTextEl.insertAdjacentHTML('beforeend', renderMarkdown(delta));
+          r.curTextRenderedLen = buf.length;
+        } else {
+          r.curTextEl.innerHTML = renderMarkdown(buf);
+          r.curTextRenderedLen = buf.length;
         }
       }, 200);
       break;

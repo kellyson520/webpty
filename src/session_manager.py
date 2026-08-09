@@ -635,13 +635,27 @@ class SessionManager:
                 "text": None if evt.get("subtype") == "success" else (evt.get("result") or evt.get("subtype") or "error"),
             })
             self._emit("change", self._public(session))
-            return False
+            # Fall through to the usage forwarder below — result events also
+            # carry usage (audit H2) which must not be dropped; when the
+            # tool omits total_cost_usd, CostTracker's estimate then has
+            # real token counts to work with.
 
         # Lines that carry usage but no transcript item (message_start /
-        # message_delta / ...) are re-emitted verbatim so business-layer
-        # listeners (CostTracker) can meter them in realtime.
+        # message_delta / stats / ...) are re-emitted verbatim so
+        # business-layer listeners (CostTracker) can meter them in realtime.
+        # (Audit H1: usage also arrives nested in message.usage — claude
+        # message_start — or as flat stats/usage_event lines — reasonix /
+        # codex; all three shapes were missing and their token counts
+        # silently dropped to zero in realtime.)
         usage = evt.get("usage")
+        if not (isinstance(usage, dict) and usage):
+            msg_usage = (evt.get("message") or {}).get("usage")
+            if isinstance(msg_usage, dict) and msg_usage:
+                usage = msg_usage
         if isinstance(usage, dict) and usage:
+            self._emit("agentEvent", session["id"], {
+                "type": "usage", "raw": line, "tool": session.get("tool")})
+        elif evt.get("type") in ("stats", "usage_event"):
             self._emit("agentEvent", session["id"], {
                 "type": "usage", "raw": line, "tool": session.get("tool")})
         return False
