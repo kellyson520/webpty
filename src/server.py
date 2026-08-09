@@ -1069,6 +1069,25 @@ class Server:
                             return
                     outbox.send(chunk, binary=True)
                 self.sessions.on("output", on_output)
+                def on_resync(resync_sid: str, snapshot: bytes | None = None) -> None:
+                    nonlocal skip, seen
+                    if resync_sid == sid:
+                        if snapshot is not None:
+                            # host reattach replay: send the snapshot as a
+                            # resync frame directly (frontend wipes+replays).
+                            import base64 as _b64
+                            outbox.send(json.dumps({
+                                "type": "resync",
+                                "data": _b64.b64encode(snapshot).decode("ascii"),
+                            }), binary=False)
+                            skip = 0
+                            seen = 0
+                        else:
+                            # pty-host dropped our pipe: outbox.resync() makes
+                            # the next drain emit the resync frame instead of
+                            # a silent output gap.
+                            outbox.resync()
+                self.sessions.on("resync", on_resync)
             self.sessions.on("change", on_change)
             self.sessions.on("reconnected", on_reconnected)
 

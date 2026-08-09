@@ -122,12 +122,22 @@ class PtyHostClient:
             if msg.get("ev") == "attached" and msg.get("replay"):
                 replay = base64.b64decode(msg["replay"])
                 if replay:
-                    self._emit("output", msg.get("id"), replay)
+                    # A distinct "replay" event (not "output"): consumers
+                    # must treat it as a full-state snapshot — the frontend
+                    # wipes and replays instead of appending to content that
+                    # is already rendered (which doubled TUI output after a
+                    # pty-host reconnect).
+                    self._emit("replay", msg.get("id"), replay)
             return
         ev = msg.get("ev")
         if ev == "output":
             data = base64.b64decode(msg.get("data") or "")
             self._emit("output", msg.get("id"), data)
+        elif ev == "dropped":
+            # pty-host's send buffer overflowed for this server connection —
+            # output was NOT silently lost: the host dropped this connection
+            # and asks us to resync so the next chunk is a full snapshot.
+            self._emit("dropped", msg.get("id"))
         elif ev == "exit":
             self._emit("exit", msg.get("id"), msg.get("code"), msg.get("signal"))
         elif ev == "hello":

@@ -135,6 +135,8 @@ class SessionManager:
         self.host.on("output", self._on_host_output)
         self.host.on("exit", self._on_host_exit)
         self.host.on("disconnect", self._on_host_disconnect)
+        self.host.on("dropped", self._on_host_dropped)
+        self.host.on("replay", self._on_host_replay)
         try:
             await self.host.connect()
         except Exception as err:  # noqa: BLE001
@@ -854,6 +856,21 @@ class SessionManager:
         # while the underlying processes are still alive. The host monitor
         # reconnects and re-attaches them (or marks genuinely dead ones
         # stopped), so keep state pending until then.
+
+    def _on_host_dropped(self, sid: str) -> None:
+        """pty-host's send buffer overflowed for our connection — it dropped
+        the pipe and asked us to resync. The next output for this session
+        must be preceded by a full snapshot (frontend already handles the
+        resync frame)."""
+        self._emit("resync", sid)
+
+    def _on_host_replay(self, sid: str, chunk: bytes) -> None:
+        """A reattach replayed the host's ring buffer: this is a FULL-state
+        snapshot, not incremental output. Consumers (server _ws_session)
+        forward it as a resync frame so the frontend wipes and replays —
+        appending it as ordinary output would double-render the TUI after
+        every pty-host reconnect."""
+        self._emit("resync", sid, chunk)
 
     # --- host monitor ------------------------------------------------------------
     def start_host_monitor(self, interval_s: float = 2.0) -> None:

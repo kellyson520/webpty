@@ -98,7 +98,20 @@ def _broadcast(session: dict, line: str) -> None:
         try:
             c.sendall(data)
         except OSError:
+            # Sender's socket buffer is full and the server isn't draining
+            # fast enough. Silently dropping the client (previous behavior)
+            # permanently severed output for that connection with no signal
+            # to the server — it only noticed after a page refresh. Instead:
+            # remove the client AND tell it to resync so the next chunk is
+            # preceded by a full state snapshot (never a silent gap).
             session["clients"].discard(c)
+            try:
+                c.sendall((json.dumps({
+                    "ev": "dropped", "id": session["id"],
+                    "pid": os.getpid(),
+                }) + "\n").encode("utf-8"))
+            except OSError:
+                pass
 
 
 def _flush_output(session: dict) -> None:
@@ -473,6 +486,13 @@ def on_connection(server: socket.socket) -> None:
             pass
         return
     sock.setblocking(False)
+    try:
+        # 1MB send buffer: bursts (multi-session TUI repaints) fit without
+        # hitting BlockingIOError mid-frame; paired with the "dropped"
+        # resync signal in _broadcast this makes the pipe lossless.
+        sock.setsockopt(socket.SO_SNDBUF, 1024 * 1024)
+    except OSError:
+        pass
     state = {"buf": bytearray(), "sessions": set()}
     _client_state[sock.fileno()] = state
     _send(sock, {"ev": "hello", "version": HOST_VERSION, "pid": os.getpid()})

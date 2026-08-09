@@ -345,6 +345,11 @@ class Outbox:
             except Exception:  # noqa: BLE001 — resync must not kill the drain
                 pass
 
+    def resync(self) -> None:
+        """Request a full resync on the next drain tick (external callers:
+        pty-host 'dropped' events mean the pipe had to be re-synced)."""
+        self._needs_resync = True
+
     async def _drain_loop(self) -> None:
         try:
             written = 0
