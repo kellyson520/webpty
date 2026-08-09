@@ -119,7 +119,10 @@ class Database:
         # added lazily so existing DBs migrate without a version bump.
         for col, ddl in (("matched_rules", "TEXT"),
                          ("attempts", "INTEGER NOT NULL DEFAULT 0"),
-                         ("last_error", "TEXT")):
+                         ("last_error", "TEXT"),
+                         # Audit M5 (v24): read state for the notification
+                         # center (unread badge / mark-all-read).
+                         ("read", "INTEGER NOT NULL DEFAULT 0")):
             try:
                 self._conn.execute(
                     f"ALTER TABLE notifications ADD COLUMN {col} {ddl}")
@@ -220,10 +223,23 @@ class Database:
     async def list_notifications(self, page: int, page_size: int = 20) -> dict:
         total = await self.query_one(
             "SELECT COUNT(*) AS c FROM notifications")
+        unread = await self.query_one(
+            "SELECT COUNT(*) AS c FROM notifications WHERE read=0")
         rows = await self.query(
             "SELECT * FROM notifications ORDER BY ts DESC LIMIT ? OFFSET ?",
             (page_size, (max(page, 1) - 1) * page_size))
-        return {"total": total["c"] if total else 0, "items": rows}
+        return {"total": total["c"] if total else 0,
+                "unread": unread["c"] if unread else 0,
+                "items": rows}
+
+    async def mark_read(self, notif_id: int) -> None:
+        """Audit M5 (v24): notification read state."""
+        await self.execute("UPDATE notifications SET read=1 WHERE id=?", (notif_id,))
+
+    async def mark_all_read(self) -> int:
+        """Audit M5 (v24): batch read; returns the number updated."""
+        cur = await self.execute("UPDATE notifications SET read=1 WHERE read=0")
+        return cur if cur else 0
 
     async def dedup_recent(self, dedup_key: str, window_s: float = 60.0) -> bool:
         if window_s <= 0:
@@ -357,7 +373,10 @@ class Database:
                                       AND t2.source='actual')
                                  THEN cost ELSE 0 END),0) AS estimated
                 FROM token_usage WHERE ts>=? GROUP BY {col}
-                ORDER BY cost DESC""",
+                -- Audit M2 (v24): estimate-only models (reasonix: no usage
+                -- report) had cost=0 and sorted to the BOTTOM with $0.00 —
+                -- rank by cost+estimated.
+                ORDER BY (cost + estimated) DESC""",
             (self._period_start(period),))
 
     # ---- backups -------------------------------------------------------

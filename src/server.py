@@ -380,7 +380,12 @@ class Server:
             if target.startswith("/api/"):
                 auth = await self._authorize(reader, headers, target)
                 if not auth["ok"]:
-                    await self._send_json(writer, 403,
+                    # Audit L2 (v24): REST semantics — missing/invalid
+                    # credentials are 401; a peer that IS authenticated but
+                    # not allowed is 403. The frontend keeps matching on
+                    # 403+bad-token for backward compat.
+                    status = 401 if auth.get("reason") == "bad-token" else 403
+                    await self._send_json(writer, status,
                                           {"error": "forbidden", "reason": auth["reason"]},
                                           headers)
                     return
@@ -711,6 +716,17 @@ class Server:
             return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)$", path)
+        if m and method == "PATCH":
+            # Audit M3 (v24): rename a session.
+            body = await self._read_json(reader, headers)
+            if not isinstance(body.get("name"), str) or not body["name"].strip():
+                raise HttpError(400, "name required")
+            if not self.sessions.rename(m.group(1), body["name"]):
+                raise HttpError(404, "session not found")
+            return await self._send_json(
+                writer, 200, self.sessions.public(m.group(1)), headers)
+
+        m = re.match(r"^/api/sessions/([^/]+)$", path)
         if m and method == "DELETE":
             ok = await self.sessions.remove(m.group(1))
             if not ok:
@@ -771,6 +787,14 @@ class Server:
                 raise HttpError(400, "Invalid page")
             return await self._send_json(
                 writer, 200, await self.db.list_notifications(page), headers)
+        if path == "/api/notify/read-all" and method == "POST":
+            # Audit M5 (v24): batch mark-read.
+            updated = await self.db.mark_all_read()
+            return await self._send_json(writer, 200, {"updated": updated}, headers)
+        m = re.match(r"^/api/notify/messages/(\d+)/read$", path)
+        if m and method == "POST":
+            await self.db.mark_read(int(m.group(1)))
+            return await self._send_json(writer, 200, {"ok": True}, headers)
         if path == "/api/notify/test" and method == "POST":
             ok = await self.notifier.test_message()
             return await self._send_json(writer, 200, {"ok": ok}, headers)
@@ -846,6 +870,10 @@ class Server:
                 raise HttpError(400, "Invalid limit")
             # Audit L3: Infinity/NaN would silently disable the alert.
             if not math.isfinite(limit):
+                raise HttpError(400, "Invalid limit")
+            # Audit M1 (v24): negatives were silently clamped to "disabled"
+            # — reject them explicitly (0 = disabled is the documented way).
+            if limit < 0:
                 raise HttpError(400, "Invalid limit")
             await self.cost.set_budget(limit)
             save_config(self.config)  # persist the budget across restarts

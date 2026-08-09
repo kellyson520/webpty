@@ -121,8 +121,8 @@ class Notifier:
             HTML_TMPL.format(
                 title=escape(str(event.get("name", "session"))),
                 body=escape(zh),
-                meta=escape(f"project: {event.get('project')}\n"
-                            f"exit_code: {event.get('exit_code')}"),
+                meta=escape(f"项目: {event.get('project')}\n"
+                            f"退出码: {event.get('exit_code')}"),
             ))
         await self.db.mark_delivered(nid, True)
 
@@ -153,8 +153,8 @@ class Notifier:
 
         def _send() -> bool:
             try:
-                self.mailer.send(subject="[webpty] test notification",
-                                 html="<p>test</p>")
+                self.mailer.send(subject="[webpty] 测试通知",
+                                 html="<p>这是一封测试邮件，说明 SMTP 配置正确。</p>")
                 return True
             except Exception:  # noqa: BLE001
                 return False

@@ -203,6 +203,10 @@
             </select>
             <p class="hint">⚠ 非 bypass 模式会在高危工具调用时弹「批准/拒绝」请求，等待你的选择</p>
           </label>
+          <label>
+            <span>启动参数（reasonix: <code>-m 模型 --effort high</code>）</span>
+            <input class="inp" name="args" placeholder="留空使用全局默认" autocomplete="off" />
+          </label>
           <button class="primary" type="submit">+ 创建</button>
           <p class="hint" id="add-hint"></p>
         </form>
@@ -237,6 +241,22 @@
                 <option value="stopped">stopped（已停止）</option>
               </select>
             </label>
+            <label class="field">规则名
+              <input id="notify-rule-name" class="inp" type="text" placeholder="留空自动生成" autocomplete="off" />
+            </label>
+            <label class="field">级别
+              <select id="notify-rule-level" class="sel">
+                <option value="warn">warn</option>
+                <option value="info">info</option>
+                <option value="critical">critical</option>
+              </select>
+            </label>
+            <label class="field">动作
+              <select id="notify-rule-action" class="sel">
+                <option value="email">email（邮件）</option>
+                <option value="notify">notify（仅通知中心）</option>
+              </select>
+            </label>
             <label class="field">matcher JSON（可选）
               <input id="notify-rule-matcher" class="inp" type="text"
                      placeholder='{"tool":"codex"}' />
@@ -250,6 +270,7 @@
           </div>
           <div class="panel-section">
             <h3>消息记录 <span class="count" id="notify-messages-count">0</span></h3>
+            <button id="notify-read-all" class="btn" type="button">全部已读</button>
             <div id="notify-messages" class="panel-list"></div>
             <button id="notify-load-more" class="btn" type="button" hidden>加载更多</button>
           </div>

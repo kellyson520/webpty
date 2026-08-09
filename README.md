@@ -123,7 +123,9 @@ switch between live sessions with a swipe.
 > `reset` = 开始全新对话（丢弃 --resume 续聊）；`cost/export` = CSV 导出
 > （支持 `?from=&to=` 日期范围，含公式注入防护）；`/api/errors` = 后端
 > 错误环形缓冲；`/api/health` = systemd/监控探活；会话数上限 `max_sessions`
-> （默认 64，超限返回 409）。
+> （默认 64，超限返回 409）；**运行中 agent 并发上限 `max_agent_concurrency`
+> （默认 6）**——与 systemd `MemoryMax=2G` 的容量模型一致，超限返回 409
+> （建议在「成本账单」面板评估后再调整）。
 
 **安全加固 / Security defaults**：配置与数据库文件权限 `600`（umask 077）；
 备份包与迁移导出同样脱敏（apiKey/密钥置空，恢复后需重配）；HTTP 响应带
@@ -421,16 +423,31 @@ mem peak ~24 MiB (VmRSS)
 python3 -m unittest discover -s test
 ```
 
-212 tests cover paths, args parsing, ring buffer, auth, config merging,
+212+ tests cover paths, args parsing, ring buffer, auth, config merging,
 session manager, pty-host crash recovery, end-to-end HTTP/WebSocket
 behavior, plus the four compliance extensions (notify / cost / backup /
-migrate) end-to-end (1 platform-skipped on POSIX).
+migrate) end-to-end and front-end static checks (1 platform-skipped on
+POSIX). Run `python3 -m unittest discover -s test` — currently
+**342 tests, 0 failures** (version-dependent count; CI output is
+authoritative).
 
-212 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
-pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为，以及四大合规扩展
-（通知/成本/备份/迁移）全链路（1 个平台跳过项）。
+212+ 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
+pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为、四大合规扩展（通知/成本/
+备份/迁移）全链路与前端静态检查（1 个平台跳过项）。运行
+`python3 -m unittest discover -s test`——当前 **342 个测试、0 失败**
+（数量随版本变化，以 CI 输出为准）。
 
 ---
+
+## Upgrading / 升级与数据兼容
+
+- 升级前建议在「备份管理」创建一份快照（或复制 `data_dir` 整个目录）。
+- SQLite 数据库自动迁移：`PRAGMA user_version` 驱动的顺序迁移
+  （`src/db_migrations.py`），旧库打开时自动补列/建索引，无需手工步骤。
+- `config.json` 新默认键由 `normalize_config` 自动注入；手改损坏时自动
+  备份为 `config.json.broken-<ts>` 并用默认值启动。
+- 会话 transcript（JSONL）与日志按会话删除生命周期保留；升级不会清理。
+- 部署升级：`./install.sh --update`（git pull + 重启，自动清理旧 pty-host）。
 
 ## License / 许可证
 

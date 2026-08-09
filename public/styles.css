@@ -1328,3 +1328,13 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
 .perm-btn.no { background: #b23c3c; }
 .perm-btn.no:hover { background: #c45050; }
 .perm-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* Audit M5 (v24): unread notification highlight */
+.panel-item.unread { border-left: 3px solid var(--accent, #6ea8ff); }
+.panel-item.unread .item-title { font-weight: 700; }
+
+/* Audit M7 (v24): light theme (user setting) — overrides the core vars. */
+body.theme-light {
+  --bg: #f7f7f7; --panel: #ffffff; --fg: #1a1a1a; --muted: #666666;
+  --border: rgba(0,0,0,0.12); --accent: #2f6fdb; --dot: #b8c4d4;
+}

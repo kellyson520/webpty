@@ -87,7 +87,9 @@ class GateBoundaryTest(unittest.IsolatedAsyncioTestCase):
         s, w = await self._serve("/api/config")
         self.assertEqual(s._authorize_calls, ["/api/config"], "API 必须触发 authorize")
         self.assertEqual(s._routed, [], "未授权 API 不得路由")
-        self.assertIn("403", w.status_line or "")
+        # Audit L2 (v24): missing/invalid token is now 401 (REST); 403
+        # stays for authenticated-but-not-allowed peers.
+        self.assertIn("401", w.status_line or "")
 
     async def test_api_rejects_with_json_reason(self):
         s, w = await self._serve("/api/config")

@@ -217,6 +217,21 @@ class SessionManager:
         self._emit("change", self._public(session))
         return session
 
+    def rename(self, sid: str, name: str) -> bool:
+        """Audit M3 (v24): sessions were unrenameable — activateTool auto-
+        names (tool-project) and multi-open sessions accumulate -2/-3 with
+        no way to fix the label."""
+        session = self.sessions.get(sid)
+        if not session:
+            return False
+        cleaned = safe_name(str(name or "")).strip() or session.get("name")
+        if cleaned == session.get("name"):
+            return True
+        session["name"] = cleaned
+        self._persist()
+        self._emit("change", self._public(session))
+        return True
+
     async def remove(self, sid: str) -> bool:
         session = self.sessions.get(sid)
         if not session:
@@ -786,6 +801,10 @@ class SessionManager:
             session["turn_active"] = False
             if evt.get("session_id"):
                 session["agent_session_id"] = evt.get("session_id")
+            # Audit M4 (v24): cache the last-seen model so tabs/drawer can
+            # label sessions (deepseek-v4-flash vs other).
+            if evt.get("model"):
+                session["_last_model"] = evt["model"]
             self._push_agent(session, {
                 "t": "result", "isError": bool(evt.get("is_error")),
                 "costUsd": evt.get("total_cost_usd"), "durationMs": evt.get("duration_ms"),
@@ -1544,6 +1563,8 @@ class SessionManager:
             "turnActive": bool(session.get("turn_active")),
             "busy": bool(session.get("turn_active")) if session.get("engine") == "agent" else bool(session.get("busy")),
             "lastOutputAt": session.get("last_output_at"),
+            # Audit M4 (v24): last-seen model for tab/drawer labeling.
+            "model": session.get("_last_model"),
         }
 
     def _emit_output(self, session: dict, chunk: bytes) -> None:

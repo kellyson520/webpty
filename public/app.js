@@ -41,6 +41,15 @@ const tokenGateErr = document.getElementById('token-gate-err');
 const notifyBackdrop = document.getElementById('notify-backdrop');
 const notifyRules = document.getElementById('notify-rules');
 const notifyMessages = document.getElementById('notify-messages');
+// Audit M5 (v24): batch mark-read button.
+document.getElementById('notify-read-all').addEventListener('click', async () => {
+  try {
+    await api('/api/notify/read-all', { method: 'POST' });
+    refreshNotifyPanel();
+  } catch (e) {
+    alert(zhErr(e.message));
+  }
+});
 const costBackdrop = document.getElementById('cost-backdrop');
 const backupBackdrop = document.getElementById('backup-backdrop');
 const migrateBackdrop = document.getElementById('migrate-backdrop');
@@ -123,6 +132,12 @@ const ERR_ZH = {
   'session not running': '会话未运行',
   'Unknown permissionMode': '未知的权限模式',
   'limit required': '缺少预算值',
+  'cwd required': '工作目录必填',
+  'command must be one of': '命令不在白名单内',
+  'Path does not exist': '路径不存在',
+  'name and event_type required': '规则名称与事件类型必填',
+  'matcher_json is not valid JSON': 'matcher JSON 格式无效',
+  'too large': '文件过大',
 };
 function zhErr(msg) {
   if (!msg) return '';
@@ -162,7 +177,7 @@ const api = async (url, opts = {}) => {  const headers = { 'content-type': 'appl
     throw new Error(e.name === 'AbortError' ? '请求超时，请重试' : e.message);
   }
   clearTimeout(timer);
-  if (res.status === 403) {
+  if (res.status === 403 || res.status === 401) {
     const body = await res.json().catch(() => ({}));
     if (body.reason === 'bad-token') showTokenGate();
     throw new Error(body.error || 'forbidden');
@@ -352,6 +367,12 @@ function ensureAddons(term) {
 
 function makeTerminal(session, host) {
   const isTUI = TUI_TOOLS.has(session.tool);
+  // Audit M7 (v24): user font size override (12-24px, localStorage).
+  let fontSize = isMobileViewport() ? 16 : 15;
+  const savedFs = parseInt(localStorage.getItem('webpty.fontSize') || '', 10);
+  if (Number.isFinite(savedFs)) fontSize = Math.max(12, Math.min(24, savedFs));
+  // Audit M7 (v24): light theme override (WCAG contrast for bright rooms).
+  const light = localStorage.getItem('webpty.theme') === 'light';
   const term = new Terminal({
     cursorBlink: !isTUI,
     cursorStyle: 'bar',
@@ -359,8 +380,13 @@ function makeTerminal(session, host) {
     scrollback: isMobileViewport() ? 10000 : 30000,
     allowProposedApi: true,
     fontFamily: '"D2Coding", "Cascadia Mono", Menlo, Consolas, monospace',
-    fontSize: isMobileViewport() ? 16 : 15,
-    theme: {
+    fontSize,
+    theme: light ? {
+      background: '#f5f5f5',
+      foreground: '#1a1a1a',
+      cursor: isTUI ? 'rgba(0,0,0,0)' : '#1f7a3d',
+      cursorAccent: isTUI ? 'rgba(0,0,0,0)' : '#f5f5f5'
+    } : {
       background: '#0f0f0f',
       foreground: '#ededed',
       cursor: isTUI ? 'rgba(0,0,0,0)' : '#3fbf7f',
@@ -1762,6 +1788,8 @@ function renderTabs() {
       tab.className = 'tab';
       tab.dataset.id = s.id;
       tab.draggable = false; // we use pointer events, not native HTML5 DnD
+      // Audit M4 (v24): hover shows tool · model (if known) · cwd.
+      tab.title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}`;
       const name = document.createElement('span');
       name.className = 'tab-name';
       tab.appendChild(name);
@@ -1805,6 +1833,8 @@ function renderTabs() {
     const cls = `tab-dot ${isAgent(s) ? 'web' : 'cli'} ${dotStatus(s)}`;
     if (dot.className !== cls) dot.className = cls;
     if (dot.dataset.tool !== s.tool) dot.dataset.tool = s.tool;
+    // Audit M4 (v24): refresh the hover label with the latest model.
+    tab.title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}`;
   });
   // Remove tabs for sessions that no longer exist.
   for (const el of Array.from(tabsEl.children)) {
@@ -2189,12 +2219,47 @@ function openMenu(sessionId) {
   addMenuItem('退出', () => exitSession(session), { className: 'danger' });
   addMenuItem('清屏', () => sendToSession(session.id, '/clear\r'));
   addMenuItem('压缩上下文', () => sendToSession(session.id, '/compact\r'));
+  // Audit M3 (v24): sessions were unrenameable.
+  addMenuItem('重命名…', async () => {
+    const name = prompt('新会话名：', session.name || '');
+    if (name === null) return;
+    try {
+      await api(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: 'PATCH', body: JSON.stringify({ name })
+      });
+      await refreshSessions();
+      renderTabs();
+    } catch (e) {
+      alert(zhErr(e.message));
+    }
+  });
 
   addMenuSep();
   addMenuLabel('工作流');
   addMenuItem('汇报进度', () => sendToSession(session.id, '请总结当前进度并汇报。\r'));
   addMenuItem('提交并推送', () => sendToSession(session.id, '请提交更改并推送。\r'));
   addMenuItem('部署', () => sendToSession(session.id, '请部署。\r'));
+
+  addMenuSep();
+  addMenuLabel('外观');
+  // Audit M7 (v24): minimal settings — font size + light/dark theme.
+  addMenuItem(`字号：${localStorage.getItem('webpty.fontSize') || '默认'}`, () => {
+    const v = prompt('终端字号（12-24px，取消 = 恢复默认）：', localStorage.getItem('webpty.fontSize') || '15');
+    if (v === null) localStorage.removeItem('webpty.fontSize');
+    else {
+      const n = parseInt(v, 10);
+      localStorage.setItem('webpty.fontSize', Number.isFinite(n) ? String(Math.max(12, Math.min(24, n))) : '15');
+    }
+    rebuildTrack();
+    renderTabs();
+  });
+  addMenuItem(`主题：${localStorage.getItem('webpty.theme') === 'light' ? '浅色' : '深色'}`, () => {
+    const cur = localStorage.getItem('webpty.theme') === 'light';
+    localStorage.setItem('webpty.theme', cur ? 'dark' : 'light');
+    document.body.classList.toggle('theme-light', !cur);
+    rebuildTrack();
+    renderTabs();
+  });
 
   addMenuSep();
   addMenuLabel('扩展');
@@ -2581,7 +2646,9 @@ function buildAddPage() {
           name: proj?.name || '',
           cwd,
           tool: form.get('tool'),
-          args: '',
+          // Audit M8 (v24): per-session CLI args (e.g. reasonix
+          // `-m deepseek-v4-flash --effort max`) — empty = global default.
+          args: form.get('args') || '',
           autostart: true,
           start: true,
           // Audit 2.1: per-session permission mode (empty = tool default).
@@ -2853,6 +2920,10 @@ window.__webpty = {
 // Full bootstrap: fetch config/projects/sessions in parallel with the font
 // preload so first paint isn't serialized behind three sequential fetches.
 async function bootstrap() {
+  // Audit M7 (v24): apply the persisted theme class before first paint of
+  // panels/tabs (terminals read it in makeTerminal).
+  document.body.classList.toggle(
+    'theme-light', localStorage.getItem('webpty.theme') === 'light');
   const fontP = (async () => {
     if (!document.fonts?.load) return;
     try {
@@ -2989,7 +3060,8 @@ async function refreshNotifyPanel() {
     const t = new Date((m.ts || 0) * 1000);
     const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
     const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
-    return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')}">
+    // Audit M5 (v24): unread highlight + click-to-read.
+    return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')} ${m.read ? '' : 'unread'}" data-nid="${m.id}">
       <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
       <div class="item-main">
         <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
@@ -2998,6 +3070,17 @@ async function refreshNotifyPanel() {
     </div>`;
   }).join('') ||
     `<div class="empty-tip">暂无消息 — 会话事件触发后将显示在这里</div>`;
+  // Audit M5 (v24): click marks a message read.
+  notifyMessages.querySelectorAll('.panel-item[data-nid]').forEach((el) => {
+    el.onclick = async () => {
+      const nid = el.dataset.nid;
+      if (!el.classList.contains('unread')) return;
+      el.classList.remove('unread');
+      api(`/api/notify/messages/${nid}/read`, { method: 'POST' }).catch(() => {});
+    };
+  });
+  const cnt = document.getElementById('notify-messages-count');
+  if (cnt) cnt.textContent = `${msgs.total ?? msgList.length}${msgs.unread ? `（${msgs.unread} 未读）` : ''}`;
   // Audit F1: pagination — the API pages at 20; show a load-more button
   // when more pages exist.
   const total = msgs.total ?? msgList.length;
@@ -3050,8 +3133,13 @@ document.getElementById('notify-rule-add').onclick = async () => {
       matcher = JSON.stringify(parsed);
     }
     await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
-      name: 'rule-' + Date.now(), event_type: type, matcher_json: matcher,
-      action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
+      // Audit L3 (v24): editable rule name/level/action (were hardcoded).
+      name: document.getElementById('notify-rule-name').value.trim() || ('rule-' + Date.now()),
+      event_type: type, matcher_json: matcher,
+      action: document.getElementById('notify-rule-action').value,
+      level: document.getElementById('notify-rule-level').value,
+      quiet_start: '', quiet_end: '', enabled: 1 }) });
+    document.getElementById('notify-rule-name').value = '';
     refreshNotifyPanel();
   } catch (e) {
     alert(zhErr(e.message));
@@ -3070,6 +3158,9 @@ document.getElementById('notify-test').onclick = async () => {
 function openCostPanel() {
   closeMenu();
   costBackdrop.hidden = false;
+  // Audit L1 (v24): restore the last reconcile tool choice.
+  const savedTool = localStorage.getItem('webpty.reconcileTool');
+  if (savedTool) document.getElementById('cost-reconcile-tool').value = savedTool;
   refreshCostPanel();
 }
 async function refreshCostPanel() {
@@ -3092,7 +3183,7 @@ async function refreshCostPanel() {
   const byModelRows = (byModel || []).map((g) =>
     `<div class="panel-item">
        <div class="item-main">
-         <div class="item-title">${esc(g.name)} <span class="badge">${fmtUsd(g.cost)}</span>${g.estimated ? ' <span class="badge warn">估算价</span>' : ''}</div>
+         <div class="item-title">${esc(g.name)} <span class="badge">${fmtUsd(g.cost > 0 ? g.cost : g.estimated)}</span>${g.estimated ? ' <span class="badge warn">估算价</span>' : ''}</div>
          <div class="item-sub">${esc(g.tokens_in ?? 0)} in / ${esc(g.tokens_out ?? 0)} out</div>
        </div>
      </div>`).join('');
@@ -3118,7 +3209,11 @@ costBackdrop.addEventListener('click', (ev) => {
 document.getElementById('cost-period').onchange = refreshCostPanel;
 document.getElementById('cost-budget-set').onclick = async () => {
   const n = parseFloat(document.getElementById('cost-budget').value || '0');
+  // Audit M1 (v24): negative values were silently clamped to "budget
+  // disabled" — say so instead of pretending the budget was set.
   if (!Number.isFinite(n)) { alert('请输入有效预算'); return; }
+  if (n < 0) { alert('预算不能为负数（0 表示禁用预算）'); return; }
+  if (n === 0 && !confirm('预算设为 0 将禁用超限提醒，确定？')) return;
   try {
     await api('/api/cost/budget', { method: 'PUT', body: JSON.stringify({ limit: n }) });
     refreshCostPanel();
@@ -3131,6 +3226,7 @@ document.getElementById('cost-reconcile').onclick = async () => {
     // Audit H1 (v22): reconcile now covers reasonix/opencode too (their
     // session JSONLs carry no usage — tokens are estimated).
     const tool = document.getElementById('cost-reconcile-tool').value;
+    localStorage.setItem('webpty.reconcileTool', tool); // audit L1 (v24)
     const r = await api('/api/cost/reconcile', {
       method: 'POST',
       body: JSON.stringify({ tool })
@@ -3405,7 +3501,7 @@ async function refreshAgentsPanel() {
         row.classList.remove('editing');
         refreshAgentsPanel();
       } catch (e) {
-        alert('保存失败: ' + e.message);
+        alert('保存失败: ' + zhErr(e.message));
       }
     };
     // Quick provider switch: selecting a preset in the row header saves
@@ -3529,7 +3625,7 @@ async function refreshProvidersPanel() {
         refreshProvidersPanel();
         refreshAgentsPanel(); // provider badges in agent list change too
       } catch (e) {
-        alert('保存失败: ' + e.message);
+        alert('保存失败: ' + zhErr(e.message));
       }
     };
     row.querySelector('[data-pact="delete"]').onclick = async () => {
@@ -3540,7 +3636,7 @@ async function refreshProvidersPanel() {
         refreshProvidersPanel();
         refreshAgentsPanel();
       } catch (e) {
-        alert('删除失败: ' + e.message);
+        alert('删除失败: ' + zhErr(e.message));
       }
     };
   });
@@ -3580,9 +3676,9 @@ const ACFG_FIELD_META = {
   model: { label: '模型 model', ph: 'gpt-5.4 / deepseek-v4-flash' },
   base_url: { label: 'API 地址 base_url', ph: 'https://api.example.com/v1' },
   api_key: { label: 'API 密钥 api_key', ph: 'sk-...（留空不改）', secret: true },
-  language: { label: '语言 language', ph: 'zh / en' },
-  effort: { label: '推理强度 effort', ph: 'low / high / max' },
-  theme: { label: '主题 theme', ph: 'dark / light' },
+  language: { label: '语言 language', ph: 'zh / en', options: ['zh', 'en'] },
+  effort: { label: '推理强度 effort', ph: 'low / high / max', options: ['low', 'high', 'max'] },
+  theme: { label: '主题 theme', ph: 'dark / light', options: ['dark', 'light'] },
   model_provider: { label: '模型供应商 model_provider', ph: 'openai / anthropic' },
   provider: { label: '供应商 provider', ph: 'openai / deepseek / zai' },
   temperature: { label: '温度 temperature', ph: '0.0 - 1.0' },
@@ -3662,13 +3758,21 @@ function renderAcfgFields(tool, values, content) {
     const meta = ACFG_FIELD_META[k];
     const cur = values[k];
     const secret = meta.secret && cur;
+    // Audit M9 (v24): enum fields (effort/language/theme) render as
+    // selects — a typo'd value silently broke the agent's CLI at start.
+    const input = meta.options
+      ? `<select class="sel" data-akey="${k}">
+           <option value="">（不改）</option>
+           ${meta.options.map((o) => `<option value="${o}">${o}</option>`).join('')}
+         </select>`
+      : `<input class="inp" data-akey="${k}" type="${meta.secret ? 'password' : 'text'}"
+            placeholder="${meta.secret && cur ? '已配置（留空不改）' : meta.ph}" value="">`;
     return `<div class="panel-item">
       <span class="dot" style="background:var(--accent)"></span>
       <div class="item-main">
         <div class="item-title">${meta.label} ${cur !== undefined ? `<span class="badge">${secret ? '已配置' : esc(String(cur))}</span>` : '<span class="badge warn">未设置</span>'}</div>
         <div class="row" style="margin-top:6px">
-          <input class="inp" data-akey="${k}" type="${meta.secret ? 'password' : 'text'}"
-            placeholder="${meta.secret && cur ? '已配置（留空不改）' : meta.ph}" value="">
+          ${input}
         </div>
       </div>
     </div>`;
@@ -3689,10 +3793,16 @@ function renderAcfgFields(tool, values, content) {
       try {
         const r = await api('/api/agent-config/update', {
           method: 'PUT', body: JSON.stringify({ tool, values: values2 }) });
-        alert(r.ok ? `已更新：${(r.changed || []).join(', ')}` : '更新失败: ' + (r.error || ''));
+        // Audit M9 (v24): .bak feedback + provider-switch hint.
+        const bakNote = r.ok ? '（原配置已备份为 .bak）' : '';
+        const modelHint = values2.model && !values2.base_url && !values2.provider
+          ? '\n提示：切换模型供应商时请同步修改 base_url/provider。' : '';
+        alert(r.ok
+          ? `已更新：${(r.changed || []).join(', ')} ${bakNote}${modelHint}`
+          : '更新失败: ' + zhErr(r.error || ''));
         loadAcfgTool();
       } catch (e) {
-        alert('保存失败: ' + e.message);
+        alert('保存失败: ' + zhErr(e.message));
       }
     };
   }
