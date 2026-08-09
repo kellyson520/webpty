@@ -75,6 +75,13 @@ class DatabaseTest(unittest.IsolatedAsyncioTestCase):
         # 无 actual 行时 grouped 的 cost=0(估算不计入)
         self.assertAlmostEqual(sum(g["cost"] for g in grouped), 0.0, places=6)
 
+    async def test_delete_backup_by_filename(self):
+        bid = await self.db.add_backup({
+            "filename": "webpty-1.tar.gz", "size_bytes": 10, "sha256": "x",
+            "manifest_json": "{}", "encrypted": 0, "retained": 1})
+        await self.db.delete_backup_by_filename("webpty-1.tar.gz")
+        self.assertIsNone(await self.db.get_backup(bid))
+
     async def test_backup_and_migration_tables(self):
         bid = await self.db.add_backup({
             "filename": "webpty-1.tar.gz", "size_bytes": 10, "sha256": "x",

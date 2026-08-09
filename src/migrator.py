@@ -10,6 +10,8 @@ import tarfile
 import time
 import uuid
 
+from logging_util import log_error
+
 # Max uncompressed size of a single member read from a migration package.
 # Imported/cloned packages are untrusted input: a crafted tar can declare a
 # huge member and exhaust memory when read into RAM (zip-bomb style DoS).
@@ -153,13 +155,22 @@ class Migrator(WorkerInterface):
         with open(path, "wb") as f:
             f.write(buf.getvalue())
         self.last_export_filename = os.path.basename(path)
-        await self.db.add_backup({
-            "filename": os.path.basename(path),
-            "size_bytes": os.path.getsize(path),
-            "sha256": "",
-            "manifest_json": json.dumps({
-                "kind": "migrate-export",
-                "created_at": time.time()}), "encrypted": 0, "retained": 1})
+        # 登记 backups 供 rotate 清理(防孤儿文件);登记失败仅记日志,不阻断
+        # 导出返回(否则文件已落盘却 500,反而制造孤儿)。秒级文件名可能碰撞:
+        # 先删同 filename 旧行,避免悬空引用(rotate 删文件后旧行指向已删
+        # 文件,restore 报 file missing)。
+        try:
+            await self.db.delete_backup_by_filename(os.path.basename(path))
+            await self.db.add_backup({
+                "filename": os.path.basename(path),
+                "size_bytes": os.path.getsize(path),
+                "sha256": "",
+                "manifest_json": json.dumps({
+                    "kind": "migrate-export",
+                    "created_at": time.time()}, sort_keys=True),
+                "encrypted": 0, "retained": 1})
+        except Exception as err:  # noqa: BLE001
+            log_error("migrator", err)
         return path
 
     def _read_package(self, path: str) -> dict | None:

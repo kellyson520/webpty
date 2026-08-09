@@ -747,8 +747,8 @@ class Server:
         finally:
             try:
                 os.remove(dest)
-            except OSError:
-                pass
+            except OSError as err:
+                log_error("migrate-import", err)
 
     async def _read_json(self, reader: asyncio.StreamReader, headers: dict[str, str]) -> dict:
         length = 0

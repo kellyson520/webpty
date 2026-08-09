@@ -234,6 +234,29 @@ class MigrateImportHandlerTest(unittest.IsolatedAsyncioTestCase):
         # 上传临时文件在导入后删除,不留残留
         self.assertFalse(os.path.exists(dest))
 
+    async def test_import_cleans_up_on_exception(self):
+        """import_package 抛异常时,上传临时文件同样被清理(finally 保证)。"""
+        payload = b"binary\r\n"
+        body = (b"--zz\r\nContent-Disposition: form-data; name=\"mode\"\r\n\r\n"
+                b"merge\r\n"
+                b"--zz\r\nContent-Disposition: form-data; "
+                b"name=\"file\"; filename=\"pkg.tar.gz\"\r\n"
+                b"Content-Type: application/octet-stream\r\n\r\n"
+                + payload + b"\r\n--zz--\r\n")
+
+        async def _boom(dest, mode):
+            with open(dest, "rb") as f:
+                f.read()  # 确认文件已落盘
+            raise RuntimeError("import failed")
+
+        self.migrator.import_package = AsyncMock(side_effect=_boom)
+        with self.assertRaises(RuntimeError):
+            await self._call(body, "multipart/form-data; boundary=zz",
+                             len(body))
+        dest, _ = self.migrator.import_package.await_args.args
+        self.assertTrue(dest.startswith(os.path.join(self.tmp, "uploads")))
+        self.assertFalse(os.path.exists(dest))
+
     async def test_import_oversize(self):
         res = await self._call(b"", "multipart/form-data; boundary=zz",
                                50 * 1024 * 1024 + 1)

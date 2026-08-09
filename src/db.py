@@ -264,6 +264,10 @@ class Database:
     async def delete_backup(self, backup_id: int) -> None:
         await self.execute("DELETE FROM backups WHERE id=?", (backup_id,))
 
+    async def delete_backup_by_filename(self, filename: str) -> None:
+        await self.execute("DELETE FROM backups WHERE filename=?",
+                           (filename,))
+
     # ---- migrations ----------------------------------------------------
     async def add_migration(self, m: dict) -> int:
         return await self.execute(

@@ -24,6 +24,18 @@ def _manifest() -> dict:
     }
 
 
+def _is_migrate_export(row: dict) -> bool:
+    """True if the row was registered by migrate export (manifest kind
+    migrate-export). Such packages are not config backups — restore/diff
+    must refuse them (sha256 is empty by design; diff output is
+    meaningless). Unparseable manifest_json is treated as a normal row."""
+    try:
+        m = json.loads(row.get("manifest_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return m.get("kind") == "migrate-export"
+
+
 async def collect_state(data_dir: str, config: dict, db: Database) -> dict:
     rules = await db.list_rules()
     cfg_path = os.path.join(data_dir, "config.json")
@@ -115,6 +127,9 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
     row = await db.get_backup(backup_id)
     if not row:
         return {"ok": False, "message": "backup not found"}
+    if _is_migrate_export(row):
+        return {"ok": False,
+                "message": "migrate package — use /api/migrate/import instead"}
     path = os.path.join(data_dir, "backups",
                         os.path.basename(row["filename"]))
     if not os.path.exists(path):
@@ -188,6 +203,9 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
     b = await db.get_backup(b_id)
     if not a or not b:
         return [{"key": "_error", "a": "missing", "b": "missing"}]
+    if _is_migrate_export(a) or _is_migrate_export(b):
+        return [{"key": "_error",
+                 "message": "migrate package — use /api/migrate/import instead"}]
     sa = await _load(a_id)
     sb = await _load(b_id)
     ca = sa.get("config") or {}

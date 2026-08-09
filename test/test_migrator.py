@@ -39,8 +39,22 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         """export 生成的包登记进 backups 表(rotate 可清理,防孤儿文件)。"""
         path = await self.m.export()
         rows = await self.db.list_backups()
-        self.assertTrue(any(r["filename"] == os.path.basename(path)
-                            for r in rows))
+        row = next(r for r in rows if r["filename"] == os.path.basename(path))
+        self.assertGreater(row["size_bytes"], 0)
+        self.assertEqual(json.loads(row["manifest_json"])["kind"],
+                         "migrate-export")
+
+    async def test_export_same_second_dedupes_backup_row(self):
+        """秒级文件名碰撞:同 filename 旧行先删,backups 表仅留最新一行。"""
+        from unittest.mock import patch
+        with patch("migrator.time.strftime",
+                   return_value="20240101-000000"):
+            await self.m.export()
+            await self.m.export()
+        rows = await self.db.list_backups()
+        matches = [r for r in rows
+                   if r["filename"] == "webpty-migrate-20240101-000000.tar.gz"]
+        self.assertEqual(len(matches), 1)
 
     async def test_import_merge_preserves_existing(self):
         path = await self.m.export()

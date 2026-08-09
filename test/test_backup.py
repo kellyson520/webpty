@@ -98,6 +98,30 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
         diff = await diff_backups(a["id"], b["id"], self.db)
         self.assertTrue(any(d["key"] == "port" for d in diff))
 
+    async def test_restore_rejects_migrate_export(self):
+        """migrate-export 行在 backups 表但不可 restore(应走 migrate import)。"""
+        from migrator import Migrator
+        m = Migrator(self.data, self.config, self.db)
+        await m.export()
+        rows = await self.db.list_backups()
+        self.assertEqual(len(rows), 1)
+        res = await restore_backup(rows[0]["id"], self.data, self.db,
+                                   self.config)
+        self.assertFalse(res["ok"])
+        self.assertIn("migrate package", res["message"])
+
+    async def test_diff_rejects_migrate_export(self):
+        """diff 涉及 migrate-export 行时返回明确错误而非无意义对比。"""
+        from migrator import Migrator
+        m = Migrator(self.data, self.config, self.db)
+        await m.export()
+        b = await create_backup_async(self.data, self.config, self.db)
+        rows = await self.db.list_backups()
+        mig = next(r for r in rows if r["id"] != b["id"])
+        diff = await diff_backups(mig["id"], b["id"], self.db)
+        self.assertEqual(diff[0]["key"], "_error")
+        self.assertIn("migrate package", diff[0]["message"])
+
     async def test_encrypted_roundtrip(self):
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
