@@ -1352,48 +1352,63 @@ function renderTabs() {
   // would orphan the dragged element held in the pointermove closure, and the
   // next insertBefore would reattach it alongside a freshly rendered duplicate.
   if (tabDragInProgress) return;
-  tabsEl.innerHTML = '';
+  // Keyed diff (audit F2): keep existing tab nodes, only touch the parts
+  // that changed. Full innerHTML rebuild on every 3s poll / state push /
+  // tab switch churned the whole strip and re-created listeners.
+  const existing = new Map();
+  for (const el of tabsEl.children) {
+    if (el.dataset && el.dataset.id) existing.set(el.dataset.id, el);
+  }
   sessions.forEach((s, idx) => {
-    const tab = document.createElement('button');
-    tab.type = 'button';
-    tab.className = 'tab' + (idx === activeIndex ? ' active' : '');
-    tab.dataset.id = s.id;
-    tab.draggable = false; // we use pointer events, not native HTML5 DnD
-
-    const name = document.createElement('span');
-    name.className = 'tab-name';
-    name.textContent = s.name;
-    tab.appendChild(name);
-
-    const dot = document.createElement('span');
-    dot.className = `tab-dot ${isAgent(s) ? 'web' : 'cli'} ${dotStatus(s)}`;
-    dot.dataset.tool = s.tool;
-    tab.appendChild(dot);
-
-    // Close button: hover/active tab only, tap to close the session.
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'tab-close';
-    closeBtn.title = '关闭会话';
-    closeBtn.setAttribute('aria-label', '关闭会话');
-    closeBtn.innerHTML = '×';
-    closeBtn.onclick = async (ev) => {
-      ev.stopPropagation();
-      ev.preventDefault();
-      if (!confirm(`关闭会话「${s.name}」？`)) return;
-      try {
-        await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
-      } catch (e) {
-        alert(e.message);
-        return;
-      }
-      await refreshSessions();
-    };
-    tab.appendChild(closeBtn);
-
-    tab.onclick = () => scrollToIndex(idx);
-    tabsEl.appendChild(tab);
+    let tab = existing.get(s.id);
+    if (!tab) {
+      tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'tab';
+      tab.dataset.id = s.id;
+      tab.draggable = false; // we use pointer events, not native HTML5 DnD
+      const name = document.createElement('span');
+      name.className = 'tab-name';
+      tab.appendChild(name);
+      const dot = document.createElement('span');
+      dot.className = 'tab-dot';
+      dot.dataset.tool = '';
+      tab.appendChild(dot);
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'tab-close';
+      closeBtn.title = '关闭会话';
+      closeBtn.setAttribute('aria-label', '关闭会话');
+      closeBtn.innerHTML = '×';
+      closeBtn.onclick = async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        if (!confirm(`关闭会话「${s.name}」？`)) return;
+        try {
+          await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
+        } catch (e) {
+          alert(e.message);
+          return;
+        }
+        await refreshSessions();
+      };
+      tab.appendChild(closeBtn);
+      tab.onclick = () => scrollToIndex(idx);
+      tabsEl.appendChild(tab);
+      existing.set(s.id, tab);
+    }
+    // Update only the volatile parts.
+    tab.classList.toggle('active', idx === activeIndex);
+    tab.querySelector('.tab-name').textContent = s.name;
+    const dot = tab.querySelector('.tab-dot');
+    const cls = `tab-dot ${isAgent(s) ? 'web' : 'cli'} ${dotStatus(s)}`;
+    if (dot.className !== cls) dot.className = cls;
+    if (dot.dataset.tool !== s.tool) dot.dataset.tool = s.tool;
   });
+  // Remove tabs for sessions that no longer exist.
+  for (const el of Array.from(tabsEl.children)) {
+    if (!sessions.some((s) => s.id === el.dataset.id)) el.remove();
+  }
   scrollActiveTabIntoView();
 }
 

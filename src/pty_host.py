@@ -490,7 +490,7 @@ def on_connection(server: socket.socket) -> None:
         # 1MB send buffer: bursts (multi-session TUI repaints) fit without
         # hitting BlockingIOError mid-frame; paired with the "dropped"
         # resync signal in _broadcast this makes the pipe lossless.
-        sock.setsockopt(socket.SO_SNDBUF, 1024 * 1024)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     except OSError:
         pass
     state = {"buf": bytearray(), "sessions": set()}
