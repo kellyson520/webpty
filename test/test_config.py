@@ -1,9 +1,11 @@
 """Unit tests for src/config.py — load/persist/merge, env overrides."""
+import glob
 import json
 import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _TEST_DIR = tempfile.mkdtemp(prefix="webpty-cfg-test-")
 os.environ["WEBPTY_DATA_DIR"] = _TEST_DIR
@@ -142,13 +144,20 @@ class ConfigTest(unittest.TestCase):
         os.environ.pop("WEBPTY_PORT", None)
 
     def test_save_config_tmp_has_unique_suffix(self):
-        """save_config 的 tmp 文件带 pid 后缀(与 restore 的 tmp 不冲突)。"""
+        """tmp 名带 pid 后缀(防跨进程 restore 与 save_config 撞名)。"""
         c = cfg.load_config()
-        cfg.save_config(c)
-        import glob, os
-        leftovers = glob.glob(cfg.config_path + ".tmp*")
-        # 原子写后 tmp 应已清理;若残留也必须是带 pid 的唯一名
-        self.assertNotEqual(leftovers, [cfg.config_path + ".tmp"])
+        try:
+            with mock.patch("config.os.replace", side_effect=OSError("boom")):
+                try:
+                    cfg.save_config(c)
+                except OSError:
+                    pass
+            leftovers = glob.glob(cfg.config_path + ".tmp*")
+            self.assertEqual(leftovers, [f"{cfg.config_path}.tmp.{os.getpid()}"])
+        finally:
+            for f in glob.glob(cfg.config_path + ".tmp*"):
+                try: os.remove(f)
+                except OSError: pass
 
 
 if __name__ == "__main__":

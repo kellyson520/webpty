@@ -39,7 +39,12 @@ async def collect_state(data_dir: str, config: dict, db: Database) -> dict:
 
 
 def _atomic_write_json(path: str, obj) -> None:
-    """Write JSON atomically (unique tmp + fsync + os.replace)."""
+    """Write JSON atomically (unique tmp + fsync + os.replace).
+
+    pid suffix keeps cross-process writers (e.g. a concurrent
+    save_config) apart; same-process safety relies on the single-threaded
+    event loop's synchronous critical section.
+    """
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
