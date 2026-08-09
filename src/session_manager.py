@@ -796,9 +796,14 @@ class SessionManager:
         log_text = ""
         if session.get("log_path"):
             try:
-                with open(session["log_path"], "r", encoding="utf-8",
-                          errors="replace") as f:
-                    log_text = f.read()
+                with open(session["log_path"], "rb") as f:
+                    # Tail-read only (audit L1): the full log of a long
+                    # session could be tens of MB — reading it all on every
+                    # exit just to match "in use" was a memory spike.
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - 65536))
+                    log_text = f.read().decode("utf-8", errors="replace")
             except OSError:
                 log_text = ""
         tool = session.get("tool")
@@ -1101,7 +1106,23 @@ class SessionManager:
             if fh is None:
                 fh = open(session["log_path"], "ab", buffering=8192)
                 session["_log_fh"] = fh
+                session["_log_bytes"] = 0
             fh.write(chunk)
+            # Running-session rotation (audit L1): buffered writes bypass
+            # _append_log's size check, so a long-lived reasonix session's
+            # log grew unboundedly (~60 writes/s). Count bytes and check the
+            # size every ~512KB; at 5MB rotate to .1 and reopen the handle.
+            session["_log_bytes"] = session.get("_log_bytes", 0) + len(chunk)
+            if session["_log_bytes"] >= 512 * 1024:
+                session["_log_bytes"] = 0
+                try:
+                    if os.path.getsize(session["log_path"]) > 5 * 1024 * 1024:
+                        fh.flush()
+                        fh.close()
+                        os.replace(session["log_path"], session["log_path"] + ".1")
+                        session["_log_fh"] = open(session["log_path"], "ab", buffering=8192)
+                except OSError:
+                    pass
         except OSError:
             pass
 

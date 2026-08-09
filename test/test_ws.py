@@ -90,6 +90,20 @@ class FrameParseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(frame[0], 0x1)
         self.assertEqual(frame[1], b"x")
 
+    def test_apply_mask_aligned_and_tail(self):
+        from ws import _apply_mask
+        mask = b"\x11\x22\x33\x44"
+        for size in (0, 1, 3, 4, 5, 7, 8, 100, 4097):
+            payload = bytes((i * 7 + 3) % 256 for i in range(size))
+            expected = bytes(
+                b ^ mask[i % 4] for i, b in enumerate(payload))
+            self.assertEqual(_apply_mask(payload, mask), expected,
+                             f"size={size}")
+        # 2MB 基准帧正确性（对齐路径）
+        big = bytes(range(256)) * 8192
+        expected = bytes(b ^ mask[i % 4] for i, b in enumerate(big))
+        self.assertEqual(_apply_mask(big, mask), expected)
+
 
 class OutboxResyncTest(unittest.IsolatedAsyncioTestCase):
     """丢帧时触发 on_resync（TUI 增量状态重建）。"""

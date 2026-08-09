@@ -118,6 +118,7 @@ class Server:
         self.pub = public_dir()
         self.pkg = package_root()
         self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
+        self._gzip_cache_bytes = 0
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
         # claude history mtime cache: key = abs project path, value =
         # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
@@ -825,6 +826,21 @@ class Server:
             return gzip_q > 0
         return wildcard_q > 0
 
+    def _cache_gzip(self, cache_key: str | None, value) -> None:  # type: ignore[no-untyped-def]
+        """Store a gzip-cache entry with a byte budget (audit L5): over 8MB
+        the whole cache is dropped — static files are few and re-compressing
+        one is cheaper than unbounded memory."""
+        if cache_key is None:
+            return
+        if value is None:
+            self._gzip_cache[cache_key] = None  # negative cache
+            return
+        if self._gzip_cache_bytes + len(value) > 8 * 1024 * 1024:
+            self._gzip_cache.clear()
+            self._gzip_cache_bytes = 0
+        self._gzip_cache[cache_key] = value
+        self._gzip_cache_bytes += len(value)
+
     def _maybe_gzip(self, headers: dict[str, str], body: bytes,
                     cache_key: str | None = None) -> tuple[bytes, str | None]:
         """Compress body with gzip when it pays off; None encoding means identity.
@@ -852,15 +868,15 @@ class Server:
         if ctype.split("/")[0] in ("font", "image", "audio", "video") \
                 or ctype in ("application/zip", "application/gzip", "application/pdf"):
             if cache_key is not None:
-                self._gzip_cache[cache_key] = None  # negative cache
+                self._cache_gzip(cache_key, None)  # negative cache
             return body, None
         compressed = _gzip.compress(body, compresslevel=6)
         if len(compressed) >= len(body):
             if cache_key is not None:
-                self._gzip_cache[cache_key] = None  # negative cache
+                self._cache_gzip(cache_key, None)  # negative cache
             return body, None  # 压缩无收益（如已压缩的 WOFF2 字体）
         if cache_key is not None:
-            self._gzip_cache[cache_key] = compressed
+            self._cache_gzip(cache_key, compressed)
         return compressed, "gzip"
 
     async def _serve_static(self, writer: asyncio.StreamWriter, method: str, path: str,
@@ -1025,7 +1041,7 @@ class Server:
             except Exception:  # noqa: BLE001
                 pass
 
-        outbox = Outbox(ws, maxlen=1024, on_resync=on_resync)
+        outbox = Outbox(ws, maxlen=256, on_resync=on_resync)
         outbox.start()
         try:
             def on_agent_event(ev_sid: str, item: dict) -> None:

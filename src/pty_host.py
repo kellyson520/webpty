@@ -457,6 +457,13 @@ def _client_read(sock: socket.socket) -> None:
         _client_cleanup(sock)
         return
     st["buf"].extend(data)
+    # Audit L3: a misbehaving peer can stream data faster than we parse;
+    # cap the per-connection input buffer at 1MB and drop the client
+    # instead of letting pty-host's single-threaded loop stall on a giant
+    # base64 decode.
+    if len(st["buf"]) > 1024 * 1024:
+        _client_cleanup(sock)
+        return
     while b"\n" in st["buf"]:
         line, _, rest = st["buf"].partition(b"\n")
         st["buf"][:] = rest

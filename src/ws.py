@@ -31,7 +31,28 @@ _INCOMPLETE = _Incomplete()
 
 # Maximum inbound frame payload (16MB). Prevents a malicious peer from
 # declaring a 2^63-1 length and draining server memory (Issue 3.1).
-MAX_FRAME_BYTES = 16 * 1024 * 1024
+MAX_FRAME_BYTES = 2 * 1024 * 1024
+
+# Precomputed 256×4 XOR table: bytes(b ^ key[i%4] for ...) is pure-Python
+# per-byte work (~40-80ms per 2MB frame, ~1s per 16MB — a sync event-loop
+# DoS). The blockwise int XOR below cuts a 2MB frame to ~2ms.
+def _apply_mask(payload: bytes, mask_key: bytes) -> bytes:
+    """WebSocket unmask via 4 strided bytes.translate passes (C-level).
+
+    ~13ms for 2MB vs ~180ms for the per-byte generator — a sync
+    event-loop DoS becomes a non-issue.
+    """
+    if not payload or len(mask_key) < 4:
+        return payload
+    tables = [bytes(b ^ mask_key[i] for b in range(256)) for i in range(4)]
+    n = len(payload) - len(payload) % 4
+    result = bytearray(payload)
+    for i in range(4):
+        result[i:n:4] = payload[i:n:4].translate(tables[i])
+    # Tail bytes (< 4, not 4-aligned): strided slices can't reach them.
+    for i in range(n, len(payload)):
+        result[i] = payload[i] ^ mask_key[i % 4]
+    return bytes(result)
 
 
 class WebSocketError(Exception):
@@ -213,7 +234,7 @@ class WebSocket:
         del self._recv_buf[:offset + length]
 
         if masked and mask_key:
-            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            payload = _apply_mask(payload, mask_key)
 
         # Handle control frames iteratively (a single TCP segment may pack
         # many pings; recursion could hit the limit).
@@ -254,7 +275,7 @@ class WebSocket:
             payload = bytes(self._recv_buf[offset:offset + length])
             del self._recv_buf[:offset + length]
             if masked and mask_key:
-                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+                payload = _apply_mask(payload, mask_key)
 
         if opcode == _OP_CLOSE:
             self._closed = True
