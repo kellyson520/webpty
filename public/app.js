@@ -237,7 +237,7 @@ function makeTerminal(session, host) {
     cursorBlink: !isTUI,
     cursorStyle: 'bar',
     convertEol: true,
-    scrollback: 30000,
+    scrollback: isMobileViewport() ? 10000 : 30000,
     allowProposedApi: true,
     fontFamily: '"D2Coding", "Cascadia Mono", Menlo, Consolas, monospace',
     fontSize: isMobileViewport() ? 16 : 15,
@@ -420,6 +420,7 @@ function connectSocket(entry, session, attempt = 0) {
   const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    if (attempt > 0) showHint('', 0); // reconnected — clear the offline hint
     attempt = 0;
     ws.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
   };
@@ -473,6 +474,10 @@ function connectSocket(entry, session, attempt = 0) {
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
     if (live.get(session.id) !== entry) return;
+    // Connection-loss visibility (audit V1): without this, input typed
+    // while disconnected vanished silently. Hint shows until the next
+    // successful open.
+    showHint('连接断开，正在重连…', 10000);
     const delay = Math.min(5000, 250 * 2 ** attempt);
     setTimeout(() => connectSocket(entry, session, attempt + 1), delay);
   };
@@ -973,8 +978,18 @@ function connectChatSocket(entry, session, attempt = 0) {
     try { msg = JSON.parse(event.data); } catch { return; }
     if (msg.type === 'snapshot') {
       resetChat(entry);
-      for (const it of msg.transcript) renderChatItem(entry, it);
-      const last = msg.transcript[msg.transcript.length - 1];
+      // Chunked replay (audit V5): 4000 items inserted synchronously is a
+      // multi-hundred-ms main-thread block on reconnect; 100/frame lets the
+      // browser breathe.
+      const items = msg.transcript || [];
+      let i = 0;
+      const step = () => {
+        const end = Math.min(i + 100, items.length);
+        for (; i < end; i++) renderChatItem(entry, items[i]);
+        if (i < items.length) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+      const last = items[items.length - 1];
       const done = !last || last.t === 'result' || last.t === 'exit' || last.t === 'error';
       setChatPending(entry, !done);
     } else if (msg.type === 'agent') {
@@ -986,6 +1001,7 @@ function connectChatSocket(entry, session, attempt = 0) {
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
     if (live.get(session.id) !== entry) return;
+    showHint('连接断开，正在重连…', 10000);
     const delay = Math.min(5000, 250 * 2 ** attempt);
     setTimeout(() => connectChatSocket(entry, session, attempt + 1), delay);
   };
@@ -1013,6 +1029,18 @@ function renderChatItem(entry, item) {
   const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
   const r = entry.render;
   const breakText = () => { r.curTextEl = null; r.curTextId = null; };
+
+  // DOM cap (audit V5): long agent sessions accumulate thousands of
+  // .chat-msg nodes — keep the newest CHAT_DOM_CAP, drop the oldest.
+  const CHAT_DOM_CAP = 1500;
+  if (entry.logEl.childElementCount > CHAT_DOM_CAP) {
+    const over = entry.logEl.childElementCount - CHAT_DOM_CAP;
+    for (let i = 0; i < over; i++) {
+      const first = entry.logEl.firstElementChild;
+      if (first && !first.classList.contains('tool-card')) first.remove();
+      else break;
+    }
+  }
 
   switch (item.t) {
     case 'system':
@@ -1047,8 +1075,20 @@ function renderChatItem(entry, item) {
         entry.logEl.appendChild(el);
         r.curTextEl = b;
         r.curTextId = item.id;
+        r.curTextBuf = '';
+        clearTimeout(r.curTextTimer); // flush any pending render of the old block
       }
-      r.curTextEl.insertAdjacentHTML('beforeend', renderMarkdown(item.text));
+      // Debounced full-block render (audit V5): deltas arrive token-wise and
+      // may split markdown syntax (```, **bold**, lists) — rendering each
+      // delta standalone leaves unclosed/glitched blocks. Accumulate the
+      // full text and re-render once 200ms passes without new deltas.
+      r.curTextBuf += item.text;
+      clearTimeout(r.curTextTimer);
+      r.curTextTimer = setTimeout(() => {
+        if (r.curTextEl) {
+          r.curTextEl.innerHTML = renderMarkdown(r.curTextBuf);
+        }
+      }, 200);
       break;
     }
     case 'thinking': {

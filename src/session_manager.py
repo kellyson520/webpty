@@ -435,6 +435,13 @@ class SessionManager:
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--permission-mode", perm_mode,
         ]
+        # Token-level streaming (audit V4): without this flag claude emits
+        # whole text blocks only; with it the same block arrives in partial
+        # chunks which the S3 delta-dedup turns into a live typewriter
+        # effect. Old claude versions exit on unknown flags — the
+        # _start_agent retry in _spawn_failed drops it once.
+        if session.get("tool") == "claude" and not session.get("_partial_off"):
+            argv.append("--include-partial-messages")
         resuming = bool(session.get("agent_session_id"))
         if resuming:
             argv += ["--resume", session["agent_session_id"]]
@@ -517,6 +524,18 @@ class SessionManager:
             session["pid"] = None
             session["turn_active"] = False
             _append_log(log_path, f"\r\n[webpty] agent exited code={code}\r\n")
+            # Compatibility downgrade (audit V4): old claude versions exit
+            # on --include-partial-messages. Retry once without the flag.
+            if (code != 0 and session.get("tool") == "claude"
+                    and session.get("_partial_off") is not True
+                    and not resuming):
+                _append_log(log_path,
+                            "[webpty] retrying without --include-partial-messages\r\n")
+                session["_partial_off"] = True
+                session["state"] = "idle"
+                self._emit("change", self._public(session))
+                await self.start(session["id"])
+                return
             if resuming and not state["got_init"]:
                 session["agent_session_id"] = None
                 self._persist()
@@ -632,7 +651,19 @@ class SessionManager:
             session["transcript"] = []
         if item.get("t") != "user":
             session["last_output_at"] = int(time.time() * 1000)
-        session["transcript"].append(item)
+        # Partial-stream merge (audit V4): token-level deltas for the same
+        # message id arrive in many chunks — replace the previous entry for
+        # (t=text, id) instead of appending, so AGENT_MAX_ITEMS isn't
+        # exhausted by one streaming message and the transcript stays
+        # canonical (final text per mid).
+        if item.get("t") == "text" and item.get("id"):
+            tr = session["transcript"]
+            if tr and tr[-1].get("t") == "text" and tr[-1].get("id") == item.get("id"):
+                tr[-1] = item
+            else:
+                tr.append(item)
+        else:
+            session["transcript"].append(item)
         if len(session["transcript"]) > AGENT_MAX_ITEMS:
             del session["transcript"][:len(session["transcript"]) - AGENT_MAX_ITEMS]
         self._emit("agentEvent", session["id"], item)

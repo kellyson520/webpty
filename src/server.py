@@ -43,6 +43,7 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 # Paths served with immutable long cache (vendor assets never change content).
 _VENDOR_PREFIXES = ("/vendor/",)
+_LOCK_FD = None  # single-instance flock fd (held in main)
 
 _CLAUDE_MTIME_TTL = 30.0  # claude history mtime cache TTL (seconds)
 
@@ -120,6 +121,8 @@ class Server:
         self._gzip_cache: dict[str, bytes] = {}  # static path -> compressed body
         self._gzip_cache_bytes = 0
         self._gzip_meta: dict[str, tuple[int, int]] = {}  # path -> (mtime_ns, size)
+        self._asset_hash_cache: dict[str, str] = {}  # /app.js -> sha256[:16]
+        self._asset_hash_meta: dict[str, tuple[int, int]] = {}
         # claude history mtime cache: key = abs project path, value =
         # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
         self._claude_mtime_cache: dict[str, tuple[float, float]] = {}
@@ -909,6 +912,21 @@ class Server:
         try:
             with open(full, "rb") as f:
                 st = os.fstat(f.fileno())
+                # ETag/304 (audit V6): weak etag from mtime+size costs
+                # nothing and answers hard refreshes (Ctrl+F5) without
+                # reading the whole 1.4MB woff2/app.js.
+                etag = f'"{st.st_size:x}-{st.st_mtime_ns:x}"'
+                inm = headers.get("if-none-match", "")
+                if inm and etag in inm.split(","):
+                    head = (
+                        "HTTP/1.1 304 Not Modified\r\n"
+                        f"ETag: {etag}\r\n"
+                        f"Cache-Control: {cache}\r\n"
+                        "\r\n"
+                    )
+                    writer.write(head.encode("latin-1"))
+                    await writer.drain()
+                    return
                 body = f.read()
         except OSError:
             raise HttpError(404, "Not found")
@@ -925,8 +943,16 @@ class Server:
             for asset in ("/app.js", "/styles.css"):
                 asset_path = os.path.join(self.pub, asset.lstrip("/"))
                 try:
-                    with open(asset_path, "rb") as _f:
-                        h = _hl.sha256(_f.read()).hexdigest()[:16]
+                    # Cache the hash by (mtime, size) — recomputing sha256 of
+                    # app.js on every index.html hit re-reads ~130KB.
+                    asset_st = os.stat(asset_path)
+                    asset_frozen = (asset_st.st_mtime_ns, asset_st.st_size)
+                    h = self._asset_hash_cache.get(asset)
+                    if h is None or self._asset_hash_meta.get(asset) != asset_frozen:
+                        with open(asset_path, "rb") as _f:
+                            h = _hl.sha256(_f.read()).hexdigest()[:16]
+                        self._asset_hash_cache[asset] = h
+                        self._asset_hash_meta[asset] = asset_frozen
                     body = body.replace(
                         f'href="{asset}"'.encode(),
                         f'href="{asset}?v={h}"'.encode())
@@ -943,6 +969,7 @@ class Server:
             f"Content-Type: {ctype}\r\n"
             f"Content-Length: {len(body)}\r\n"
             f"Cache-Control: {cache}\r\n"
+            f"ETag: {etag}\r\n"
             "Vary: Accept-Encoding\r\n"
         )
         if enc is not None:
@@ -1221,6 +1248,22 @@ async def main() -> None:
     config = load_config()
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")
+
+    # Single-instance lock (audit V3): two servers (e.g. a manual
+    # --port run beside systemd) would each spawn their own pty-host
+    # fighting over the Unix socket and overwrite config.json's session
+    # list. flock is advisory + atomic; released on process exit.
+    import fcntl
+    lock_path = os.path.join(os.path.dirname(config_path), "webpty.lock")
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("[webpty] another instance is already running — exiting", flush=True)
+        raise SystemExit(1)
+    global _LOCK_FD
+    _LOCK_FD = lock_fd
 
     from cost_tracker import CostTracker
     from db import Database

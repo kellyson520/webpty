@@ -351,6 +351,25 @@ class ServerIntegrationTest(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             conn.close()
 
+    def test_etag_304_not_modified(self):
+        # 首次带 ETag 响应;第二次 If-None-Match → 304 空 body。
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.request("GET", "/app.js")
+        resp = conn.getresponse()
+        resp.read()
+        self.assertEqual(resp.status, 200)
+        etag = resp.getheader("ETag")
+        self.assertTrue(etag)
+        conn.close()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.request("GET", "/app.js", headers={"If-None-Match": etag})
+        resp = conn.getresponse()
+        body = resp.read()
+        self.assertEqual(resp.status, 304)
+        self.assertEqual(body, b"")
+        conn.close()
+
     # --- WebSocket -----------------------------------------------------------
     async def _ws_roundtrip(self, sid, payload):
         reader, writer = await asyncio_open_conn(self.port)
