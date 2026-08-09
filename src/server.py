@@ -276,10 +276,17 @@ class Server:
         if not is_path_under_roots(cwd, self._effective_roots()):
             raise HttpError(400, "Path is outside registered roots")
         name = str(body.get("name") or os.path.basename(cwd)).strip() or os.path.basename(cwd)
+        perm = body.get("permissionMode")
+        if perm is not None:
+            perm = str(perm)
+            if perm not in ("bypassPermissions", "acceptEdits", "plan",
+                            "default", "dontAsk", "fullAuto", "noAuto"):
+                raise HttpError(400, f"Unknown permissionMode: {perm}")
         return {
             "name": name, "cwd": cwd, "tool": tool,
             "args": str(body.get("args") or ""),
             "autostart": bool(body.get("autostart")),
+            "permissionMode": perm,
         }
 
     # --- HTTP request dispatch --------------------------------------------------
@@ -539,7 +546,10 @@ class Server:
             return await self._send_json(writer, status, res, headers)
 
         if path == "/api/sessions" and method == "GET":
-            return await self._send_json(writer, 200, self.sessions.list(), headers)
+            limit_q = (query.get("limit") or [""])[0]
+            limit = int(limit_q) if limit_q.isdigit() else None
+            return await self._send_json(
+                writer, 200, self.sessions.list(limit), headers)
 
         if path == "/api/sessions/order" and method == "PUT":
             body = await self._read_json(reader, headers)
@@ -616,6 +626,34 @@ class Server:
             period = (query.get("period") or ["day"])[0]
             return await self._send_json(
                 writer, 200, await self.cost.summary(period), headers)
+        if path == "/api/cost/export" and method == "GET":
+            # Audit 4.1: CSV export with optional absolute date range
+            # (from/to as YYYY-MM-DD), else the period relative window.
+            period = (query.get("period") or ["day"])[0]
+            frm = (query.get("from") or [""])[0]
+            to = (query.get("to") or [""])[0]
+            rows = await self.cost.export_rows(period, frm or None, to or None)
+            import io as _io, csv as _csv
+            buf = _io.StringIO()
+            w = _csv.writer(buf)
+            w.writerow(["ts", "session_id", "tool", "model",
+                        "tokens_in", "tokens_out", "cost_usd", "source"])
+            for r in rows:
+                w.writerow([r.get("ts"), r.get("session_id"), r.get("tool"),
+                            r.get("model"), r.get("tokens_in"), r.get("tokens_out"),
+                            r.get("cost"), r.get("source")])
+            data = buf.getvalue().encode("utf-8")
+            head = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/csv; charset=utf-8\r\n"
+                "Content-Disposition: attachment; filename=\"webpty-cost.csv\"\r\n"
+                f"Content-Length: {len(data)}\r\n"
+                "\r\n"
+            )
+            writer.write(head.encode("latin-1"))
+            writer.write(data)
+            await writer.drain()
+            return
         m = re.match(r"^/api/cost/by-(project|tool|model|session)$", path)
         if m and method == "GET":
             period = (query.get("period") or ["day"])[0]
@@ -1111,7 +1149,21 @@ class Server:
             hb_task = asyncio.get_event_loop().create_task(_heartbeat())
 
             if is_agent:
-                outbox.send(json.dumps({"type": "snapshot", "transcript": self.sessions.transcript(sid)}), binary=False)
+                # Audit 8.1: a 4000-item transcript can be MBs — one frame
+                # blocked the event loop (json.dumps) and the client's parse
+                # (single JSON.parse long task). Chunk to ~256KB frames and
+                # serialize in the executor.
+                transcript = self.sessions.transcript(sid)
+                loop = asyncio.get_event_loop()
+                encoded = await loop.run_in_executor(
+                    None, lambda: json.dumps(transcript))
+                CHUNK = 256 * 1024
+                for i in range(0, len(encoded), CHUNK):
+                    outbox.send(json.dumps({
+                        "type": "snapshot",
+                        "chunk": encoded[i:i + CHUNK],
+                        "done": i + CHUNK >= len(encoded),
+                    }), binary=False)
                 self.sessions.on("agentEvent", on_agent_event)
             else:
                 recent = self.sessions.recent_output(sid)

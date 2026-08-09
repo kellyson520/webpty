@@ -14,6 +14,19 @@ from price_table import cost_for
 from usage_parser import parse_usage
 
 
+def _ts_from_date(date_str: str) -> float:
+    """YYYY-MM-DD → epoch seconds (UTC)."""
+    import datetime
+    y, m, d = (int(x) for x in date_str.split("-")[:3])
+    return datetime.datetime(y, m, d, tzinfo=datetime.timezone.utc).timestamp()
+
+
+def _period_start(period: str) -> float:
+    """Relative window start: day = 24h ago, week = 7d, month = 30d."""
+    import time
+    return time.time() - {"day": 86400, "week": 604800}.get(period, 2592000)
+
+
 class CostTracker:
     def __init__(self, db, config: dict) -> None:
         self.db = db
@@ -149,6 +162,35 @@ class CostTracker:
 
     async def grouped(self, group: str, period: str) -> list[dict]:
         return await self.db.usage_grouped(group, period)
+
+    async def export_rows(self, period: str, frm: str | None = None,
+                          to: str | None = None) -> list[dict]:
+        """Raw usage rows for CSV export; optional absolute from/to
+        (YYYY-MM-DD) override the relative period window (audit 4.1)."""
+        start = frm
+        if start:
+            start = _ts_from_date(start)
+        end = to
+        if end:
+            end = _ts_from_date(end) + 86400  # inclusive end-of-day
+        sql = ("SELECT ts, session_id, tool, model, tokens_in, tokens_out,"
+               " cost, source FROM token_usage")
+        conds: list[str] = []
+        params: list = []
+        if start:
+            conds.append("ts >= ?")
+            params.append(start)
+        if end:
+            conds.append("ts < ?")
+            params.append(end)
+        if not start and not end:
+            start = _period_start(period)
+            conds.append("ts >= ?")
+            params.append(start)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY ts"
+        return await self.db.query(sql, tuple(params))
 
     async def alerts(self) -> list[dict]:
         over = await self.over_budget()

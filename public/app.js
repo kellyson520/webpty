@@ -199,6 +199,22 @@ function applySessionState(updated) {
   renderTabs();
 }
 
+// Chunked replay (audit V5/8.1): 4000 items inserted synchronously is a
+// multi-hundred-ms main-thread block on reconnect; 100/frame lets the
+// browser breathe. Shared by single-frame and chunked snapshots.
+function replaySnapshot(entry, items) {
+  let i = 0;
+  const step = () => {
+    const end = Math.min(i + 100, items.length);
+    for (; i < end; i++) renderChatItem(entry, items[i]);
+    if (i < items.length) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+  const last = items[items.length - 1];
+  const done = !last || last.t === 'result' || last.t === 'exit' || last.t === 'error';
+  setChatPending(entry, !done);
+}
+
 // On-demand addon loading (audit 5.1): the canvas/unicode11/web-links
 // addons are no longer blocking <script> tags; they load lazily and the
 // loader retries the install once the module arrives.
@@ -302,6 +318,19 @@ const JUNG_COMBINE = { 'ㅗㅏ':'ㅘ', 'ㅗㅐ':'ㅙ', 'ㅗㅣ':'ㅚ', 'ㅜㅓ':
 const JONG_COMBINE = { 'ㄱㅅ':'ㄳ', 'ㄴㅈ':'ㄵ', 'ㄴㅎ':'ㄶ', 'ㄹㄱ':'ㄺ', 'ㄹㅁ':'ㄻ', 'ㄹㅂ':'ㄼ', 'ㄹㅅ':'ㄽ', 'ㄹㅌ':'ㄾ', 'ㄹㅍ':'ㄿ', 'ㄹㅎ':'ㅀ', 'ㅂㅅ':'ㅄ' };
 const JONG_SPLIT = Object.fromEntries(Object.entries(JONG_COMBINE).map(([k, v]) => [v, k]));
 function isCompatJamo(c) { return c >= 'ㄱ' && c <= 'ㆎ'; }
+// Audit 1.1: some Android IMEs (GBoard variants) send MODERN Hangul Jamo
+// (U+1100-11FF) instead of compatibility jamo. Map them to the compat
+// forms the composer already understands.
+const MODERN_TO_COMPAT = {};
+(function () {
+  const modernCho = '\u1100\u1101\u1102\u1103\u1104\u1105\u1106\u1107\u1108\u1109\u110A\u110B\u110C\u110D\u110E\u110F\u1110\u1111\u1112';
+  const modernJung = '\u1161\u1162\u1163\u1164\u1165\u1166\u1167\u1168\u1169\u116A\u116B\u116C\u116D\u116E\u116F\u1170\u1171\u1172\u1173\u1174\u1175';
+  const modernJong = '\u11A8\u11A9\u11AA\u11AB\u11AC\u11AD\u11AE\u11AF\u11B0\u11B1\u11B2\u11B3\u11B4\u11B5\u11B6\u11B7\u11B8\u11B9\u11BA\u11BB\u11BC\u11BD\u11BE\u11BF\u11C0\u11C1\u11C2';
+  for (let i = 0; i < modernCho.length; i++) MODERN_TO_COMPAT[modernCho[i]] = CHO[i];
+  for (let i = 0; i < modernJung.length; i++) MODERN_TO_COMPAT[modernJung[i]] = JUNG[i];
+  for (let i = 0; i < modernJong.length; i++) MODERN_TO_COMPAT[modernJong[i]] = JONG[i + 1];
+})();
+function normalizeJamo(c) { return MODERN_TO_COMPAT[c] || c; }
 
 function makeHangulComposer(send) {
   let cho = -1, jung = -1, jong = 0; // jong=0 means none
@@ -325,7 +354,9 @@ function makeHangulComposer(send) {
 
   return {
     feed(text) {
-      for (const ch of text) {
+      for (const ch0 of text) {
+        // Audit 1.1: normalize modern jamo (U+1100-11FF) to compat forms.
+        const ch = normalizeJamo(ch0);
         if (!isCompatJamo(ch)) {
           // Non-jamo (composed Hangul, ASCII, control). Finalize and pass.
           commit();
@@ -501,7 +532,17 @@ function connectSocket(entry, session, attempt = 0) {
     // aren't expected. Gating on imeDepth caused a race on iOS where the next
     // syllable's compositionstart raised imeDepth before the previous syllable's
     // onData fired — dropping all but the last syllable of each word.
-    entry.term.onData((data) => entry.composer.feed(data));
+    // Audit 1.2: TUI sessions (vim, reasonix...) bypass the composer — its
+    // DEL-and-resend merge would fight the TUI's own backspace handling and
+    // corrupt input; pass through raw.
+    const session = sessions.find((s) => s.id === entry.sessionId) || sessions.find((s) => s.id === entry.id);
+    if (session && TUI_TOOLS.has(session.tool)) {
+      entry.term.onData((data) => {
+        if (entry.socket?.readyState === WebSocket.OPEN) entry.socket.send(data);
+      });
+    } else {
+      entry.term.onData((data) => entry.composer.feed(data));
+    }
   }
 }
 
@@ -557,7 +598,7 @@ function buildSessionPage(session) {
   const composeSubmit = page.querySelector('.compose-submit');
   const scrollBottomBtn = page.querySelector('.scroll-bottom-btn');
 
-  const entry = { page, host, composeInput, composeSubmit, scrollBottomBtn, term: null, fit: null, socket: null };
+  const entry = { page, host, composeInput, composeSubmit, scrollBottomBtn, term: null, fit: null, socket: null, id: session.id };
   live.set(session.id, entry);
 
   // Jump-to-bottom button: tap to snap xterm scrollback to the latest line.
@@ -962,7 +1003,7 @@ function buildChatPage(session) {
 
 function resetChat(entry) {
   entry.logEl.innerHTML = '';
-  entry.render = { curTextEl: null, curTextId: null, toolCards: new Map(), systemShown: false, curTextBuf: '', curTextRenderedLen: 0 };
+  entry.render = { curTextEl: null, curTextId: null, toolCards: new Map(), systemShown: false, curTextBuf: '', curTextRenderedLen: 0, _snapBuf: '' };
   setChatPending(entry, false);
 }
 
@@ -984,21 +1025,22 @@ function connectChatSocket(entry, session, attempt = 0) {
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
     if (msg.type === 'snapshot') {
+      if (msg.chunk !== undefined) {
+        // Chunked snapshot (audit 8.1): accumulate string chunks until
+        // done, then parse ONCE (single JSON.parse for the whole
+        // transcript) and replay.
+        if (!r._snapBuf) { r._snapBuf = ''; resetChat(entry); }
+        r._snapBuf += msg.chunk;
+        if (!msg.done) return;
+        let items = [];
+        try { items = JSON.parse(r._snapBuf); } catch { r._snapBuf = ''; return; }
+        r._snapBuf = '';
+        replaySnapshot(entry, items);
+        return;
+      }
       resetChat(entry);
-      // Chunked replay (audit V5): 4000 items inserted synchronously is a
-      // multi-hundred-ms main-thread block on reconnect; 100/frame lets the
-      // browser breathe.
-      const items = msg.transcript || [];
-      let i = 0;
-      const step = () => {
-        const end = Math.min(i + 100, items.length);
-        for (; i < end; i++) renderChatItem(entry, items[i]);
-        if (i < items.length) requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-      const last = items[items.length - 1];
-      const done = !last || last.t === 'result' || last.t === 'exit' || last.t === 'error';
-      setChatPending(entry, !done);
+      replaySnapshot(entry, msg.transcript || []);
+      return;
     } else if (msg.type === 'agent') {
       renderChatItem(entry, msg.item);
     } else if (msg.type === 'state') {
@@ -2238,7 +2280,9 @@ function buildAddPage() {
           tool: form.get('tool'),
           args: '',
           autostart: true,
-          start: true
+          start: true,
+          // Audit 2.1: per-session permission mode (empty = tool default).
+          permissionMode: form.get('permissionMode') || undefined
         })
       });
       hint.textContent = '';
@@ -2249,6 +2293,14 @@ function buildAddPage() {
       hint.textContent = err.message;
     }
   };
+  // Show the permission picker only for agent-engine tools.
+  const permField = page.querySelector('#perm-field');
+  const updatePermVisibility = () => {
+    const t = (config && config.tools) ? config.tools[selTool.value] : null;
+    permField.hidden = !(t && t.engine === 'agent');
+  };
+  selTool.addEventListener('change', updatePermVisibility);
+  updatePermVisibility();
   return { page, project: selProject, tool: selTool };
 }
 
@@ -2505,11 +2557,37 @@ function showFatal(msg) {
       + 'background:#2a0f0f;color:#ff8a8a;font:12px/1.5 monospace;'
       + 'padding:8px 10px;border:1px solid #a33;border-radius:6px;'
       + 'white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow:auto;';
+    const close = document.createElement('button');
+    close.textContent = '× 清空';
+    close.style.cssText = 'position:absolute;top:4px;right:6px;background:none;'
+      + 'border:none;color:#ff8a8a;font-size:12px;cursor:pointer;';
+    close.onclick = () => { el.innerHTML = ''; el.hidden = true; };
+    el.appendChild(close);
     document.body.appendChild(el);
+    el.hidden = false;
+  }
+  const text = '⚠ ' + String(msg).slice(0, 500);
+  // Audit 6.1: dedupe identical messages (merge into a counter), cap at 50
+  // lines so an error storm can't flood the bar, and the × button clears.
+  const existing = el.querySelectorAll('.fatal-line');
+  for (const line of existing) {
+    if (line.dataset.msg === text) {
+      const n = (parseInt(line.dataset.count, 10) || 1) + 1;
+      line.dataset.count = String(n);
+      line.textContent = `${text} (×${n})`;
+      return;
+    }
+  }
+  if (existing.length >= 50) {
+    el.removeChild(el.querySelector('.fatal-line')); // drop oldest
   }
   const line = document.createElement('div');
-  line.textContent = '⚠ ' + String(msg).slice(0, 500);
+  line.className = 'fatal-line';
+  line.dataset.msg = text;
+  line.dataset.count = '1';
+  line.textContent = text;
   el.appendChild(line);
+  el.hidden = false;
 }
 
 // ---- Notification center panel (ext) ----
@@ -2559,8 +2637,19 @@ notifyBackdrop.addEventListener('click', (ev) => {
 document.getElementById('notify-rule-add').onclick = async () => {
   try {
     const type = document.getElementById('notify-rule-type').value;
+    // Audit 3.1: matcher_json is now editable in the UI; validate it as
+    // an object before sending (the server also tolerates bad JSON).
+    const matcherRaw = document.getElementById('notify-rule-matcher').value.trim();
+    let matcher = '{}';
+    if (matcherRaw) {
+      const parsed = JSON.parse(matcherRaw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('matcher 必须是 JSON 对象');
+      }
+      matcher = JSON.stringify(parsed);
+    }
     await api('/api/notify/rules', { method: 'POST', body: JSON.stringify({
-      name: 'rule-' + Date.now(), event_type: type, matcher_json: '{}',
+      name: 'rule-' + Date.now(), event_type: type, matcher_json: matcher,
       action: 'email', level: 'warn', quiet_start: '', quiet_end: '', enabled: 1 }) });
     refreshNotifyPanel();
   } catch (e) {
@@ -2630,6 +2719,25 @@ document.getElementById('cost-reconcile').onclick = async () => {
     refreshCostPanel();
   } catch (e) {
     alert(e.message);
+  }
+};
+
+// Audit 4.1: CSV export of the current period (uses the active period
+// selector; download via <a download> like migrate packages).
+document.getElementById('cost-export').onclick = async () => {
+  try {
+    const period = document.getElementById('cost-period').value;
+    const res = await fetch(`/api/cost/export?period=${period}`);
+    if (!res.ok) throw new Error((await res.json()).error || res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `webpty-cost-${period}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) {
+    alert('导出失败: ' + e.message);
   }
 };
 

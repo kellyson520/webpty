@@ -49,9 +49,18 @@ class Notifier:
         dedup_key = f"{event.get('session_id')}|{event.get('type')}|{level}"
         if await self.db.dedup_recent(dedup_key, DEDUP_WINDOW_S):
             return
+        had_rules = bool(matched)
         for rule in matched:
-            if quiet_hours_active(rule):
-                return
+            # Audit 3.3: quiet hours used to drop the WHOLE event when any
+            # matched rule was quiet — even email actions from other rules.
+            # Only skip the email send for quiet rules; the notification
+            # still lands in the center.
+            if quiet_hours_active(rule) and rule.get("action") == "email":
+                matched = [r for r in matched if r is not rule]
+        # All matched rules were email-only AND quiet → skip entirely.
+        # (No rules at all still records the warn notification below.)
+        if had_rules and not matched:
+            return
         nid = await self.db.add_notification({
             "event_type": event.get("type", "unknown"),
             "level": level,

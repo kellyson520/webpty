@@ -149,8 +149,14 @@ class SessionManager:
             print(f"[webpty] pty-host list failed: {err}", flush=True)
         self.host_ready = True
 
-    def list(self) -> list[dict]:
-        return [self._public(s) for s in self.sessions.values()]
+    def list(self, limit: int | None = None) -> list[dict]:
+        """Session summaries (audit 7.1): args/logPath can be large; the
+        polling list only needs state/name/tool/busy. Full detail via
+        public(sid)."""
+        items = [self._public(s) for s in self.sessions.values()]
+        if limit is not None and limit > 0:
+            items = items[:limit]
+        return items
 
     def public(self, sid: str) -> dict | None:
         s = self.sessions.get(sid)
@@ -166,11 +172,13 @@ class SessionManager:
         return s["recent_buf"].snapshot()
 
     def create(self, *, name: str, cwd: str, tool: str, args: str = "",
-               autostart: bool = False) -> dict:
+               autostart: bool = False,
+               permissionMode: str | None = None) -> dict:
         sid = str(uuid.uuid4())
         session = self._inflate({
             "id": sid, "name": name or os.path.basename(cwd) or cwd,
             "cwd": cwd, "tool": tool, "args": args, "autostart": autostart,
+            "permissionMode": permissionMode,
         })
         self.sessions[sid] = session
         self._persist()
@@ -430,7 +438,10 @@ class SessionManager:
         if session.get("state") == "running":
             return session
         command = resolve_command(tool.get("command"))
-        perm_mode = tool.get("permissionMode") or "bypassPermissions"
+        # Audit 2.1: per-session permission mode overrides the tool default
+        # (created via the new-session form / session API).
+        perm_mode = (session.get("permissionMode")
+                     or tool.get("permissionMode") or "bypassPermissions")
         argv = [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--permission-mode", perm_mode,
@@ -1074,6 +1085,7 @@ class SessionManager:
             "cwd": stored.get("cwd"),
             "tool": stored.get("tool"),
             "args": stored.get("args") or "",
+            "permissionMode": stored.get("permissionMode"),
             "autostart": bool(stored.get("autostart")),
             # Serializes start/stop/remove per session (Issue 3: no races
             # where stop kills a freshly restarted process).
@@ -1115,7 +1127,8 @@ class SessionManager:
             "name": session.get("name"),
             "cwd": session.get("cwd"),
             "tool": session.get("tool"),
-            "args": session.get("args"),
+            "args": (session.get("args") or "")[:200],
+            "permissionMode": session.get("permissionMode"),
             "autostart": session.get("autostart"),
             "state": session.get("state"),
             "pid": session.get("pid"),

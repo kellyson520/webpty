@@ -562,5 +562,27 @@ async def asyncio_open_conn(port):
 
 
 
+class XtermPatchTest(unittest.TestCase):
+    """Audit 5.1: the vendored xterm 5.5.0 carries a manual touch patch;
+    an unpatched upgrade would silently regress mobile scrolling. Assert the
+    patched byte patterns so CI/upgrades fail loudly."""
+
+    def test_xterm_touch_patch_preserved(self):
+        path = os.path.join(_ROOT, "public", "vendor", "xterm", "lib", "xterm.js")
+        with open(path, "rb") as f:
+            src = f.read().decode("utf-8", errors="replace")
+        # 1) touchmove unconditionally scrolls (patched form).
+        self.assertIn(
+            'touchmove",(e=>{return this.viewport.handleTouchMove(e)?void 0:this.cancel(e)}),{passive:!1})',
+            src)
+        # 2) touchstart never cancels (patched form: no areMouseEventsActive gate).
+        self.assertIn(
+            'touchstart",(e=>{this.viewport.handleTouchStart(e)}),{passive:!0})',
+            src)
+        # 3) PATCHES.md documents the change.
+        self.assertTrue(os.path.isfile(
+            os.path.join(_ROOT, "public", "vendor", "PATCHES.md")))
+
+
 if __name__ == "__main__":
     unittest.main()
