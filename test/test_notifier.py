@@ -39,6 +39,12 @@ class NotifierTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertEqual((await self.db.list_notifications(1))["total"], 1)
 
+    async def test_removed_event_not_recorded(self):
+        """removed(删标签页)事件不落库 — 防删标签页即发垃圾通知。"""
+        self.n.handle_event(self.event(type="removed", state="removed"))
+        await asyncio.sleep(0.1)
+        self.assertEqual((await self.db.list_notifications(1))["total"], 0)
+
     async def test_rule_suppressed_by_quiet_hours(self):
         await self.db.upsert_rule({
             "name": "q", "event_type": "failed", "matcher_json": "{}",

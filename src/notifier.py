@@ -33,6 +33,10 @@ class Notifier:
         task.add_done_callback(self._tasks.discard)
 
     async def _process(self, event: dict) -> None:
+        # removed(删标签页)不产生通知:matched 为空只影响 level/邮件,
+        # 落库仍会发生 → 需显式过滤,否则 send_pending 会补发邮件。
+        if event.get("type") == "removed":
+            return
         rules = await self.db.list_rules()
         matched = [r for r in rules if r.get("enabled")
                    and match_rule(r, event)]

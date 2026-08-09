@@ -118,6 +118,17 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertIsNone(self.sm.get(s["id"]))
 
+    async def test_remove_emits_session_event_removed(self):
+        """remove() 发 session_event type=removed(cost_tracker 清理依赖它)。"""
+        s = self.sm.create(name="t", cwd="/tmp", tool="bash")
+        events = []
+        self.sm.on("session_event", lambda ev: events.append(ev))
+        result = await self.sm.remove(s["id"])
+        self.assertTrue(result)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "removed")
+        self.assertEqual(events[0]["session_id"], s["id"])
+
     def test_reorder_keeps_valid(self):
         a = self.sm.create(name="a", cwd="/tmp/a", tool="bash")
         b = self.sm.create(name="b", cwd="/tmp/b", tool="bash")
