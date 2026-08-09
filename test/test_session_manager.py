@@ -375,6 +375,25 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e.get("type") == "stalled" and e.get("session_id") == s1["id"] for e in events))
         self.assertFalse(any(e.get("session_id") == s2["id"] for e in events))
 
+    def test_agent_text_incremental_dedup(self):
+        # 同 mid 的文本块只推增量（S3）——重复消息不重复渲染。
+        events: list[dict] = []
+        self.sm.on("agentEvent", lambda sid, item: events.append(item))
+        s1 = self.sm.create(name="dup", cwd="/a", tool="bash")
+        evt = json.dumps({"type": "assistant", "message": {
+            "id": "m1", "content": [{"type": "text", "text": "hello "}]}})
+        self.assertFalse(self.sm._handle_agent_line(s1, evt))
+        evt2 = json.dumps({"type": "assistant", "message": {
+            "id": "m1", "content": [{"type": "text", "text": "hello world"}]}})
+        self.assertFalse(self.sm._handle_agent_line(s1, evt2))
+        texts = [e["text"] for e in events if e.get("t") == "text"]
+        self.assertEqual(texts, ["hello ", "world"])  # 只推增量
+        # 新 mid 推全量
+        evt3 = json.dumps({"type": "assistant", "message": {
+            "id": "m2", "content": [{"type": "text", "text": "fresh"}]}})
+        self.assertFalse(self.sm._handle_agent_line(s1, evt3))
+        self.assertEqual(
+            [e["text"] for e in events if e.get("t") == "text"][-1], "fresh")
 
 
 class NormalizeToolResultTest(unittest.TestCase):

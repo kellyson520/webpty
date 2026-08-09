@@ -437,7 +437,12 @@ function connectSocket(entry, session, attempt = 0) {
             entry.term.reset();
             if (msg.data) {
               const bin = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
-              entry.term.write(bin);
+              // Chunked write (audit F1): a 128KB snapshot parsed in one
+              // term.write() is a ~50-100ms main-thread task; 8KB chunks
+              // let the browser yield between parses.
+              for (let off = 0; off < bin.length; off += 8192) {
+                entry.term.write(bin.subarray(off, off + 8192));
+              }
             }
           } catch {}
           return;

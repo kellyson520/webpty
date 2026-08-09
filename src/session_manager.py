@@ -571,7 +571,20 @@ class SessionManager:
             mid = (evt.get("message") or {}).get("id")
             for block in blocks:
                 if block.get("type") == "text":
-                    self._push_agent(session, {"t": "text", "id": mid, "text": block.get("text") or ""})
+                    text = block.get("text") or ""
+                    # Incremental dedup (audit S3): claude may emit the same
+                    # message id again with a longer/equal text (retry or
+                    # chunked stream). Pushing the FULL text each time makes
+                    # the frontend append duplicates. Only push the delta
+                    # past the previous text for this id; reset on shorter.
+                    prev = session.get("_agent_text", {}).get(mid, "")
+                    if text.startswith(prev) and text != prev:
+                        delta = text[len(prev):]
+                        session.setdefault("_agent_text", {})[mid] = text
+                        self._push_agent(session, {"t": "text", "id": mid, "text": delta})
+                    elif text != prev:
+                        session.setdefault("_agent_text", {})[mid] = text
+                        self._push_agent(session, {"t": "text", "id": mid, "text": text})
                 elif block.get("type") == "thinking":
                     self._push_agent(session, {"t": "thinking", "id": mid, "text": block.get("thinking") or ""})
                 elif block.get("type") == "tool_use":
@@ -866,7 +879,11 @@ class SessionManager:
         self._restart_counts[key] = n
         self._stall_reported.pop(key, None)  # fresh run → re-arm stall watch
         loop = asyncio.get_event_loop()
-        loop.call_later(backoff, lambda: asyncio.create_task(self.start(key)))
+        # Exponential backoff (audit S1): backoff, 2x, 4x, ... — a fixed 10s
+        # burned all 3 retries in 30s against a transient failure (reasonix
+        # global lock, API rate limit). 10/30/90s covers a wider window.
+        wait = backoff * (2 ** (n - 1))
+        loop.call_later(wait, lambda: asyncio.create_task(self.start(key)))
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False
