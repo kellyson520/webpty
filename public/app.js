@@ -199,6 +199,38 @@ function applySessionState(updated) {
   renderTabs();
 }
 
+// On-demand addon loading (audit 5.1): the canvas/unicode11/web-links
+// addons are no longer blocking <script> tags; they load lazily and the
+// loader retries the install once the module arrives.
+const _addonPromises = {};
+function ensureAddons(term) {
+  const load = (globalKey, url, install) => {
+    if (window[globalKey]) { install(); return; }
+    if (!_addonPromises[url]) {
+      _addonPromises[url] = new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.defer = true;
+        s.onload = () => resolve();
+        s.onerror = () => resolve(); // degraded mode: feature stays off
+        document.head.appendChild(s);
+      });
+    }
+    _addonPromises[url].then(() => {
+      if (window[globalKey]) install();
+    });
+  };
+  load('Unicode11Addon', '/vendor/xterm-unicode11/lib/addon-unicode11.js', () => {
+    try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = '11'; } catch {}
+  });
+  load('WebLinksAddon', '/vendor/xterm-web-links/lib/addon-web-links.js', () => {
+    try { term.loadAddon(new WebLinksAddon.WebLinksAddon((ev, uri) => window.open(uri, '_blank', 'noopener'))); } catch {}
+  });
+  load('CanvasAddon', '/vendor/xterm-canvas/lib/addon-canvas.js', () => {
+    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch {}
+  });
+}
+
 function makeTerminal(session, host) {
   const isTUI = TUI_TOOLS.has(session.tool);
   const term = new Terminal({
@@ -222,16 +254,7 @@ function makeTerminal(session, host) {
   // expandSelectionToLogicalLine re-sets the flag *after* calling selectLines,
   // so its own synchronous event clears here first, then the flag is restored.
   try { term.onSelectionChange?.(() => tripleClickTerms.delete(term)); } catch {}
-  // Unicode 11 width tables — better CJK / emoji cell-width agreement so
-  // box-drawing tables line up.
-  if (window.Unicode11Addon?.Unicode11Addon) {
-    term.loadAddon(new Unicode11Addon.Unicode11Addon());
-    try { term.unicode.activeVersion = '11'; } catch {}
-  }
-  // Make http(s) URLs in terminal output clickable (open in a new tab)
-  if (window.WebLinksAddon?.WebLinksAddon) {
-    term.loadAddon(new WebLinksAddon.WebLinksAddon((ev, uri) => window.open(uri, '_blank', 'noopener')));
-  }
+  ensureAddons(term);
   // Ctrl+C / Cmd+C copies the selection (when there is one) instead of sending
   // SIGINT. With no selection, let it fall through to the PTY as usual.
   // F5 / Ctrl+R: hand back to the browser (page refresh) instead of swallowing.
@@ -251,9 +274,6 @@ function makeTerminal(session, host) {
   term.open(host);
   // Canvas renderer draws box-drawing/block glyphs itself (customGlyphs), so
   // table borders connect with no inter-row gaps. Load after open().
-  if (window.CanvasAddon?.CanvasAddon) {
-    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch {}
-  }
   fit.fit();
   return { term, fit };
 }

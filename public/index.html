@@ -376,11 +376,10 @@
       </div>
     </div>
 
-    <script src="/vendor/xterm/lib/xterm.js"></script>
-    <script src="/vendor/xterm-fit/lib/addon-fit.js"></script>
-    <script src="/vendor/xterm-web-links/lib/addon-web-links.js"></script>
-    <script src="/vendor/xterm-canvas/lib/addon-canvas.js"></script>
-    <script src="/vendor/xterm-unicode11/lib/addon-unicode11.js"></script>
-    <script src="/app.js"></script>
+    <!-- Core libs: defer keeps parsing non-blocking while preserving order.
+         Addons (canvas/unicode11/web-links) load on demand in makeTerminal. -->
+    <script defer src="/vendor/xterm/lib/xterm.js"></script>
+    <script defer src="/vendor/xterm-fit/lib/addon-fit.js"></script>
+    <script defer src="/app.js"></script>
   </body>
 </html>
