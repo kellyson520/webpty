@@ -69,11 +69,25 @@ def parse_multipart(body: bytes, boundary: str) -> tuple[str | None, bytes, str]
     themselves end in \r or \n survive byte-for-byte.
     """
     delim = b"--" + boundary.encode()
-    segs = body.split(delim)
     filename = None
     file_bytes = b""
     mode = "merge"
-    for seg in segs:
+    # 索引化扫描:用 find 逐段定位分隔符并切片,避免 body.split(delim)
+    # 对整段 body 的全量拷贝(大文件上传时 ~3x 内存峰值)。语义与
+    # split 逐段处理一致:段 = delim 之后到下一个 delim 之前。
+    pos = 0
+    while True:
+        start = body.find(delim, pos)
+        if start == -1:
+            break
+        seg_start = start + len(delim)
+        end = body.find(delim, seg_start)
+        if end == -1:
+            seg = body[seg_start:]
+            pos = len(body)
+        else:
+            seg = body[seg_start:end]
+            pos = end
         if b"\r\n\r\n" not in seg:
             continue
         head, _, content = seg.partition(b"\r\n\r\n")

@@ -189,6 +189,22 @@ class MigratorTest(unittest.IsolatedAsyncioTestCase):
         res = await self.m.import_package(path, "merge")
         self.assertEqual(res["status"], "error")
 
+    async def test_import_rejects_non_utf8_package(self):
+        """manifest/state 含非法 UTF-8 时返回 invalid package,不 500。"""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, data in (("manifest.json", b"\xff\xfe\x00"),
+                               ("state.json", b'{"config": {}}')):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+        path = os.path.join(self.tmp, "bad-utf8.tar.gz")
+        with open(path, "wb") as f:
+            f.write(buf.getvalue())
+        res = await self.m.import_package(path, "merge")
+        self.assertEqual(res, {"status": "error",
+                               "message": "invalid package", "mode": "merge"})
+
     async def test_clone_rejects_path_outside_backups(self):
         outside = os.path.join(self.tmp, "outside.tar.gz")
         with open(outside, "wb") as f:

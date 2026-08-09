@@ -192,7 +192,8 @@ class Migrator(WorkerInterface):
                     return None
                 manifest = json.loads(man_raw.read())
                 state = json.loads(st_raw.read())
-        except (OSError, tarfile.TarError, json.JSONDecodeError, KeyError):
+        except (OSError, tarfile.TarError, json.JSONDecodeError,
+                UnicodeDecodeError, KeyError):
             return None
         return {"manifest": manifest, "state": state}
 

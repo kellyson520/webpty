@@ -165,4 +165,22 @@ class MaskTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         content = open(p, encoding="utf-8").read()
         self.assertIn('proxy = "http://new-proxy:3128"', content)
-        self.assertIn('temperature = "0.7"', content)
+        # temperature 是数值(非字符串):codex 配置期望 TOML 数值
+        self.assertIn("temperature = 0.7", content)
+        self.assertNotIn('temperature = "0.7"', content)
+
+    def test_toml_temperature_rejects_non_numeric(self):
+        """temperature 非数值时拒绝写入并报错,不落盘。"""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="wp-keys-")
+        p = os.path.join(tmp, "config.toml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('model = "gpt-5.4"\ntemperature = 0.7\n')
+        with mock.patch.object(ac, "AGENT_CONFIG_PATHS", {"codex": [p]}):
+            with mock.patch.object(ac, "_HOME", tmp):
+                res = ac.update_config("codex", {"temperature": "hot"})
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "temperature must be numeric")
+        # 原文件未被改动
+        content = open(p, encoding="utf-8").read()
+        self.assertIn("temperature = 0.7", content)

@@ -54,7 +54,7 @@ TOML_KEYS: dict[str, dict[str, tuple[str, str]]] = {
         "base_url": (r'^openai_base_url\s*=\s*".*?"', 'openai_base_url = "{}"'),
         "api_key": (r'^api_key\s*=\s*".*?"', 'api_key = "{}"'),
         "model_provider": (r'^model_provider\s*=\s*".*?"', 'model_provider = "{}"'),
-        "temperature": (r'^temperature\s*=\s*"?[^"]*"?', 'temperature = "{}"'),
+        "temperature": (r'^temperature\s*=\s*"?[^"]*"?', 'temperature = {}'),
         "proxy": (r'^proxy\s*=\s*".*?"', 'proxy = "{}"'),
     },
     "reasonix": {
@@ -260,6 +260,13 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
         for key, raw in values.items():
             if key not in TOML_KEYS[tool]:
                 continue
+            # temperature 期望 TOML 数值:非数值拒绝写入(避免静默写入
+            # 字符串使 codex 配置无效)。
+            if key == "temperature":
+                try:
+                    float(raw)
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "temperature must be numeric"}
             content, replaced = _replace_toml(
                 content, key, TOML_KEYS[tool][key], str(raw))
             if not replaced:
