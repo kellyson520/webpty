@@ -269,9 +269,9 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     ensure_data_dirs()
-    # Atomic write: tmp + os.replace so a crash mid-write can never leave a
-    # truncated config.json (which would otherwise lose all config + sessions).
-    tmp = config_path + ".tmp"
+    # Atomic write: unique tmp (pid suffix) so a concurrent restore's
+    # _atomic_write_json can never truncate the same file mid-write.
+    tmp = f"{config_path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.write("\n")

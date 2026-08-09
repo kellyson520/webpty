@@ -39,8 +39,8 @@ async def collect_state(data_dir: str, config: dict, db: Database) -> dict:
 
 
 def _atomic_write_json(path: str, obj) -> None:
-    """Write JSON atomically (tmp + fsync + os.replace)."""
-    tmp = path + ".tmp"
+    """Write JSON atomically (unique tmp + fsync + os.replace)."""
+    tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
         f.write("\n")

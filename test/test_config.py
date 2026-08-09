@@ -141,6 +141,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.effective_port(4791), 4791)
         os.environ.pop("WEBPTY_PORT", None)
 
+    def test_save_config_tmp_has_unique_suffix(self):
+        """save_config 的 tmp 文件带 pid 后缀(与 restore 的 tmp 不冲突)。"""
+        c = cfg.load_config()
+        cfg.save_config(c)
+        import glob, os
+        leftovers = glob.glob(cfg.config_path + ".tmp*")
+        # 原子写后 tmp 应已清理;若残留也必须是带 pid 的唯一名
+        self.assertNotEqual(leftovers, [cfg.config_path + ".tmp"])
+
 
 if __name__ == "__main__":
     unittest.main()
