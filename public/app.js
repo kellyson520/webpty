@@ -77,6 +77,7 @@ let projects = [];
 let sessions = [];
 let activeIndex = 0;
 let pollTimer = null;
+let pollFailures = 0;
 
 // id -> { page, term, fit, socket, host, composeInput, composeSubmit }
 const live = new Map();
@@ -2247,9 +2248,22 @@ async function refreshSessions() {
 
 function schedulePoll(delay = 3000) {
   clearTimeout(pollTimer);
+  // Pause polling while the tab is hidden (low-footprint: backgrounded tabs
+  // don't need 3s session refreshes) and back off on repeated failures.
+  if (document.hidden) {
+    pollTimer = setTimeout(schedulePoll, 15000); // 15s wake-check, cheap
+    return;
+  }
   pollTimer = setTimeout(async () => {
-    try { await refreshSessions(); } catch (e) { console.error(e); }
-    schedulePoll();
+    try {
+      await refreshSessions();
+      pollFailures = 0;
+    } catch (e) {
+      console.error(e);
+      pollFailures = (pollFailures || 0) + 1;
+    }
+    const base = pollFailures > 2 ? Math.min(30000, 3000 * 2 ** (pollFailures - 2)) : 3000;
+    schedulePoll(base);
   }, delay);
 }
 
@@ -2275,6 +2289,15 @@ function applyViewport() {
     scrollToIndex(activeIndex, false);
   }
 }
+
+// Returning to the tab: refresh sessions immediately instead of waiting for
+// the next (possibly 15s-delayed) poll tick.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    pollFailures = 0;
+    schedulePoll(0);
+  }
+});
 
 // Set --vvh immediately (not only after bootstrap) so the layout has the
 // correct viewport height even if a later await stalls.
