@@ -243,6 +243,13 @@ class SessionManager:
         if timer:
             timer.cancel()
         self._close_log_fh(session)
+        # Audit M1: close the cached transcript handle too.
+        tfh = session.pop("_transcript_fh", None)
+        if tfh is not None:
+            try:
+                tfh.close()
+            except OSError:
+                pass
         # Audit M1: a removed session's log files (up to ~10MB each) would
         # otherwise linger on disk forever — delete them with the session.
         log_path = session.get("log_path")
@@ -625,9 +632,15 @@ class SessionManager:
             session["proc"] = None
             session["pid"] = None
             session["turn_active"] = False
-            # Audit L2: close the cached log handle (opened by
-            # _append_log_cached in read_stdout/read_stderr).
+            # Audit L2/M1: close the cached log + transcript handles
+            # (opened by _append_log_cached / _push_agent).
             self._close_log_fh(session)
+            tfh = session.pop("_transcript_fh", None)
+            if tfh is not None:
+                try:
+                    tfh.close()
+                except OSError:
+                    pass
             _append_log(log_path, f"\r\n[webpty] agent exited code={code}\r\n")
             # Compatibility downgrade (audit V4): old claude versions exit
             # on --include-partial-messages. Retry once without the flag.
@@ -806,10 +819,13 @@ class SessionManager:
         # message id arrive in many chunks — replace the previous entry for
         # (t=text, id) instead of appending, so AGENT_MAX_ITEMS isn't
         # exhausted by one streaming message and the transcript stays
-        # canonical (final text per mid).
-        if item.get("t") == "text" and item.get("id"):
+        # canonical (final text per mid). Audit M5: thinking deltas do the
+        # same — old code APPENDED every thinking chunk, growing O(n²) and
+        # evicting real text/tool_use entries from the 4000-item window.
+        if item.get("id") and item.get("t") in ("text", "thinking"):
             tr = session["transcript"]
-            if tr and tr[-1].get("t") == "text" and tr[-1].get("id") == item.get("id"):
+            if tr and tr[-1].get("t") == item.get("t") \
+                    and tr[-1].get("id") == item.get("id"):
                 tr[-1] = item
             else:
                 tr.append(item)
@@ -818,9 +834,10 @@ class SessionManager:
         if len(session["transcript"]) > AGENT_MAX_ITEMS:
             del session["transcript"][:len(session["transcript"]) - AGENT_MAX_ITEMS]
             session["_transcript_truncated"] = True  # audit L2
-        # Audit T1: persist the transcript incrementally (JSONL) so a server
-        # restart doesn't wipe the chat history — the WS snapshot is built
-        # from memory only today.
+        # Audit T1/M1: persist the transcript incrementally (JSONL) so a
+        # server restart doesn't wipe the chat history. The write uses a
+        # cached handle — the old per-item open/close was a syscall storm
+        # during token-streaming (each delta = one open+close+write).
         try:
             tpath = session.get("_transcript_path")
             if tpath is None:
@@ -828,8 +845,14 @@ class SessionManager:
                 tpath = os.path.join(base_dir, f"{session['id']}.transcript.jsonl")
                 session["_transcript_path"] = tpath
                 os.makedirs(os.path.dirname(tpath), exist_ok=True)
-            with open(tpath, "a", encoding="utf-8") as f:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            tfh = session.get("_transcript_fh")
+            if tfh is None:
+                # Line-buffered: each JSONL line is flushed on write (no
+                # data loss on crash), while the handle stays open (no
+                # open/close syscall storm during streaming).
+                tfh = open(tpath, "a", encoding="utf-8", buffering=1)
+                session["_transcript_fh"] = tfh
+            tfh.write(json.dumps(item, ensure_ascii=False) + "\n")
         except OSError:
             pass
         self._emit("agentEvent", session["id"], item)

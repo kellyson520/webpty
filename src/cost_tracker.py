@@ -174,7 +174,15 @@ class CostTracker:
         return await self.db.usage_summary(period)
 
     async def grouped(self, group: str, period: str) -> list[dict]:
-        return await self.db.usage_grouped(group, period)
+        rows = await self.db.usage_grouped(group, period)
+        if group == "model":
+            # Audit L2: flag rows priced via family/fallback (no exact
+            # price-table match) so the UI can mark them "估算".
+            from price_table import _match_default
+            for r in rows:
+                name = r.get("name") or ""
+                r["estimated"] = _match_default(name) is None
+        return rows
 
     async def export_rows(self, period: str, frm: str | None = None,
                           to: str | None = None) -> list[dict]:

@@ -1436,8 +1436,15 @@ class Server:
                 # blocked the event loop (json.dumps) and the client's parse
                 # (single JSON.parse long task). Chunk to ~256KB frames and
                 # serialize in the executor (shared with resync).
-                await self._send_snapshot(outbox, sid)
+                # Audit M2: register the listener BEFORE sending the
+                # snapshot — events arriving during the (50-200ms) executor
+                # serialization window were neither in the snapshot (its
+                # copy was already taken) nor delivered live (listener not
+                # yet attached): lost. Now they're delivered as live frames
+                # after the snapshot, and the frontend defers live frames
+                # until the snapshot replay finishes.
                 self.sessions.on("agentEvent", on_agent_event)
+                await self._send_snapshot(outbox, sid)
             else:
                 recent = self.sessions.recent_output(sid)
                 if not recent:
@@ -1760,6 +1767,23 @@ async def main() -> None:
                     print(f"[webpty] pruned old data: {result}", flush=True)
             except Exception as err:  # noqa: BLE001
                 log_error("prune", err)
+            # Audit M4: disk-space watch — a full data partition kills the
+            # DB silently; notify (notification center + optional email)
+            # before it becomes an outage.
+            try:
+                st = os.statvfs(data_dir)
+                free_pct = st.f_bavail / st.f_blocks * 100.0
+                if free_pct < 10.0:
+                    await notifier.handle_event({
+                        "type": "disk_low", "level": "warn",
+                        "title": "磁盘空间不足",
+                        "body": (f"数据目录 {data_dir} 剩余 {free_pct:.1f}%"
+                                 "——请清理备份或扩容"),
+                        "tool": None, "project": None, "session_id": None,
+                        "ts": time.time(),
+                    })
+            except Exception as err:  # noqa: BLE001
+                log_error("disk-watch", err)
             await asyncio.sleep(86400)  # daily
 
     backup_task = asyncio.create_task(_backup_loop())

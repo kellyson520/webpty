@@ -201,7 +201,10 @@ RestartSec=3
 LimitNOFILE=65536
 TimeoutStopSec=30
 # Audit L2: bound memory — a runaway agent session must not OOM the host.
-MemoryMax=1G
+# Audit M4: 3-4 concurrent agent CLIs (200-400MB each) fit in 2G; keep the
+# server alive over its children when the cgroup does OOM.
+MemoryMax=2G
+OOMScoreAdjust=-100
 
 [Install]
 WantedBy=multi-user.target

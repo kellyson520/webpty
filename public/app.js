@@ -275,11 +275,24 @@ function applySessionState(updated) {
 // multi-hundred-ms main-thread block on reconnect; 100/frame lets the
 // browser breathe. Shared by single-frame and chunked snapshots.
 function replaySnapshot(entry, items) {
+  // Audit M2: mark the replay in progress — live agent frames arriving
+  // meanwhile are buffered (connectChatSocket) and flushed on completion
+  // so full-text replay can't interleave with realtime deltas.
+  entry.render._replaying = true;
+  entry.render._pendingLive = [];
   let i = 0;
   const step = () => {
     const end = Math.min(i + 100, items.length);
     for (; i < end; i++) renderChatItem(entry, items[i]);
-    if (i < items.length) requestAnimationFrame(step);
+    if (i < items.length) {
+      requestAnimationFrame(step);
+      return;
+    }
+    entry.render._replaying = false;
+    // Flush deferred live frames in order.
+    const pending = entry.render._pendingLive || [];
+    entry.render._pendingLive = [];
+    for (const item of pending) renderChatItem(entry, item);
   };
   requestAnimationFrame(step);
   const last = items[items.length - 1];
@@ -543,6 +556,12 @@ function connectSocket(entry, session, attempt = 0) {
     if (typeof event.data === 'string' && event.data.startsWith('{')) {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.type === 'reconnected') {
+          // Audit L4: pty-host recovered after a crash — the server will
+          // resend the buffer snapshot next; clear any stale hint.
+          showHint('', 0);
+          return;
+        }
         if (msg.type === 'state') { applySessionState(msg.session); return; }
         if (msg.type === 'resync') {
           // Server dropped output frames (backgrounded tab etc.) and sent a
@@ -1182,6 +1201,11 @@ function connectChatSocket(entry, session, attempt = 0) {
     if (typeof event.data !== 'string') return;
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
+    // Audit H1: `r` was never defined here — every snapshot chunk threw
+    // ReferenceError, the buffer never accumulated, and sessions with
+    // history rendered as permanently empty after a reconnect. Use the
+    // entry's render state object explicitly.
+    const r = entry.render;
     if (msg.type === 'snapshot') {
       if (msg.chunk !== undefined) {
         // Chunked snapshot (audit 8.1): accumulate string chunks until
@@ -1210,6 +1234,13 @@ function connectChatSocket(entry, session, attempt = 0) {
       replaySnapshot(entry, msg.transcript || []);
       return;
     } else if (msg.type === 'agent') {
+      // Audit M2: defer live frames while the snapshot replay runs (or
+      // chunks are still accumulating) — interleaving would duplicate or
+      // reorder text that the replay renders in full.
+      if (r._snapBuf || r._replaying) {
+        (r._pendingLive = r._pendingLive || []).push(msg.item);
+        return;
+      }
       renderChatItem(entry, msg.item);
     } else if (msg.type === 'state') {
       applySessionState(msg.session);
@@ -1405,7 +1436,7 @@ function renderChatItem(entry, item) {
       el.className = 'chat-perm';
       const head = document.createElement('div');
       head.className = 'chat-perm-head';
-      head.textContent = `⚠ 权限请求：${escapeHtml(item.action || '')} ${escapeHtml(item.toolName || '')}`;
+      head.textContent = `⚠ 权限请求：${item.action || ''} ${item.toolName || ''}`;
       el.appendChild(head);
       if (item.input) {
         const pre = document.createElement('pre');
@@ -1506,10 +1537,9 @@ function prettyInput(input) {
 }
 
 // --- minimal, safe markdown → HTML (escapes first, then limited formatting) -
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+// Audit L6: escapeHtml is the same escaping as `esc` — keep the alias so
+// both call sites stay correct without duplicating the logic.
+const escapeHtml = esc;
 function renderInline(s) {
   s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -2204,7 +2234,7 @@ async function loadPickerDir(p) {
     const entries = await api(`/api/fs/list?path=${encodeURIComponent(pickerCurrentPath)}`);
     renderPickerEntries(entries);
   } catch (err) {
-    folderPickerList.innerHTML = `<li class="folder-picker-empty">无法列出: ${err.message}</li>`;
+    folderPickerList.innerHTML = `<li class="folder-picker-empty">无法列出: ${esc(err.message)}</li>`;
   }
 }
 
@@ -3005,9 +3035,10 @@ function openCostPanel() {
 }
 async function refreshCostPanel() {
   const period = document.getElementById('cost-period').value;
-  const [sum, byTool, alerts] = await Promise.all([
+  const [sum, byTool, byModel, alerts] = await Promise.all([
     api(`/api/cost/summary?period=${period}`).catch(() => ({})),
     api(`/api/cost/by-tool?period=${period}`).catch(() => []),
+    api(`/api/cost/by-model?period=${period}`).catch(() => []),
     api('/api/cost/alerts').catch(() => []),
   ]);
   const alertsArr = Array.isArray(alerts) ? alerts : [];
@@ -3018,6 +3049,14 @@ async function refreshCostPanel() {
     `<div class="cost-card"><div class="v">${esc(sum.tokens_in ?? 0)}</div><div class="l">输入 tokens</div></div>` +
     `<div class="cost-card"><div class="v">${esc(sum.tokens_out ?? 0)}</div><div class="l">输出 tokens</div></div>` +
     `<div class="cost-card${over ? ' over' : ''}"><div class="v">${over ? '超限' : '正常'}</div><div class="l">预算状态</div></div>`;
+  // Audit L2: by-model breakdown + an "估算" badge on fallback-priced rows.
+  const byModelRows = (byModel || []).map((g) =>
+    `<div class="panel-item">
+       <div class="item-main">
+         <div class="item-title">${esc(g.name)} <span class="badge">$${Number(g.cost || 0).toFixed(4)}</span>${g.estimated ? ' <span class="badge warn">估算价</span>' : ''}</div>
+         <div class="item-sub">${esc(g.tokens_in ?? 0)} in / ${esc(g.tokens_out ?? 0)} out</div>
+       </div>
+     </div>`).join('');
   document.getElementById('cost-groups').innerHTML =
     ((byTool || []).map((g) =>
       `<div class="panel-item">
@@ -3028,6 +3067,10 @@ async function refreshCostPanel() {
          </div>
        </div>`).join('') ||
     `<div class="empty-tip">暂无数据 — Agent 使用后成本将实时统计</div>`);
+  const byModelBlock = byModelRows
+    ? `<div class="panel-section-title">按模型</div>${byModelRows}` : '';
+  const el = document.getElementById('cost-groups');
+  if (byModelBlock) el.insertAdjacentHTML('beforeend', byModelBlock);
 }
 document.getElementById('cost-close').onclick = () => { costBackdrop.hidden = true; };
 costBackdrop.addEventListener('click', (ev) => {

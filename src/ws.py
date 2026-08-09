@@ -29,13 +29,15 @@ class _Incomplete:
 
 _INCOMPLETE = _Incomplete()
 
-# Maximum inbound frame payload (16MB). Prevents a malicious peer from
+# Maximum inbound frame payload (2MB). Prevents a malicious peer from
 # declaring a 2^63-1 length and draining server memory (Issue 3.1).
 MAX_FRAME_BYTES = 2 * 1024 * 1024
 
-# Precomputed 256×4 XOR table: bytes(b ^ key[i%4] for ...) is pure-Python
-# per-byte work (~40-80ms per 2MB frame, ~1s per 16MB — a sync event-loop
-# DoS). The blockwise int XOR below cuts a 2MB frame to ~2ms.
+# Audit L3: the XOR tables are mask-key dependent so they can't be fully
+# precomputed, but building them per frame was wasted work — this caches
+# the most recent key's tables (frames from one connection share a key).
+_MASK_TABLE_CACHE: dict[bytes, list[bytes]] = {}
+
 def _apply_mask(payload: bytes, mask_key: bytes) -> bytes:
     """WebSocket unmask via 4 strided bytes.translate passes (C-level).
 
@@ -44,7 +46,11 @@ def _apply_mask(payload: bytes, mask_key: bytes) -> bytes:
     """
     if not payload or len(mask_key) < 4:
         return payload
-    tables = [bytes(b ^ mask_key[i] for b in range(256)) for i in range(4)]
+    tables = _MASK_TABLE_CACHE.get(mask_key)
+    if tables is None:
+        tables = [bytes(b ^ mask_key[i] for b in range(256)) for i in range(4)]
+        if len(_MASK_TABLE_CACHE) < 8:  # bound the cache (one entry per key)
+            _MASK_TABLE_CACHE[mask_key] = tables
     n = len(payload) - len(payload) % 4
     result = bytearray(payload)
     for i in range(4):
@@ -199,6 +205,41 @@ class WebSocket:
                 return None
             self._recv_buf += chunk
 
+
+    @staticmethod
+    def _parse_header(buf: bytes) -> tuple[int, int, int, bool, int, bytes | None] | type[_INCOMPLETE]:
+        """Audit L6: shared frame-header parsing (was duplicated in
+        _parse_frame and the control-frame loop). Returns
+        (fin, opcode, length, masked, offset, mask_key) or _INCOMPLETE."""
+        if len(buf) < 2:
+            return _INCOMPLETE
+        b0 = buf[0]
+        b1 = buf[1]
+        fin = bool(b0 & 0x80)
+        opcode = b0 & 0x0F
+        masked = bool(b1 & 0x80)
+        length = b1 & 0x7F
+        offset = 2
+        if length == 126:
+            if len(buf) < 4:
+                return _INCOMPLETE
+            length = struct.unpack(">H", buf[2:4])[0]
+            offset = 4
+        elif length == 127:
+            if len(buf) < 10:
+                return _INCOMPLETE
+            length = struct.unpack(">Q", buf[2:10])[0]
+            if length > MAX_FRAME_BYTES:
+                raise WebSocketError("frame too large")
+            offset = 10
+        mask_key = None
+        if masked:
+            if len(buf) < offset + 4:
+                return _INCOMPLETE
+            mask_key = bytes(buf[offset:offset + 4])
+            offset += 4
+        return fin, opcode, length, masked, offset, mask_key
+
     def _parse_frame(self) -> tuple[int, bytes] | None | type[_INCOMPLETE]:
         """Parse one frame from the buffer.
 
@@ -206,31 +247,10 @@ class WebSocket:
         sentinel when more bytes are needed. Raises WebSocketError only for
         real protocol violations.
         """
-        b0 = self._recv_buf[0]
-        b1 = self._recv_buf[1]
-        fin = bool(b0 & 0x80)
-        opcode = b0 & 0x0F
-        masked = bool(b1 & 0x80)
-        length = b1 & 0x7F
-        offset = 2
-        if length == 126:
-            if len(self._recv_buf) < 4:
-                return _INCOMPLETE
-            length = struct.unpack(">H", self._recv_buf[2:4])[0]
-            offset = 4
-        elif length == 127:
-            if len(self._recv_buf) < 10:
-                return _INCOMPLETE
-            length = struct.unpack(">Q", self._recv_buf[2:10])[0]
-            if length > MAX_FRAME_BYTES:
-                raise WebSocketError("frame too large")
-            offset = 10
-        mask_key = None
-        if masked:
-            if len(self._recv_buf) < offset + 4:
-                return _INCOMPLETE
-            mask_key = self._recv_buf[offset:offset + 4]
-            offset += 4
+        hdr = self._parse_header(self._recv_buf)
+        if hdr is _INCOMPLETE:
+            return _INCOMPLETE
+        fin, opcode, length, masked, offset, mask_key = hdr
         if len(self._recv_buf) < offset + length:
             return _INCOMPLETE
         payload = bytes(self._recv_buf[offset:offset + length])
@@ -246,33 +266,10 @@ class WebSocket:
                 self._send_frame(_OP_PONG, payload)
             else:
                 self._last_pong_at = time.monotonic()
-            if len(self._recv_buf) < 2:
+            hdr = self._parse_header(self._recv_buf)
+            if hdr is _INCOMPLETE:
                 return _INCOMPLETE
-            b0 = self._recv_buf[0]
-            b1 = self._recv_buf[1]
-            fin = bool(b0 & 0x80)
-            opcode = b0 & 0x0F
-            masked = bool(b1 & 0x80)
-            length = b1 & 0x7F
-            offset = 2
-            if length == 126:
-                if len(self._recv_buf) < 4:
-                    return _INCOMPLETE
-                length = struct.unpack(">H", self._recv_buf[2:4])[0]
-                offset = 4
-            elif length == 127:
-                if len(self._recv_buf) < 10:
-                    return _INCOMPLETE
-                length = struct.unpack(">Q", self._recv_buf[2:10])[0]
-                if length > MAX_FRAME_BYTES:
-                    raise WebSocketError("frame too large")
-                offset = 10
-            mask_key = None
-            if masked:
-                if len(self._recv_buf) < offset + 4:
-                    return _INCOMPLETE
-                mask_key = self._recv_buf[offset:offset + 4]
-                offset += 4
+            _, opcode, length, masked, offset, mask_key = hdr
             if len(self._recv_buf) < offset + length:
                 return _INCOMPLETE
             payload = bytes(self._recv_buf[offset:offset + length])
