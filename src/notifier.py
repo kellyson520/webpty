@@ -30,7 +30,18 @@ class Notifier:
         """Sync callback for the event bus; spawns an async task."""
         task = asyncio.create_task(self._process(event))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._on_done)
+
+    def _on_done(self, task: asyncio.Task) -> None:
+        """Audit M4: surface background failures instead of letting them
+        become unretrieved Task exceptions."""
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        err = task.exception()
+        if err is not None:
+            from logging_util import log_error
+            log_error("notifier", err)
 
     async def _process(self, event: dict) -> None:
         # removed(删标签页)不产生通知:matched 为空只影响 level/邮件,

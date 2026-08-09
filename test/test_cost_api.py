@@ -87,6 +87,16 @@ class CostApiTest(unittest.TestCase):
         st, out = self._req_err("PUT", "/api/cost/budget", {"limit": "abc"})
         self.assertEqual(st, 400)
 
+    def test_budget_persists_to_disk(self):
+        """Audit H1: budget PUT must survive a reload — the server and the
+        CostTracker must share one config object."""
+        st, out = self._req("PUT", "/api/cost/budget", {"limit": 42.0})
+        self.assertTrue(out["ok"])
+        import json as _json
+        with open(os.path.join(self.tmp, "config.json"), "r") as f:
+            saved = _json.load(f)
+        self.assertEqual(saved["budget"]["limit"], 42.0)
+
     def test_reconcile_runs(self):
         st, out = self._req("POST", "/api/cost/reconcile")
         self.assertEqual(st, 200)

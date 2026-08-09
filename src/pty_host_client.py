@@ -70,6 +70,27 @@ class PtyHostClient:
             self._connected = True
             self._reader_task = asyncio.create_task(self._read_loop())
 
+    async def close(self) -> None:
+        """Audit M5: tear down the reader task and the socket so a shutdown
+        never leaves a dangling connection or a task on a closed loop."""
+        task = self._reader_task
+        self._reader_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        writer = self.writer
+        self.writer = None
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+        self._connected = False
+
     async def _read_loop(self) -> None:
         assert self.reader is not None
         try:

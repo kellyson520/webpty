@@ -95,7 +95,17 @@ const api = async (url, opts = {}) => {
   const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   const token = localStorage.getItem('webpty.token');
   if (token) headers['authorization'] = `Bearer ${token}`;
-  const res = await fetch(url, { ...opts, headers });
+  // Audit L2: backend hangs must not leave buttons pending forever.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 15000);
+  let res;
+  try {
+    res = await fetch(url, { ...opts, headers, signal: ctl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e.name === 'AbortError' ? '请求超时，请重试' : e.message);
+  }
+  clearTimeout(timer);
   if (res.status === 403) {
     const body = await res.json().catch(() => ({}));
     if (body.reason === 'bad-token') showTokenGate();
@@ -529,6 +539,11 @@ function connectSocket(entry, session, attempt = 0) {
     } else {
       entry.term.write(data);
     }
+  };
+  ws.onerror = () => {
+    // Audit L2: distinguish network-level failure from a clean close.
+    // onclose always follows, so the reconnect logic stays there.
+    entry.lastWsError = 'network';
   };
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;

@@ -11,6 +11,7 @@ import asyncio
 import base64
 import gzip as _gzip
 import json
+import math
 import mimetypes
 import os
 import re
@@ -113,8 +114,12 @@ def parse_multipart(body: bytes, boundary: str) -> tuple[str | None, bytes, str]
 
 class Server:
     def __init__(self, db=None, notifier=None, cost=None, migrator=None,
-                 data_dir: str | None = None) -> None:
-        self.config = load_config()
+                 data_dir: str | None = None, config: dict | None = None) -> None:
+        # Audit H1: accept the caller's config object instead of loading a
+        # second copy — two dicts made PUT /api/cost/budget and
+        # PUT /api/config/* write stale session lists over the live ones
+        # (restart lost sessions / budget reverted).
+        self.config = config if config is not None else load_config()
         self.data_dir = data_dir if data_dir is not None else _DATA_DIR
         self.sessions = SessionManager(self.config, lambda: save_config(self.config))
         self.pub = public_dir()
@@ -359,6 +364,24 @@ class Server:
         # --- API routes ------------------------------------------------------
         if path == "/api/config" and method == "GET":
             return await self._send_json(writer, 200, self._api_config(), headers)
+
+        if path == "/api/health" and method == "GET":
+            # Audit M2: liveness/readiness probe for systemd/monitoring —
+            # /api/config stays 200 even when the pty-host is down, which
+            # made outages invisible to health checks.
+            db_ok = False
+            if self.db is not None:
+                try:
+                    await self.db.query_one("SELECT 1 AS x")
+                    db_ok = True
+                except Exception:  # noqa: BLE001
+                    db_ok = False
+            return await self._send_json(writer, 200, {
+                "ok": db_ok,
+                "db": db_ok,
+                "host_ready": self.sessions.host_ready,
+                "ts": time.time(),
+            }, headers)
 
         if path == "/api/projects" and method == "GET":
             return await self._send_json(writer, 200, self._list_projects(), headers)
@@ -703,6 +726,9 @@ class Server:
                 limit = float(body["limit"])
             except (TypeError, ValueError):
                 raise HttpError(400, "Invalid limit")
+            # Audit L3: Infinity/NaN would silently disable the alert.
+            if not math.isfinite(limit):
+                raise HttpError(400, "Invalid limit")
             await self.cost.set_budget(limit)
             save_config(self.config)  # persist the budget across restarts
             return await self._send_json(writer, 200, {"ok": True}, headers)
@@ -804,18 +830,31 @@ class Server:
                 writer, 404, {"error": "not found"}, {})
         try:
             size = os.path.getsize(path)
-            body = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: open(path, "rb").read())
+            f = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: open(path, "rb"))
         except OSError:
             return await self._send_json(
                 writer, 404, {"error": "not found"}, {})
         headers = {"content-type": "application/gzip",
                    "content-disposition": f'attachment; filename="{safe}"',
-                   "content-length": str(size)}
+                   "content-length": str(size),
+                   "x-content-type-options": "nosniff"}
         writer.write(b"HTTP/1.1 200 OK\r\n" +
                      b"\r\n".join(f"{k}: {v}".encode() for k, v in headers.items()) +
-                     b"\r\n\r\n" + body)
+                     b"\r\n\r\n")
         await writer.drain()
+        # Audit M7: stream in 64KB chunks — reading a multi-hundred-MB
+        # export into RAM would spike memory and stall other requests.
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                chunk = await loop.run_in_executor(None, f.read, 65536)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                await writer.drain()
+        finally:
+            await loop.run_in_executor(None, f.close)
         return True
 
     async def _handle_migrate_import(self, reader, headers) -> dict:
@@ -1040,6 +1079,9 @@ class Server:
         head = (
             "HTTP/1.1 200 OK\r\n"
             f"Content-Type: {ctype}\r\n"
+            # Audit L1: hardening headers on static assets too.
+            "X-Content-Type-Options: nosniff\r\n"
+            "Referrer-Policy: no-referrer\r\n"
             f"Content-Length: {len(body)}\r\n"
             f"Cache-Control: {cache}\r\n"
             f"ETag: {etag}\r\n"
@@ -1348,6 +1390,9 @@ class Server:
         head = (
             f"HTTP/1.1 {status} {self._status_text(status)}\r\n"
             "Content-Type: application/json; charset=utf-8\r\n"
+            # Audit L1: hardening headers on all JSON responses.
+            "X-Content-Type-Options: nosniff\r\n"
+            "Referrer-Policy: no-referrer\r\n"
             f"Content-Length: {len(body)}\r\n"
             "Vary: Accept-Encoding\r\n"
         )
@@ -1443,7 +1488,7 @@ async def main() -> None:
     from migrator import Migrator
     migrator = Migrator(data_dir, config, db)
     server = Server(db=db, notifier=notifier, cost=cost, migrator=migrator,
-                    data_dir=data_dir)
+                    data_dir=data_dir, config=config)
     await server.sessions.init()
     server.sessions.start_host_monitor()
     server.sessions.start_stall_monitor()
@@ -1532,10 +1577,10 @@ async def main() -> None:
             await asyncio.sleep(86400)  # daily
 
     backup_task = asyncio.create_task(_backup_loop())
-    asyncio.create_task(_prune_loop())
+    prune_task = asyncio.create_task(_prune_loop())
     # 定时重试未送达的 SMTP 通知(默认每 5 分钟),失败只记日志不退出
     notify_task = asyncio.create_task(_notify_retry_loop(notifier))
-    asyncio.create_task(_autostart())
+    autostart_task = asyncio.create_task(_autostart())
 
     async def _budget_loop() -> None:
         """Audit C: budget flip → notification (every 5 min, cheap query)."""
@@ -1561,25 +1606,25 @@ async def main() -> None:
                 log_error("budget", err)
             await asyncio.sleep(300)
 
-    asyncio.create_task(_budget_loop())
+    budget_task = asyncio.create_task(_budget_loop())
 
     try:
         await listener.serve_forever()
     except asyncio.CancelledError:
         pass
     finally:
-        # Cancel the infinite loops before tearing down the db so no
-        # in-flight backup/retry touches a closed connection. _autostart is a
-        # short-lived one-shot task and needs no handle (matches existing
-        # behaviour).
-        backup_task.cancel()
-        notify_task.cancel()
-        for task in (backup_task, notify_task):
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        # Audit M1: cancel ALL background loops before tearing down the db
+        # so no in-flight backup/retry/prune/budget task touches a closed
+        # connection.
+        for task in (backup_task, notify_task, prune_task,
+                     budget_task, autostart_task):
+            task.cancel()
+        await asyncio.gather(backup_task, notify_task, prune_task,
+                             budget_task, autostart_task,
+                             return_exceptions=True)
         server.sessions.stop_host_monitor()
+        server.sessions.stop_stall_monitor()
+        await server.sessions.stop_host()
         listener.close()
         await listener.wait_closed()
         db.close()

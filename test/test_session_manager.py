@@ -489,6 +489,71 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         s2 = self.sm.create(name="pt2", cwd="/a", tool="bash")
         self.assertFalse(await self.sm.reset(s2["id"]))
 
+    async def test_user_stop_sets_marker_cleared_on_start(self):
+        # Audit H2: stop/interrupt mark _user_stopped so wait_exit's compat
+        # retry (old claude) never auto-restarts; a fresh start clears it.
+        import asyncio as _a
+
+        class FakeProc:
+            def __init__(self):
+                self.signals = []
+                self.returncode = None
+
+            def kill(self):
+                self.signals.append("KILL")
+
+            def send_signal(self, sig):
+                self.signals.append(sig)
+
+            async def wait(self):
+                self.returncode = -9
+                return -9
+
+        s1 = self.sm.create(name="ag4", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        s1["proc"] = FakeProc()
+        ok = await self.sm._stop_locked(s1["id"])
+        self.assertTrue(ok)
+        self.assertTrue(s1["_user_stopped"])
+        # interrupt marks it too
+        s2 = self.sm.create(name="ag5", cwd="/a", tool="claude-chat")
+        s2["engine"] = "agent"
+        s2["proc"] = FakeProc()
+        self.assertTrue(await self.sm.interrupt(s2["id"]))
+        self.assertTrue(s2["_user_stopped"])        # _start_locked clears the marker before resolving the tool, so a
+        # fresh start (even one that fails) re-arms the compat retry.
+        s3 = self.sm.create(name="ag6", cwd="/a", tool="no-such-tool")
+        s3["_user_stopped"] = True
+        with self.assertRaises(ValueError):
+            await self.sm._start_locked(s3["id"])
+        self.assertFalse(s3["_user_stopped"])
+
+    async def test_remove_agent_kills_and_cancels_tasks(self):
+        # Audit H3: removing a running agent session kills the proc and
+        # cancels its reader/waiter tasks so no ghost failed/crashed event
+        # can fire afterwards (notification spam / email).
+        import asyncio as _a
+
+        killed = _a.Event()
+
+        class FakeProc:
+            def kill(self):
+                killed.set()
+
+        s1 = self.sm.create(name="ag7", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        s1["proc"] = FakeProc()
+        s1["_tasks"] = [asyncio.create_task(asyncio.sleep(30))]
+        events: list[dict] = []
+        self.sm.on("session_event", lambda ev: events.append(ev))
+        await self.sm.remove(s1["id"])
+        await asyncio.sleep(0)  # let the cancel land
+        self.assertTrue(killed.is_set())
+        self.assertTrue(all(t.cancelled() for t in s1["_tasks"]))
+        self.assertIsNone(self.sm.get(s1["id"]))
+        # only the "removed" event — no failed/crashed ghost
+        self.assertEqual([e["type"] for e in events], ["removed"])
+
     async def test_agent_send_rejected_while_turn_active(self):
         # A2: no interleaved turns — messages are rejected with a system
         # hint while turn_active is set.

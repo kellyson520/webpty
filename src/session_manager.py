@@ -27,6 +27,7 @@ AGENT_MAX_ITEMS = 4000
 TOOL_RESULT_MAX = 8000
 BUSY_IDLE_MS = 5000  # keep the tab dot blinking this long after the last output
 RECENT_BUF_CAP = 128 * 1024
+MAX_AGENT_BUF = 2 * 1024 * 1024  # audit M6: partial-line cap per session
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 30
 
@@ -229,6 +230,10 @@ class SessionManager:
                 except Exception as err:  # noqa: BLE001
                     log_error("session-manager", err)
             session["proc"] = None
+            # Audit H3: cancel the reader/waiter tasks — wait_exit() would
+            # otherwise emit a ghost failed event after the session is gone.
+            for task in session.get("_tasks", ()):
+                task.cancel()
         else:
             try:
                 await self.host.forget(sid)
@@ -284,6 +289,9 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return None
+        # Audit H2: a fresh start clears the user-stop marker so the compat
+        # retry (old claude + --include-partial-messages) works again.
+        session["_user_stopped"] = False
         tool = self.config.get("tools", {}).get(session.get("tool"))
         if not tool:
             raise ValueError(f"Unknown tool: {session.get('tool')}")
@@ -537,6 +545,12 @@ class SessionManager:
                 text = decoder.decode(chunk)
                 _append_log(log_path, text)
                 state["buf"] += text
+                # Audit M6: cap the partial-line buffer — a runaway agent
+                # printing an endless unterminated line must not grow memory
+                # without bound. Truncate from the front (keep the tail, the
+                # most likely to be the current partial JSON).
+                if len(state["buf"]) > MAX_AGENT_BUF:
+                    state["buf"] = state["buf"][-MAX_AGENT_BUF:]
                 while "\n" in state["buf"]:
                     line, _, rest = state["buf"].partition("\n")
                     state["buf"] = rest
@@ -561,6 +575,11 @@ class SessionManager:
 
         async def wait_exit() -> None:
             code = await proc.wait()
+            # Audit H3: if the session was removed (or stopped) while the
+            # process was running, don't emit a ghost failed/crashed event
+            # (it would land in the notification center and possibly email).
+            if self.sessions.get(session["id"]) is not session:
+                return
             session["state"] = "stopped"
             session["exit_code"] = code
             session["signal"] = None
@@ -570,9 +589,12 @@ class SessionManager:
             _append_log(log_path, f"\r\n[webpty] agent exited code={code}\r\n")
             # Compatibility downgrade (audit V4): old claude versions exit
             # on --include-partial-messages. Retry once without the flag.
+            # Audit H2: never auto-restart when the user stopped/interrupted
+            # the session (SIGKILL/SIGINT also exit non-zero).
             if (code != 0 and session.get("tool") == "claude"
                     and session.get("_partial_off") is not True
-                    and not resuming):
+                    and not resuming
+                    and not session.get("_user_stopped")):
                 _append_log(log_path,
                             "[webpty] retrying without --include-partial-messages\r\n")
                 session["_partial_off"] = True
@@ -591,8 +613,10 @@ class SessionManager:
                 self._push_agent(session, {"t": "exit", "code": code})
             self._emit("change", self._public(session))
             self._emit("session_event", {
-                "type": "crashed" if session.get("signal") else
-                        ("completed" if session.get("exit_code") == 0 else "failed"),
+                # Audit H3: a user-initiated stop is not a crash/failure.
+                "type": "stopped" if session.get("_user_stopped") else
+                        ("crashed" if session.get("signal") else
+                         ("completed" if session.get("exit_code") == 0 else "failed")),
                 "session_id": session["id"], "name": session.get("name"),
                 "tool": session.get("tool"), "project": session.get("cwd"),
                 "state": "stopped", "exit_code": session.get("exit_code"),
@@ -608,6 +632,13 @@ class SessionManager:
         return session
 
     def _handle_agent_line(self, session: dict, line: str) -> bool:
+        # Audit M6: a multi-MB JSON line would block the event loop in
+        # json.loads — refuse absurd lines instead of parsing them.
+        if len(line) > MAX_AGENT_BUF:
+            log_error("session-manager",
+                      f"oversized agent line ({len(line)} bytes) dropped "
+                      f"for session {session.get('id')}")
+            return False
         try:
             evt = json.loads(line)
         except json.JSONDecodeError:
@@ -797,6 +828,9 @@ class SessionManager:
         if not session:
             return False
         if session.get("engine") == "agent":
+            # Audit H2: SIGINT exits non-zero — don't let wait_exit mistake
+            # it for a launch failure and auto-restart the session.
+            session["_user_stopped"] = True
             proc = session.get("proc")
             if not proc or proc.returncode is not None:
                 return False
@@ -834,6 +868,8 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return False
+        # Audit H2: mark user-initiated stops so wait_exit never auto-restarts.
+        session["_user_stopped"] = True
         if session.get("engine") == "agent":
             proc = session.get("proc")
             if proc:
@@ -1089,6 +1125,14 @@ class SessionManager:
             self._monitor_task.cancel()
             self._monitor_task = None
 
+    async def stop_host(self) -> None:
+        """Audit M5: close the pty-host client connection (reader task +
+        socket) so shutdown leaves nothing dangling."""
+        try:
+            await self.host.close()
+        except Exception as err:  # noqa: BLE001
+            log_error("session-manager", err)
+
     def start_stall_monitor(self) -> None:
         """Background monitor: report sessions that are turn-active but
         produced no output for stall_timeout_s (only notify, never kill)."""
@@ -1096,6 +1140,14 @@ class SessionManager:
             self._stall_task.cancel()
         self._stall_task = asyncio.get_event_loop().create_task(
             self._stall_monitor())
+
+    def stop_stall_monitor(self) -> None:
+        """Audit M1: cancel the monitor on shutdown so it never touches a
+        closed db / torn-down host."""
+        task = getattr(self, "_stall_task", None)
+        if task is not None:
+            task.cancel()
+            self._stall_task = None
 
     async def _stall_monitor(self) -> None:
         try:
