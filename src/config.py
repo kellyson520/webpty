@@ -278,19 +278,27 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    ensure_data_dirs()
-    # Atomic write: unique tmp (pid suffix) so a concurrent restore's
-    # _atomic_write_json can never truncate the same file mid-write.
-    # Same-process safety relies on the single-threaded event loop (no
-    # concurrent save within one process); pid keeps cross-process writers
-    # apart.
-    tmp = f"{config_path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, config_path)
+    try:
+        ensure_data_dirs()
+        # Atomic write: unique tmp (pid suffix) so a concurrent restore's
+        # _atomic_write_json can never truncate the same file mid-write.
+        # Same-process safety relies on the single-threaded event loop (no
+        # concurrent save within one process); pid keeps cross-process writers
+        # apart.
+        tmp = f"{config_path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config_path)
+    except OSError as err:
+        # Audit M2: a full disk / permission error must not 500 a session
+        # create/remove (memory is already updated). Log it — the error
+        # ring buffer surfaces it in the UI; on restart the on-disk state
+        # simply wins, which is predictable.
+        from logging_util import log_error
+        log_error("config-save", err)
 
 
 def safe_name(value: str) -> str:

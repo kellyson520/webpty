@@ -205,7 +205,7 @@ function scrollToIndex(i, smooth = true) {
   navTimer = setTimeout(() => onActivate(activeIndex), smooth ? 380 : 60);
 }
 
-const TUI_TOOLS = new Set(['claude', 'codex', 'agy']);
+const TUI_TOOLS = new Set(['claude', 'codex', 'agy', 'reasonix', 'opencode']);
 const isMobileViewport = () => window.matchMedia('(max-width: 600px)').matches;
 
 // Which render engine a tool/session uses: 'agent' (HTML chat) or 'pty' (xterm).
@@ -1309,6 +1309,7 @@ function renderChatItem(entry, item) {
       el.className = 'chat-result' + (item.isError ? ' err' : '');
       const parts = [item.isError ? (item.text || 'error') : 'done'];
       if (typeof item.durationMs === 'number') parts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
+      if (typeof item.numTurns === 'number') parts.push(`${item.numTurns} turns`);
       if (typeof item.costUsd === 'number') parts.push(`$${item.costUsd.toFixed(4)}`);
       el.textContent = parts.join('  ·  ');
       entry.logEl.appendChild(el);

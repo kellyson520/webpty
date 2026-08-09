@@ -497,6 +497,55 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(st, 400)
         self.assertIn("error", j)
 
+    # --- audit M6: endpoint smoke coverage --------------------------------
+    def test_health_endpoint(self):
+        st, j = self._req("/api/health")
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+        self.assertTrue(j["db"])
+
+    def test_errors_endpoint(self):
+        st, j = self._req("/api/errors")
+        self.assertEqual(st, 200)
+        self.assertIsInstance(j.get("errors"), list)
+
+    def test_cost_export_endpoint(self):
+        # returns text/csv, not JSON
+        import urllib.request as _ur
+        try:
+            with _ur.urlopen(f"{self.base}/api/cost/export") as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIn("text/csv", resp.headers.get("Content-Type", ""))
+                body = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            self.fail(f"export failed: {e.code}")
+        self.assertIn("session_id", body)  # header row
+
+    def test_session_lifecycle_endpoints(self):
+        # create → stop → start → interrupt → reset → delete, plus input
+        st, j = self._req("/api/sessions", "POST",
+                          {"name": "lc", "cwd": os.path.join(self.proj_root, "alpha"),
+                           "tool": "bash"})
+        self.assertIn(st, (200, 201))
+        sid = j["id"]
+        # stop on a stopped session is idempotent (no 500)
+        st, j = self._req(f"/api/sessions/{sid}/stop", "POST")
+        self.assertIn(st, (200, 404))
+        # input on a stopped pty session is a clean 409
+        st, j = self._req(f"/api/sessions/{sid}/input", "POST", {"bytes": "echo hi\n"})
+        self.assertIn(st, (200, 409))
+        # interrupt on a non-running session is a clean 409
+        st, j = self._req(f"/api/sessions/{sid}/interrupt", "POST")
+        self.assertIn(st, (200, 409))
+        # reset is agent-only; pty returns 409 without 500
+        st, j = self._req(f"/api/sessions/{sid}/reset", "POST")
+        self.assertIn(st, (200, 409))
+        # delete
+        st, j = self._req(f"/api/sessions/{sid}", "DELETE")
+        self.assertEqual(st, 200)
+        st, j = self._req(f"/api/sessions/{sid}", "DELETE")
+        self.assertEqual(st, 404)
+
     def test_fs_list_restricted_to_roots(self):
         # roots 内路径允许
         st, _ = self._req(f"/api/fs/list?path={self.proj_root}")

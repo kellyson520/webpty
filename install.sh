@@ -196,6 +196,10 @@ $ENV_LINES
 ExecStart=$VENV_DIR/bin/python $SRC_DIR/src/server.py
 Restart=on-failure
 RestartSec=3
+# Audit M4: 128 WS connections + agent pipe fds + pty-host fds can exceed
+# the default 1024 soft limit; give the service headroom.
+LimitNOFILE=65536
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -203,6 +207,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable webpty.service >/dev/null 2>&1 || true
+# Audit M5: a surviving pty-host daemon from the previous version would be
+# reused by the new server (protocol drift → silently missing features).
+# Kill it so the fresh server spawns a matching host.
+pkill -f "$SRC_DIR/src/pty_host.py" 2>/dev/null || true
 systemctl restart webpty.service
 
 sleep 1

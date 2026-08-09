@@ -37,6 +37,7 @@ class PtyHostClient:
         self._pending: dict[int, asyncio.Future] = {}
         self.server_version: int | None = None
         self._connected = False
+        self._reader_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
         self._listeners: dict[str, list] = {"output": [], "exit": [], "disconnect": []}
 

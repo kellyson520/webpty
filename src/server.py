@@ -366,9 +366,10 @@ class Server:
             return await self._send_json(writer, 200, self._api_config(), headers)
 
         if path == "/api/health" and method == "GET":
-            # Audit M2: liveness/readiness probe for systemd/monitoring —
+            # Audit M2/M7: liveness/readiness probe for systemd/monitoring —
             # /api/config stays 200 even when the pty-host is down, which
-            # made outages invisible to health checks.
+            # made outages invisible. DB failure returns 503 so status-code
+            # monitors see it.
             db_ok = False
             if self.db is not None:
                 try:
@@ -376,12 +377,13 @@ class Server:
                     db_ok = True
                 except Exception:  # noqa: BLE001
                     db_ok = False
-            return await self._send_json(writer, 200, {
-                "ok": db_ok,
-                "db": db_ok,
-                "host_ready": self.sessions.host_ready,
-                "ts": time.time(),
-            }, headers)
+            return await self._send_json(
+                writer, 503 if not db_ok else 200, {
+                    "ok": db_ok,
+                    "db": db_ok,
+                    "host_ready": self.sessions.host_ready,
+                    "ts": time.time(),
+                }, headers)
 
         if path == "/api/projects" and method == "GET":
             return await self._send_json(writer, 200, self._list_projects(), headers)
@@ -1356,6 +1358,9 @@ class Server:
                                     and isinstance(msg.get("rows"), (int, float)):
                                 self.sessions.resize(sid, int(msg["cols"]), int(msg["rows"]))
                                 continue
+                            # Audit L1: an unknown __ctl type must never fall
+                            # through into the terminal as literal text.
+                            continue
                         except (json.JSONDecodeError, ValueError):
                             pass
                     if not is_agent:

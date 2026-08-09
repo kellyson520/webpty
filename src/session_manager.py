@@ -244,6 +244,15 @@ class SessionManager:
         if timer:
             timer.cancel()
         self._close_log_fh(session)
+        # Audit M1: a removed session's log files (up to ~10MB each) would
+        # otherwise linger on disk forever — delete them with the session.
+        log_path = session.get("log_path")
+        if log_path:
+            for p in (log_path, log_path + ".1"):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
         self.sessions.pop(sid, None)
         self._restart_counts.pop(sid, None)  # id reuse must not inherit counts
         self._stall_reported.pop(sid, None)
@@ -940,6 +949,13 @@ class SessionManager:
         session = self.sessions.get(sid)
         if not session:
             return False
+        # Audit L2: clamp hostile values (NaN / negatives / absurd sizes)
+        # so session state can't be poisoned by a malformed client.
+        try:
+            cols = max(1, min(int(cols), 1000))
+            rows = max(1, min(int(rows), 1000))
+        except (TypeError, ValueError):
+            cols, rows = 120, 30
         session["cols"] = cols
         session["rows"] = rows
         if session.get("engine") == "agent" or session.get("state") != "running":

@@ -86,6 +86,11 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_usage_ts ON token_usage (ts);
             CREATE INDEX IF NOT EXISTS idx_usage_session
                 ON token_usage (session_id, tokens_in, tokens_out);
+            -- audit M3: the estimated-cost NOT EXISTS subquery filters by
+            -- (session_id, source) — without source in the index every
+            -- summary call scans all rows per session.
+            CREATE INDEX IF NOT EXISTS idx_usage_src
+                ON token_usage (session_id, source);
 
             CREATE TABLE IF NOT EXISTS backups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,8 +148,12 @@ class Database:
         """Delete notifications and usage rows older than retention_days,
         then checkpoint the WAL (low-footprint: bounded DB growth)."""
         cutoff = _ts() - retention_days * 86400
+        # Audit L6: cap the notifications table absolutely — keep the most
+        # recent 500 rows even if the 90-day window grows large.
         deleted_notif = await self.execute(
-            "DELETE FROM notifications WHERE ts < ?", (cutoff,))
+            "DELETE FROM notifications WHERE ts < ? OR id NOT IN "
+            "(SELECT id FROM notifications ORDER BY id DESC LIMIT 500)",
+            (cutoff,))
         deleted_usage = await self.execute(
             "DELETE FROM token_usage WHERE ts < ?", (cutoff,))
         # WAL checkpoint: shrink the -wal file so it can't grow unbounded.
