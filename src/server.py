@@ -311,6 +311,13 @@ class Server:
             await self._send_json(writer, err.status, {"error": err.message}, headers)
         except (ConnectionError, OSError):
             pass
+        except Exception as err:  # noqa: BLE001 — last-resort: client gets a
+            # JSON error instead of a dropped connection.
+            log_error("http", err)
+            try:
+                await self._send_json(writer, 500, {"error": str(err)}, {})
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             if not ws_owned:
                 try:
@@ -558,6 +565,8 @@ class Server:
             body = await self._read_json(reader, headers)
             if not body.get("name") or not body.get("event_type"):
                 raise HttpError(400, "name and event_type required")
+            if not isinstance(body.get("matcher_json", "{}"), str):
+                raise HttpError(400, "matcher_json must be a string")
             rid = await self.db.upsert_rule(body)
             return await self._send_json(writer, 201, {"id": rid}, headers)
         m = re.match(r"^/api/notify/rules/(\d+)$", path)
@@ -565,6 +574,8 @@ class Server:
             body = await self._read_json(reader, headers)
             if not body.get("name") or not body.get("event_type"):
                 raise HttpError(400, "name and event_type required")
+            if not isinstance(body.get("matcher_json", "{}"), str):
+                raise HttpError(400, "matcher_json must be a string")
             body["id"] = int(m.group(1))
             await self.db.upsert_rule(body)
             return await self._send_json(writer, 200, {"ok": True}, headers)

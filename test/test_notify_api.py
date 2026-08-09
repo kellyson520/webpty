@@ -125,6 +125,15 @@ class NotifyApiTest(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(out, {"ok": False})
 
+    def test_rules_invalid_matcher_json_returns_400(self):
+        """matcher_json 非字符串 → 400(而非 500 或连接重置)。"""
+        st, j = self._req_err("POST", "/api/notify/rules", {
+            "name": "r-bad", "event_type": "failed",
+            "matcher_json": {"tool": "claude"}, "action": "email",
+            "level": "warn", "quiet_start": "", "quiet_end": "", "enabled": 1})
+        self.assertEqual(st, 400)
+        self.assertIn("error", j)
+
     def test_rules_validation(self):
         st, out = self._req_err("POST", "/api/notify/rules", {})
         self.assertEqual(st, 400)
