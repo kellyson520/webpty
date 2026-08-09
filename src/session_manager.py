@@ -724,6 +724,20 @@ class SessionManager:
             session["transcript"].append(item)
         if len(session["transcript"]) > AGENT_MAX_ITEMS:
             del session["transcript"][:len(session["transcript"]) - AGENT_MAX_ITEMS]
+        # Audit T1: persist the transcript incrementally (JSONL) so a server
+        # restart doesn't wipe the chat history — the WS snapshot is built
+        # from memory only today.
+        try:
+            tpath = session.get("_transcript_path")
+            if tpath is None:
+                base_dir = os.path.dirname(session.get("log_path") or "") or logs_dir
+                tpath = os.path.join(base_dir, f"{session['id']}.transcript.jsonl")
+                session["_transcript_path"] = tpath
+                os.makedirs(os.path.dirname(tpath), exist_ok=True)
+            with open(tpath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
         self._emit("agentEvent", session["id"], item)
 
     def agent_send(self, sid: str, text) -> bool:  # type: ignore[no-untyped-def]
@@ -1200,12 +1214,38 @@ class SessionManager:
             "rows": DEFAULT_ROWS,
             "engine": engine,
             "agent_session_id": stored.get("agentSessionId") or stored.get("agent_session_id"),
-            "transcript": [],
+            "transcript": self._load_transcript(stored) if engine == "agent" else [],
             "turn_active": False,
             "busy": False,
             "last_output_at": None,
             "recent_buf": RingBuffer(RECENT_BUF_CAP) if engine == "pty" else None,
         }
+
+    def _load_transcript(self, stored: dict) -> list:
+        """Audit T1: recover the chat history from the incremental JSONL
+        (last AGENT_MAX_ITEMS lines). Missing/corrupt → empty."""
+        sid = stored.get("id")
+        log_path = stored.get("logPath") or stored.get("log_path") or ""
+        base_dir = os.path.dirname(log_path) or logs_dir
+        tpath = os.path.join(base_dir, f"{sid}.transcript.jsonl")
+        out: list[dict] = []
+        try:
+            if not os.path.isfile(tpath):
+                return out
+            with open(tpath, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                    if len(out) > AGENT_MAX_ITEMS:
+                        del out[:len(out) - AGENT_MAX_ITEMS]
+        except OSError:
+            return []
+        return out
 
     def _persist(self) -> None:
         self.config["sessions"] = [

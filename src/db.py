@@ -112,12 +112,15 @@ class Database:
         self._conn.commit()
         # Audit N2: matched_rules column for notification auditability —
         # added lazily so existing DBs migrate without a version bump.
-        try:
-            self._conn.execute(
-                "ALTER TABLE notifications ADD COLUMN matched_rules TEXT")
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for col, ddl in (("matched_rules", "TEXT"),
+                         ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                         ("last_error", "TEXT")):
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE notifications ADD COLUMN {col} {ddl}")
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     async def execute(self, sql: str, params: tuple = ()) -> int:
         assert self._conn is not None
@@ -191,9 +194,20 @@ class Database:
             (1 if delivered else 0, notif_id))
 
     async def pending_notifications(self, limit: int = 50) -> list[dict]:
+        # Audit T4: only rows still under the retry cap (attempts < 10).
         return await self.query(
-            "SELECT * FROM notifications WHERE delivered=0 ORDER BY ts ASC LIMIT ?",
+            "SELECT * FROM notifications WHERE delivered=0 AND attempts < 10 "
+            "ORDER BY ts ASC LIMIT ?",
             (limit,))
+
+    async def bump_notify_attempt(self, notif_id: int, err: str) -> None:
+        """Audit T4: record a failed send attempt; mark dead at the cap."""
+        await self.execute(
+            "UPDATE notifications SET attempts = attempts + 1, last_error = ? "
+            "WHERE id = ?", (err, notif_id))
+        await self.execute(
+            "UPDATE notifications SET delivered = 2 WHERE id = ? AND attempts >= 10",
+            (notif_id,))
 
     # ---- rules ---------------------------------------------------------
     async def list_rules(self) -> list[dict]:

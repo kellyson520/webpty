@@ -573,31 +573,41 @@ class Server:
         m = re.match(r"^/api/sessions/([^/]+)/stop$", path)
         if m and method == "POST":
             ok = await self.sessions.stop(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok}, headers)
+            if not ok:
+                raise HttpError(404, "session not found or already stopped")
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/interrupt$", path)
         if m and method == "POST":
             # Audit C1: interrupt the current turn (SIGINT for agents,
             # Ctrl+C for pty) — graceful vs stop()'s kill.
             ok = await self.sessions.interrupt(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok}, headers)
+            if not ok:
+                raise HttpError(409, "nothing to interrupt")
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/reset$", path)
         if m and method == "POST":
             # Audit A1: start a brand-new agent conversation (drop --resume).
             ok = await self.sessions.reset(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok}, headers)
+            if not ok:
+                raise HttpError(409, "only agent sessions can be reset")
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)$", path)
         if m and method == "DELETE":
             ok = await self.sessions.remove(m.group(1))
-            return await self._send_json(writer, 200, {"ok": ok}, headers)
+            if not ok:
+                raise HttpError(404, "session not found")
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/input$", path)
         if m and method == "POST":
             body = await self._read_json(reader, headers)
             ok = self.sessions.write(m.group(1), body.get("bytes") or "")
-            return await self._send_json(writer, 200, {"ok": ok}, headers)
+            if not ok:
+                raise HttpError(409, "session not running")
+            return await self._send_json(writer, 200, {"ok": True}, headers)
 
         # --- notifications -----------------------------------------------------
         if path == "/api/notify/rules" and method == "GET":
@@ -1110,6 +1120,21 @@ class Server:
             return
         asyncio.create_task(self._ws_session(ws, sid))
 
+    def _input_offline_hint(self, sid: str, outbox) -> None:
+        """Audit T3: throttle one terminal-visible notice per 5s while the
+        pty-host is unreachable (write() failing)."""
+        import time as _t
+        now = _t.monotonic()
+        if now - getattr(self, "_offline_hint_at", 0.0) < 5.0:
+            return
+        self._offline_hint_at = now
+        hint = ("\r\n[webpty] pty-host 不可达，输入暂未送达——正在自动重连…\r\n"
+                "\x1b[K").encode("utf-8")
+        try:
+            outbox.send(hint, binary=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _send_snapshot(self, outbox, sid: str) -> None:
         """Chunked transcript snapshot (audit 8.1/N1): serialize in the
         executor, send ~256KB frames; the frontend accumulates + parses
@@ -1292,10 +1317,15 @@ class Server:
                         except (json.JSONDecodeError, ValueError):
                             pass
                     if not is_agent:
-                        self.sessions.write(sid, payload)
+                        if not self.sessions.write(sid, payload):
+                            # Audit T3: pty-host down (crash window) silently
+                            # swallowed input — surface it once so the user
+                            # knows typing isn't reaching the shell.
+                            self._input_offline_hint(sid, outbox)
                 elif opcode == 0x2:  # binary
                     if not is_agent:
-                        self.sessions.write(sid, payload)
+                        if not self.sessions.write(sid, payload):
+                            self._input_offline_hint(sid, outbox)
         finally:
             self.sessions.off("output", on_output)
             self.sessions.off("agentEvent", on_agent_event)

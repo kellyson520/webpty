@@ -513,6 +513,23 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s1["proc"].stdin.data, [])  # nothing written
         self.assertTrue(any(e.get("t") == "system" for e in events))
 
+    async def test_transcript_persists_and_reloads(self):
+        # T1: push items → JSONL on disk → a fresh manager instance reloads
+        # the transcript (server restart keeps the chat history).
+        import os as _os
+        s1 = self.sm.create(name="tp", cwd="/a", tool="claude-chat")
+        s1["engine"] = "agent"
+        s1["log_path"] = _os.path.join(_TEST_DIR, "tp.log")
+        self.sm._push_agent(s1, {"t": "user", "text": "hi"})
+        self.sm._push_agent(s1, {"t": "system", "text": "ok"})
+        tpath = s1["_transcript_path"]
+        self.assertTrue(_os.path.isfile(tpath))
+        # Reload via _load_transcript from the stored dict.
+        loaded = self.sm._load_transcript({
+            "id": s1["id"], "log_path": s1["log_path"]})
+        self.assertEqual([i.get("t") for i in loaded], ["user", "system"])
+        self.assertEqual(loaded[0]["text"], "hi")
+
 
 class NormalizeToolResultTest(unittest.TestCase):
     def test_string_passthrough_truncated(self):

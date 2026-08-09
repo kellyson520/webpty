@@ -109,8 +109,11 @@ class Notifier:
                 await self._send_mail(row["id"], event)
                 await self.db.mark_delivered(row["id"], True)
                 sent += 1
-            except Exception:  # noqa: BLE001
-                continue
+            except Exception as err:  # noqa: BLE001
+                # Audit T4: record the failure; give up after MAX_ATTEMPTS
+                # (delivered=2 = dead) instead of retrying forever until
+                # prune_old_data deletes the row.
+                await self.db.bump_notify_attempt(row["id"], str(err)[:300])
         return sent
 
     async def test_message(self) -> bool:

@@ -519,6 +519,14 @@ function connectSocket(entry, session, attempt = 0) {
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
     if (live.get(session.id) !== entry) return;
+    // Audit T5: repeated handshake failures (attempt>=3) with a token set
+    // usually mean the token was revoked/rotated — stop hammering and
+    // re-prompt for the token instead of a forever-reconnect loop.
+    if (attempt >= 3 && (localStorage.getItem('webpty.token') || document.cookie.includes('webpty_token'))) {
+      showHint('连接被拒绝——令牌可能已失效，请重新解锁', 6000);
+      setTimeout(() => showTokenGate(), 1500);
+      return;
+    }
     // Connection-loss visibility (audit V1): without this, input typed
     // while disconnected vanished silently. Hint shows until the next
     // successful open.
@@ -1118,6 +1126,13 @@ function connectChatSocket(entry, session, attempt = 0) {
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
     if (live.get(session.id) !== entry) return;
+    // Audit T5 (same as pty path): repeated failures with a token set →
+    // re-prompt instead of an endless reconnect loop.
+    if (attempt >= 3 && (localStorage.getItem('webpty.token') || document.cookie.includes('webpty_token'))) {
+      showHint('连接被拒绝——令牌可能已失效，请重新解锁', 6000);
+      setTimeout(() => showTokenGate(), 1500);
+      return;
+    }
     showHint('连接断开，正在重连…', 10000);
     const delay = Math.min(5000, 250 * 2 ** attempt);
     setTimeout(() => connectChatSocket(entry, session, attempt + 1), delay);
@@ -1566,7 +1581,7 @@ function renderTabs() {
       closeBtn.onclick = async (ev) => {
         ev.stopPropagation();
         ev.preventDefault();
-        if (!confirm(`关闭会话「${s.name}」？`)) return;
+        if (!confirm(`关闭会话「${s.name}」？${isAgent(s) ? '（对话上下文仍可通过重新打开项目恢复）' : '（进程将被终止，输出历史不可恢复）'}`)) return;
         try {
           await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
         } catch (e) {

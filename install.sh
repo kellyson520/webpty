@@ -113,9 +113,16 @@ if [ "$DO_UPDATE_CLI" = 1 ]; then
   echo ">> updating installed agent CLIs (keeps your tools in sync, not frozen)"
   for pkg in "${AGENT_CLI_PACKAGES[@]}"; do
     if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then
-      before="$(npm ls -g --depth=0 "$pkg" 2>/dev/null | sed -n '2p')"
-      echo ">> updating $pkg ($before)"
-      npm update -g "$pkg" --no-audit --no-fund 2>&1 | tail -1 || echo "   (update failed for $pkg, continuing)"
+      before="$(npm ls -g --depth=0 "$pkg" 2>/dev/null | sed -n '2p' | sed 's/.*@//')"
+      echo ">> updating $pkg (before: $before)"
+      npm update -g "$pkg" --no-audit --no-fund >/dev/null 2>&1 \
+        && after="$(npm ls -g --depth=0 "$pkg" 2>/dev/null | sed -n '2p' | sed 's/.*@//')" \
+        || after="(failed)"
+      if [ "$before" = "$after" ]; then
+        echo "   $pkg: $before (already latest)"
+      else
+        echo "   $pkg: $before → $after"
+      fi
     else
       echo "   $pkg not installed globally — skipping"
     fi

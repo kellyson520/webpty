@@ -67,6 +67,30 @@ class NotifierTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertIn("audit-me", items[0]["matched_rules"] or "")
 
+    async def test_send_pending_gives_up_after_cap(self):
+        # T4: failed sends bump attempts; past 10 the row is dead
+        # (delivered=2) and no longer picked up.
+        import notifier as _nf
+        nid = await self.db.add_notification({
+            "event_type": "failed", "level": "warn", "tool": "claude",
+            "session_id": "s1", "title": "t", "body": "b",
+            "dedup_key": "k-cap"})
+        orig = _nf.Notifier._send_mail
+
+        async def fail(self, nid, event):
+            raise RuntimeError("smtp down")
+
+        _nf.Notifier._send_mail = fail
+        try:
+            for _ in range(10):
+                await self.n.send_pending()
+        finally:
+            _nf.Notifier._send_mail = orig
+        page = await self.db.list_notifications(1)
+        self.assertEqual(page["items"][0]["delivered"], 2)
+        # dead rows are no longer pending
+        self.assertEqual(await self.db.pending_notifications(), [])
+
     async def test_rule_level_escalation_and_mail(self):
         await self.db.upsert_rule({
             "name": "r", "event_type": "failed",
