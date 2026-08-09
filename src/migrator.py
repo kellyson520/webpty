@@ -63,6 +63,7 @@ def sanitize_import_config(cfg: dict) -> dict:
     allowed_cmds = {str(t.get("command"))
                     for t in DEFAULT_TOOLS.values() if t}
     out = {}
+    dropped_tools: list[str] = []
     for k, v in cfg.items():
         if _is_sensitive(k) or k == "sessions":
             continue  # 凭据 + 运行时会话列表永不导入
@@ -74,6 +75,10 @@ def sanitize_import_config(cfg: dict) -> dict:
                 t = dict(tv)
                 cmd = str(t.get("command") or "")
                 if cmd and cmd not in allowed_cmds:
+                    # Audit M4 (v22): dropped custom tools were silent —
+                    # surface them so the operator knows the target host
+                    # must recreate them by hand.
+                    dropped_tools.append(name)
                     continue  # drop tools with non-builtin commands
                 t.pop("apiKey", None)
                 tools[name] = t
@@ -89,7 +94,7 @@ def sanitize_import_config(cfg: dict) -> dict:
             out[k] = providers
             continue
         out[k] = v
-    return out
+    return out, dropped_tools
 
 
 class WorkerInterface:
@@ -214,7 +219,7 @@ class Migrator(WorkerInterface):
         # Security: sanitize the imported config BEFORE applying it. Never
         # import credentials or executable fields from an untrusted package —
         # that would be config injection (RCE / auth takeover).
-        incoming = sanitize_import_config(incoming)
+        incoming, dropped_tools = sanitize_import_config(incoming)
         if mode == "dry-run":
             current = dict(self.config)
             changed = []
@@ -225,7 +230,15 @@ class Migrator(WorkerInterface):
                         changed.append({"key": k, "incoming": "redacted"})
                     else:
                         changed.append({"key": k, "incoming": v})
-            return {"status": "dry-run", "mode": mode, "changes": changed}
+            return {"status": "dry-run", "mode": mode, "changes": changed,
+                    "dropped_tools": dropped_tools}
+        # Audit M4 (v22): normalize the imported config exactly like
+        # load_config does — default-key injection, tools merge, type
+        # validation — instead of bypassing it with a raw update (a replace
+        # of an old package used to drop new-version defaults until the
+        # next restart).
+        from config import normalize_config
+        incoming = normalize_config(incoming)
         if mode == "replace":
             self.config.clear()
             self.config.update(incoming)
@@ -255,7 +268,8 @@ class Migrator(WorkerInterface):
             "mode": mode, "status": "done",
             "log": json.dumps({"schema_version":
                                pkg["manifest"].get("schema_version")})})
-        return {"status": "done", "mode": mode}
+        return {"status": "done", "mode": mode,
+                "dropped_tools": dropped_tools}
 
     async def clone(self, template_path: str) -> dict:
         backups_dir = os.path.realpath(os.path.join(self.data_dir, "backups"))

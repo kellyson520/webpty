@@ -230,10 +230,11 @@
           <div class="panel-toolbar">
             <label class="field">规则
               <select id="notify-rule-type" class="sel">
-                <option value="failed">failed</option>
-                <option value="completed">completed</option>
-                <option value="crashed">crashed</option>
-                <option value="terminated">terminated</option>
+                <option value="failed">failed（失败）</option>
+                <option value="completed">completed（完成）</option>
+                <option value="crashed">crashed（崩溃）</option>
+                <option value="terminated">terminated（已停止）</option>
+                <option value="stopped">stopped（已停止）</option>
               </select>
             </label>
             <label class="field">matcher JSON（可选）
@@ -276,6 +277,11 @@
             </label>
             <button id="cost-budget-set" class="btn" type="button">设置</button>
             <button id="cost-reconcile" class="btn" type="button">⟳ 日志校对</button>
+            <select id="cost-reconcile-tool" class="sel" title="校对哪个工具的日志">
+              <option value="claude">claude</option>
+              <option value="reasonix">reasonix</option>
+              <option value="opencode">opencode</option>
+            </select>
             <button id="cost-export" class="btn" type="button">⬇ 导出 CSV</button>
           </div>
           <div id="cost-cards" class="cost-cards"></div>

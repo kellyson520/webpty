@@ -207,7 +207,7 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
         existing = {}
     merged = dict(existing)
     from migrator import sanitize_import_config
-    cfg = sanitize_import_config(cfg)  # 拒绝导入凭据/可执行字段(同 migrate)
+    cfg, _dropped = sanitize_import_config(cfg)  # 拒绝导入凭据/可执行字段(同 migrate)
     merged.update(cfg)  # merge 语义：备份覆盖冲突键，保留现有新增键
     merged.pop("sessions", None)  # 会话是运行时状态,restore 不恢复(防幽灵会话)
     _atomic_write_json(cfg_path, merged)

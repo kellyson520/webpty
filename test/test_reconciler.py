@@ -6,7 +6,7 @@ import unittest
 
 from cost_tracker import CostTracker
 from db import Database
-from reconciler import Reconciler, scan_claude_logs
+from reconciler import Reconciler, scan_claude_logs, scan_tool_logs
 
 
 class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
@@ -36,6 +36,26 @@ class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(i["session_id"] == "session-x" for i in items))
         self.assertTrue(all(i["project"] == os.path.join(self.projects, "proj-a")
                             for i in items))
+
+    def test_scan_tool_logs_estimates_reasonix(self):
+        """Audit H1 (v22): reasonix session JSONLs have no usage fields —
+        tokens are estimated from content length, model from filename."""
+        import json as _json
+        rx = os.path.join(self.tmp, "reasonix")
+        d = os.path.join(rx, "projects", "-root-webpty", "sessions")
+        os.makedirs(d)
+        with open(os.path.join(d, "20260808-010000-deepseek-v4-flash.jsonl"),
+                  "w", encoding="utf-8") as f:
+            f.write(_json.dumps({"role": "user", "content": "x" * 40}) + "\n")
+            f.write(_json.dumps({"role": "assistant", "content": "y" * 80}) + "\n")
+            f.write(_json.dumps({"role": "user",
+                                 "content": [{"type": "text", "text": "z" * 16}]}) + "\n")
+        items = scan_tool_logs(rx, "reasonix")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["tokens_in"], 14)  # (40+16)/4
+        self.assertEqual(items[0]["tokens_out"], 20)  # 80/4
+        self.assertEqual(items[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(items[0]["session_id"], "20260808-010000-deepseek-v4-flash")
 
     async def test_reconcile_persists_posthoc(self):
         r = Reconciler(self.db, self.cfg)

@@ -200,6 +200,23 @@ def load_config() -> dict:
         _backup_broken_config("config.json is not a config object")
         raw = {}
 
+    # Audit M4 (v22): the merge/normalize block is shared with the migrate
+    # importer so an imported package gets the same default injection +
+    # validation as a fresh load (no more raw config bypass).
+    merged = normalize_config(raw)
+
+    # Persist merged form so newly added defaults (e.g. new tools) appear on disk.
+    save_config(merged)
+    return merged
+
+
+def normalize_config(raw: dict) -> dict:
+    """Merge a raw config dict with defaults + validation (audit M4).
+
+    Extracted from load_config so migrate import can reuse it — imported
+    packages previously bypassed default-key injection and type checks.
+    Does NOT save; the caller decides when to persist.
+    """
     # --- tools merge -------------------------------------------------------
     raw_tools = raw.get("tools") if isinstance(raw.get("tools"), dict) else {}
     merged_tools: dict = {}
@@ -272,8 +289,6 @@ def load_config() -> dict:
     else:
         merged["authToken"] = ""
 
-    # Persist merged form so newly added defaults (e.g. new tools) appear on disk.
-    save_config(merged)
     return merged
 
 

@@ -845,20 +845,42 @@ class Server:
             save_config(self.config)  # persist the budget across restarts
             return await self._send_json(writer, 200, {"ok": True}, headers)
         if path == "/api/cost/reconcile" and method == "POST":
-            from reconciler import Reconciler
-            claude_dir = os.path.expanduser("~/.claude/projects")
+            from reconciler import Reconciler, scan_claude_logs, scan_tool_logs
             rec = Reconciler(self.db, self.config)
-            # File scan is blocking I/O — run it in a thread so the event
-            # loop (and every other session) stays responsive.
-            from reconciler import scan_claude_logs
-            items = await asyncio.get_event_loop().run_in_executor(
-                None, scan_claude_logs, claude_dir)
+            loop = asyncio.get_event_loop()
+            body = {}
+            try:
+                body = await self._read_json(reader, headers)
+            except Exception:  # noqa: BLE001 — empty body = default tool
+                pass
+            tool = str(body.get("tool") or "claude")
             added = 0
-            for u in items:
-                try:
-                    added += await rec._add_one(u, "claude")
-                except Exception:  # noqa: BLE001
-                    continue
+            if tool == "claude":
+                # File scan is blocking I/O — run it in a thread so the
+                # event loop (and every other session) stays responsive.
+                claude_dir = os.path.expanduser("~/.claude/projects")
+                items = await loop.run_in_executor(
+                    None, scan_claude_logs, claude_dir)
+                for u in items:
+                    try:
+                        added += await rec._add_one(u, "claude")
+                    except Exception:  # noqa: BLE001
+                        continue
+            elif tool in ("reasonix", "opencode"):
+                # Audit H1 (v22): reasonix sessions live under
+                # ~/.reasonix/projects/<enc>/sessions/*.jsonl with NO usage
+                # fields — tokens are estimated from content length.
+                rx_dir = os.path.join(os.path.expanduser("~"), ".reasonix",
+                                      "projects")
+                items = await loop.run_in_executor(
+                    None, scan_tool_logs, rx_dir, tool)
+                for u in items:
+                    try:
+                        added += await rec._add_one(u, tool)
+                    except Exception:  # noqa: BLE001
+                        continue
+            else:
+                raise HttpError(400, "tool must be claude, reasonix or opencode")
             return await self._send_json(writer, 200, {"added": added}, headers)
 
         # --- backups -----------------------------------------------------------
@@ -1443,8 +1465,19 @@ class Server:
                 # yet attached): lost. Now they're delivered as live frames
                 # after the snapshot, and the frontend defers live frames
                 # until the snapshot replay finishes.
+                # Audit M3: the initial snapshot must take part in the
+                # per-session _snapshot_pending mutex — a slow consumer
+                # overflowing the outbox mid-serialization used to start a
+                # SECOND snapshot stream (mutex not set) that interleaved
+                # with the first and broke the client's chunk parser.
+                if session.get("_snapshot_pending"):
+                    await self._send_snapshot(outbox, sid)
+                else:
+                    session["_snapshot_pending"] = True
+                    task = asyncio.create_task(self._send_snapshot(outbox, sid))
+                    task.add_done_callback(
+                        lambda t: session.__setitem__("_snapshot_pending", False))
                 self.sessions.on("agentEvent", on_agent_event)
-                await self._send_snapshot(outbox, sid)
             else:
                 recent = self.sessions.recent_output(sid)
                 if not recent:

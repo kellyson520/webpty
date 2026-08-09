@@ -55,7 +55,8 @@ switch between live sessions with a swipe.
   SQLite 记录 + SMTP 邮件（可选）+ WebUI 面板；60s 去重、静默时段、失败重试
   **Notification center** — session events → rule matching → SQLite records +
   optional SMTP mail + WebUI panel; 60s dedup, quiet hours, retry.
-- **成本账单**：agent stream-json 实时计量（claude/reasonix/opencode 等）+
+- **成本账单**：agent stream-json 实时计量（claude 等 agent 引擎）+ 日志校对补录
+  （claude 逐行 usage + reasonix/opencode 会话估算）+
   日志事后校对；内置价格表可覆盖；预算限额告警
   **Cost billing** — real-time stream-json metering + post-hoc log
   reconciliation; built-in price table overridable; budget alerts.

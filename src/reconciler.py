@@ -48,6 +48,69 @@ def scan_claude_logs(projects_dir: str) -> list[dict]:
     return out
 
 
+def scan_tool_logs(sessions_dir: str, tool: str,
+                   model_hint: str | None = None) -> list[dict]:
+    """Audit H1 (v22): generic post-hoc scan for tools that persist chat
+    JSONL without per-turn usage (reasonix/opencode). Tokens are ESTIMATED
+    from content length (chars/4); the model comes from the filename
+    (<ts>-<model>.jsonl) or the hint. Cost is computed downstream via the
+    price table — these rows are estimates by nature (source=posthoc).
+    """
+    import json
+    out: list[dict] = []
+    if not os.path.isdir(sessions_dir):
+        return out
+    for root, _dirs, files in os.walk(sessions_dir):
+        for fn in files:
+            if not fn.endswith(".jsonl"):
+                continue
+            session_id = fn[:-6]
+            path = os.path.join(root, fn)
+            model = model_hint
+            if not model:
+                # reasonix filenames: <ts>-<model>.jsonl where the ts itself
+                # contains dashes (20260808-013650.798429509-deepseek-v4-flash)
+                # — strip the leading numeric timestamp, keep the rest.
+                import re as _re
+                base = fn[:-6]
+                m = _re.match(r"^[\d.:\-]+-", base)
+                model = base[m.end():] if m else (base or tool)
+            t_in = t_out = 0
+            try:
+                size = os.path.getsize(path)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    if size > MAX_SCAN_FILE_BYTES:
+                        f.seek(size - MAX_SCAN_FILE_BYTES)
+                        f.readline()
+                    for line in f:
+                        try:
+                            evt = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(evt, dict):
+                            continue
+                        role = evt.get("role")
+                        content = evt.get("content") or ""
+                        if isinstance(content, list):
+                            content = " ".join(
+                                str(c.get("text") or "") if isinstance(c, dict) else str(c)
+                                for c in content)
+                        est = max(1, len(str(content)) // 4)
+                        if role == "user":
+                            t_in += est
+                        elif role == "assistant":
+                            t_out += est
+            except OSError:
+                continue
+            if t_in or t_out:
+                out.append({
+                    "session_id": session_id, "project": root,
+                    "tokens_in": t_in, "tokens_out": t_out,
+                    "model": model or tool,
+                })
+    return out
+
+
 class Reconciler:
     def __init__(self, db, config: dict) -> None:
         self.db = db

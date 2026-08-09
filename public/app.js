@@ -534,8 +534,11 @@ function makeHangulComposer(send) {
   };
 }
 
-function connectSocket(entry, session, attempt = 0) {
-  if (live.get(session.id) !== entry) return; // entry was disposed during retry
+// Audit M6 (v22): shared WS setup — URL construction, token-revoked
+// handling, guarded reconnect backoff, onerror marker. Both the pty and
+// chat engines use it so their reconnect behavior can't drift apart.
+function openWs(entry, session, attempt, { onopen, onmessage, reconnect }) {
+  if (live.get(session.id) !== entry) return null; // entry disposed during retry
   try { entry.socket?.close(); } catch {}
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   // No ?token= in the URL — the webpty_token cookie travels with the
@@ -545,14 +548,55 @@ function connectSocket(entry, session, attempt = 0) {
   ws.onopen = () => {
     if (attempt > 0) showHint('', 0); // reconnected — clear the offline hint
     attempt = 0;
-    // Audit M2: reset the terminal before the server replays the recent
-    // buffer — without it, TUI frames (which start with a clear-screen
-    // sequence that lands inside the truncated ring) stacked on stale
-    // pixels and reasonix rendered misaligned after every reconnect.
-    try { entry.term.reset(); } catch {}
-    ws.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
+    if (onopen) onopen(ws);
   };
-  ws.onmessage = (event) => {
+  ws.onmessage = (event) => onmessage(event, ws);
+  ws.onerror = () => {
+    // Distinguish network-level failure from a clean close; onclose
+    // always follows, so the reconnect logic stays there.
+    entry.lastWsError = 'network';
+  };
+  ws.onclose = () => {
+    if (entry.socket === ws) entry.socket = null;
+    if (live.get(session.id) !== entry) return;
+    // Audit T5: repeated handshake failures (attempt>=3) with a token set
+    // usually mean the token was revoked/rotated — stop hammering and
+    // re-prompt for the token instead of a forever-reconnect loop.
+    if (attempt >= 3 && (localStorage.getItem('webpty.token') || document.cookie.includes('webpty_token'))) {
+      showHint('连接被拒绝——令牌可能已失效，请重新解锁', 6000);
+      setTimeout(() => showTokenGate(), 1500);
+      return;
+    }
+    // Connection-loss visibility (audit V1): without this, input typed
+    // while disconnected vanished silently. Hint shows until the next
+    // successful open.
+    showHint('连接断开，正在重连…', 10000);
+    const delay = Math.min(5000, 250 * 2 ** attempt);
+    // Audit M2: guard the retry timer — if a newer connection was already
+    // created (manual retry / tab switch), the stale timer must not close
+    // it and schedule yet another one (flutter → timer pile-up).
+    clearTimeout(entry._reconnectTimer);
+    entry._reconnectTimer = setTimeout(() => {
+      if (entry.socket === ws || !entry.socket) {
+        reconnect(attempt + 1);
+      }
+    }, delay);
+  };
+  entry.socket = ws;
+  return ws;
+}
+
+function connectSocket(entry, session, attempt = 0) {
+  openWs(entry, session, attempt, {
+    onopen: (ws) => {
+      // Audit M2: reset the terminal before the server replays the recent
+      // buffer — without it, TUI frames (which start with a clear-screen
+      // sequence that lands inside the truncated ring) stacked on stale
+      // pixels and reasonix rendered misaligned after every reconnect.
+      try { entry.term.reset(); } catch {}
+      ws.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
+    },
+    onmessage: (event) => {
     if (typeof event.data === 'string' && event.data.startsWith('{')) {
       try {
         const msg = JSON.parse(event.data);
@@ -614,31 +658,9 @@ function connectSocket(entry, session, attempt = 0) {
     } else {
       entry.term.write(data);
     }
-  };
-  ws.onerror = () => {
-    // Audit L2: distinguish network-level failure from a clean close.
-    // onclose always follows, so the reconnect logic stays there.
-    entry.lastWsError = 'network';
-  };
-  ws.onclose = () => {
-    if (entry.socket === ws) entry.socket = null;
-    if (live.get(session.id) !== entry) return;
-    // Audit T5: repeated handshake failures (attempt>=3) with a token set
-    // usually mean the token was revoked/rotated — stop hammering and
-    // re-prompt for the token instead of a forever-reconnect loop.
-    if (attempt >= 3 && (localStorage.getItem('webpty.token') || document.cookie.includes('webpty_token'))) {
-      showHint('连接被拒绝——令牌可能已失效，请重新解锁', 6000);
-      setTimeout(() => showTokenGate(), 1500);
-      return;
-    }
-    // Connection-loss visibility (audit V1): without this, input typed
-    // while disconnected vanished silently. Hint shows until the next
-    // successful open.
-    showHint('连接断开，正在重连…', 10000);
-    const delay = Math.min(5000, 250 * 2 ** attempt);
-    setTimeout(() => connectSocket(entry, session, attempt + 1), delay);
-  };
-  entry.socket = ws;
+  },
+    reconnect: (nextAttempt) => connectSocket(entry, session, nextAttempt),
+  });
 
   // Composer + onData are wired once per entry. The composer reads
   // entry.socket dynamically so it keeps working across reconnects.
@@ -1190,14 +1212,9 @@ function ensureChat(entry, session) {
 }
 
 function connectChatSocket(entry, session, attempt = 0) {
-  if (live.get(session.id) !== entry) return;
-  try { entry.socket?.close(); } catch {}
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // No ?token= in the URL — the webpty_token cookie travels with the
-  // handshake (Issue 3.3 keeps the token out of logs/history/Referer).
-  const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
-  ws.onopen = () => { attempt = 0; };
-  ws.onmessage = (event) => {
+  openWs(entry, session, attempt, {
+    onopen: () => { /* chat has no terminal to reset; attempt reset handled */ },
+    onmessage: (event) => {
     if (typeof event.data !== 'string') return;
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
@@ -1206,6 +1223,12 @@ function connectChatSocket(entry, session, attempt = 0) {
     // history rendered as permanently empty after a reconnect. Use the
     // entry's render state object explicitly.
     const r = entry.render;
+    if (msg.type === 'reconnected') {
+      // Audit L3: agent sessions also get pty-host recovery events —
+      // clear any stale offline hint (the transcript snapshot follows).
+      showHint('', 0);
+      return;
+    }
     if (msg.type === 'snapshot') {
       if (msg.chunk !== undefined) {
         // Chunked snapshot (audit 8.1): accumulate string chunks until
@@ -1245,22 +1268,9 @@ function connectChatSocket(entry, session, attempt = 0) {
     } else if (msg.type === 'state') {
       applySessionState(msg.session);
     }
-  };
-  ws.onclose = () => {
-    if (entry.socket === ws) entry.socket = null;
-    if (live.get(session.id) !== entry) return;
-    // Audit T5 (same as pty path): repeated failures with a token set →
-    // re-prompt instead of an endless reconnect loop.
-    if (attempt >= 3 && (localStorage.getItem('webpty.token') || document.cookie.includes('webpty_token'))) {
-      showHint('连接被拒绝——令牌可能已失效，请重新解锁', 6000);
-      setTimeout(() => showTokenGate(), 1500);
-      return;
-    }
-    showHint('连接断开，正在重连…', 10000);
-    const delay = Math.min(5000, 250 * 2 ** attempt);
-    setTimeout(() => connectChatSocket(entry, session, attempt + 1), delay);
-  };
-  entry.socket = ws;
+  },
+    reconnect: (nextAttempt) => connectChatSocket(entry, session, nextAttempt),
+  });
 }
 
 function setChatPending(entry, on) {
@@ -1458,8 +1468,15 @@ function renderChatItem(entry, item) {
             type: 'permission', __ctl: true,
             requestId: item.requestId, accept,
           }));
+          // Audit M1: only disable once the response is actually sent —
+          // a disconnected send() previously disabled the buttons anyway,
+          // silently dropping the answer and hanging the agent forever.
+          approve.disabled = deny.disabled = true;
+        } else {
+          // Audit M1: don't swallow the answer — tell the user to retry
+          // after the reconnect (the snapshot replay rebuilds this card).
+          showHint('连接已断开，批准未送达——重连后请重新点击', 4000);
         }
-        approve.disabled = deny.disabled = true;
       };
       approve.onclick = () => send(true);
       deny.onclick = () => send(false);
@@ -2868,6 +2885,17 @@ async function bootstrap() {
   }
 })();
 
+// Audit L2 (v22): on page unload, close sockets + clear poll timers so
+// the browser doesn't keep the page's connections alive in bfcache.
+window.addEventListener('pagehide', () => {
+  try { pollTimer && clearTimeout(pollTimer); } catch {}
+  try { pollTimer = null; } catch {}
+  for (const [, entry] of live) {
+    try { entry.socket?.close(); } catch {}
+    try { entry._reconnectTimer && clearTimeout(entry._reconnectTimer); } catch {}
+  }
+});
+
 // ---- Global error visibility (diagnostics) ----
 // Surface any uncaught runtime error on the page so problems are visible
 // instead of silently breaking input/rendering.
@@ -3089,7 +3117,13 @@ document.getElementById('cost-budget-set').onclick = async () => {
 };
 document.getElementById('cost-reconcile').onclick = async () => {
   try {
-    const r = await api('/api/cost/reconcile', { method: 'POST' });
+    // Audit H1 (v22): reconcile now covers reasonix/opencode too (their
+    // session JSONLs carry no usage — tokens are estimated).
+    const tool = document.getElementById('cost-reconcile-tool').value;
+    const r = await api('/api/cost/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ tool })
+    });
     alert(`日志校对完成，补录 ${r?.added ?? 0} 条`);
     refreshCostPanel();
   } catch (e) {
@@ -3214,7 +3248,10 @@ document.getElementById('migrate-do').onclick = async () => {
          </div>
        </div>` +
       (out.changes && typeof out.changes === 'object' && Object.keys(out.changes).length
-        ? `<div class="result-pre">${esc(JSON.stringify(out.changes, null, 2))}</div>` : '');
+        ? `<div class="result-pre">${esc(JSON.stringify(out.changes, null, 2))}</div>` : '') +
+      // Audit M4 (v22): tell the operator which custom tools were dropped.
+      (out.dropped_tools && out.dropped_tools.length
+        ? `<div class="panel-item"><div class="item-title">⚠ 已丢弃的源机自定义工具（目标机需手动重建）</div><div class="item-sub">${esc(out.dropped_tools.join(', '))}</div></div>` : '');
   } catch (e) {
     alert('导入失败: ' + e.message);
   }
