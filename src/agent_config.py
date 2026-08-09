@@ -48,6 +48,13 @@ MAX_READ_BYTES = 256 * 1024
 # TOML tools: key name in the file -> how to match & replace its line(s).
 # Each entry: (regex that matches the whole key line, value formatter).
 # The regex must anchor ^ and match the value part as group 1.
+def _SECTION_KEYS(section_re: str, keys: dict[str, tuple[str, str]]) -> tuple:
+    """Build a section-scoped key spec: (section_re, {key: (line_re, fmt)}).
+    Used for dotted keys like `model_providers.<id>.base_url` whose target
+    lines live inside a named [section] rather than at top level.
+    """
+    return (section_re, keys)
+
 TOML_KEYS: dict[str, dict[str, tuple[str, str]]] = {
     "codex": {
         "model": (r'^model\s*=\s*".*?"', 'model = "{}"'),
@@ -56,6 +63,12 @@ TOML_KEYS: dict[str, dict[str, tuple[str, str]]] = {
         "model_provider": (r'^model_provider\s*=\s*".*?"', 'model_provider = "{}"'),
         "temperature": (r'^temperature\s*=\s*"?[^"]*"?', 'temperature = {}'),
         "proxy": (r'^proxy\s*=\s*".*?"', 'proxy = "{}"'),
+        # Section-scoped provider keys: model_providers.<id>.base_url / api_key
+        # rewrite inside [model_providers."<id>"] (see _set_toml_section_key).
+        "model_providers": _SECTION_KEYS(
+            r'^\[model_providers\.(?:"([^"]+)"|([^\]]+))\]',
+            {"base_url": (r'^\s*base_url\s*=\s*".*?"', 'base_url = "{}"'),
+             "api_key": (r'^\s*api_key\s*=\s*".*?"', 'api_key = "{}"')}),
     },
     "reasonix": {
         "model": (r'^default_model\s*=\s*".*?"', 'default_model = "{}"'),
@@ -220,6 +233,63 @@ def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> t
     return "".join(out), replaced
 
 
+def _set_toml_section_key(content: str, section_re: str, dotted_key: str,
+                          sub_keys: dict[str, tuple[str, str]],
+                          raw: str) -> tuple[str, bool]:
+    """Rewrite a key inside a named TOML section.
+
+    `dotted_key` is "model_providers.<id>.base_url" — the middle component
+    is the provider id that selects which [model_providers."<id>"] section
+    to edit. Falls back to the FIRST matching section when the id is not
+    given (bare "model_providers.base_url").
+    """
+    parts = dotted_key.split(".")
+    target = parts[-1]
+    if target not in sub_keys:
+        return content, False
+    line_re, fmt = sub_keys[target]
+
+    # Parse section headers to know which block each line belongs to.
+    lines = content.splitlines(keepends=True)
+    # Collect id -> line range.
+    sections: list[tuple[str, int, int]] = []  # (id, start, end-exclusive)
+    cur_id: str | None = None
+    cur_start = -1
+    for i, line in enumerate(lines):
+        m = re.match(section_re, line.strip())
+        if m:
+            if cur_id is not None:
+                sections.append((cur_id, cur_start, i))
+            cur_id = m.group(1) or m.group(2)
+            cur_start = i
+    if cur_id is not None:
+        sections.append((cur_id, cur_start, len(lines)))
+    if not sections:
+        return content, False
+
+    want = parts[1] if len(parts) >= 3 else None
+    target_id = want if any(s[0] == want for s in sections) else None
+    block = next((s for s in sections if target_id is None or s[0] == target_id),
+                 None)
+    if block is None:
+        return content, False
+    _, start, end = block
+
+    out = list(lines)
+    replaced = False
+    for i in range(start, end):
+        stripped = out[i].strip()
+        if re.match(line_re, stripped):
+            out[i] = re.sub(line_re, fmt.format(raw), out[i])
+            replaced = True
+            break
+    if not replaced:
+        # Key absent in the block: append inside it (before next section or EOF).
+        out.insert(end, f"{target} = {fmt.format(raw).split(' = ', 1)[1]}\n")
+        replaced = True
+    return "".join(out), replaced
+
+
 def _set_json_path(obj: Any, path: str, value: Any) -> bool:
     parts = path.split(".")
     cur = obj
@@ -258,7 +328,31 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
     changed: list[str] = []
     if fmt == "toml":
         for key, raw in values.items():
-            if key not in TOML_KEYS[tool]:
+            # Section-scoped keys arrive dotted (model_providers.<id>.base_url).
+            # Resolve against the spec BEFORE the exact-key membership check.
+            spec = None
+            if key in TOML_KEYS[tool]:
+                spec = TOML_KEYS[tool][key]
+            else:
+                prefix = key.split(".", 1)[0]
+                if prefix in TOML_KEYS[tool] \
+                        and isinstance(TOML_KEYS[tool][prefix], tuple) \
+                        and len(TOML_KEYS[tool][prefix]) == 2 \
+                        and isinstance(TOML_KEYS[tool][prefix][1], dict):
+                    spec = TOML_KEYS[tool][prefix]
+            if spec is None:
+                continue
+            # Section-scoped keys: "model_providers.<id>.base_url" — spec is
+            # (section_re, {key: (line_re, fmt)}) from _SECTION_KEYS.
+            if isinstance(spec, tuple) and len(spec) == 2 \
+                    and isinstance(spec[1], dict):
+                sec_re, sub_keys = spec
+                content, replaced = _set_toml_section_key(
+                    content, sec_re, key, sub_keys, str(raw))
+                if not replaced:
+                    return {"ok": False,
+                            "error": f"cannot edit {key}: provider section not found"}
+                changed.append(key)
                 continue
             # temperature 期望 TOML 数值:非数值拒绝写入(避免静默写入
             # 字符串使 codex 配置无效)。
@@ -268,7 +362,7 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
                 except (TypeError, ValueError):
                     return {"ok": False, "error": "temperature must be numeric"}
             content, replaced = _replace_toml(
-                content, key, TOML_KEYS[tool][key], str(raw))
+                content, key, spec, str(raw))
             if not replaced:
                 return {"ok": False,
                         "error": f"cannot edit {key}: file is not valid TOML"}

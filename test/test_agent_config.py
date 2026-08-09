@@ -205,3 +205,26 @@ class MaskTest(unittest.TestCase):
         # 原文件未被改动
         content = open(p, encoding="utf-8").read()
         self.assertIn("temperature = 0.7", content)
+
+    def test_model_providers_section_key_replaced(self):
+        tmp = tempfile.mkdtemp(prefix="wp-sec-")
+        p = os.path.join(tmp, "config.toml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('model = "gpt-5.4"\n'
+                    '\n'
+                    '[model_providers."my-prov"]\n'
+                    'base_url = "https://old/v1"\n'
+                    'api_key = "sk-old"\n'
+                    '\n'
+                    '[projects."/root"]\n'
+                    'trust_level = "trusted"\n')
+        with mock.patch.object(ac, "AGENT_CONFIG_PATHS", {"codex": [p]}):
+            with mock.patch.object(ac, "_HOME", tmp):
+                res = ac.update_config(
+                    "codex", {"model_providers.my-prov.base_url": "https://new/v1"})
+        self.assertTrue(res["ok"], res)
+        content = open(p, encoding="utf-8").read()
+        self.assertIn('base_url = "https://new/v1"', content)
+        self.assertIn("api_key = \"sk-old\"", content)  # 其他段键未动
+        self.assertIn('[model_providers."my-prov"]', content)  # 段头保留
+        self.assertIn('[projects."/root"]', content)  # 其他段未动
