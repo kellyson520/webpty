@@ -320,7 +320,7 @@ class SessionManager:
             return await self._start_agent(session, tool)
         return await self._start_pty(session, tool)
 
-    async def _start_pty_retry_copy(self, session: dict) -> None:
+    async def _start_pty_retry_plain(self, session: dict) -> None:
         """Restart a reasonix-family session WITHOUT -c after an in-use hang.
 
         Called from _emit_output when the terminal printed 'session is in
@@ -496,6 +496,12 @@ class SessionManager:
             await self.host.attach(session["id"])
         except Exception as err:  # noqa: BLE001
             print(f"[webpty] reattach failed for {session['id']}: {err}", flush=True)
+            # Audit M4: reattach failure previously left state=running with
+            # no attach (output never reached the frontend) — the autostart
+            # branch then skipped the session entirely. Mark it stopped so
+            # autostart falls through to a fresh start.
+            session["state"] = "stopped"
+            session["last_error"] = f"reattach failed: {err}"[:200]
             return False
         self._emit("change", self._public(session))
         return True
@@ -570,7 +576,9 @@ class SessionManager:
                 if not chunk:
                     break
                 text = decoder.decode(chunk)
-                _append_log(log_path, text)
+                # Audit L2: cached handle — the old per-chunk open/close
+                # syscall storm (~60 opens/s on token-streaming agents).
+                self._append_log_cached(session, text.encode("utf-8"))
                 state["buf"] += text
                 # Audit M6: cap the partial-line buffer — a runaway agent
                 # printing an endless unterminated line must not grow memory
@@ -587,7 +595,7 @@ class SessionManager:
             # flush any partial multi-byte character held in the decoder
             tail = decoder.decode(b"", final=True)
             if tail:
-                _append_log(log_path, tail)
+                self._append_log_cached(session, tail.encode("utf-8"))
                 state["buf"] += tail
 
         async def read_stderr() -> None:
@@ -598,7 +606,8 @@ class SessionManager:
                 chunk = await proc.stderr.read(16384)
                 if not chunk:
                     break
-                _append_log(log_path, f"[stderr] {decoder.decode(chunk)}")
+                self._append_log_cached(
+                    session, f"[stderr] {decoder.decode(chunk)}".encode("utf-8"))
 
         async def wait_exit() -> None:
             code = await proc.wait()
@@ -613,6 +622,9 @@ class SessionManager:
             session["proc"] = None
             session["pid"] = None
             session["turn_active"] = False
+            # Audit L2: close the cached log handle (opened by
+            # _append_log_cached in read_stdout/read_stderr).
+            self._close_log_fh(session)
             _append_log(log_path, f"\r\n[webpty] agent exited code={code}\r\n")
             # Compatibility downgrade (audit V4): old claude versions exit
             # on --include-partial-messages. Retry once without the flag.
@@ -927,6 +939,10 @@ class SessionManager:
                     pass
             return True
         # PTY path: send Ctrl+C into the terminal.
+        # Audit L4: a user interrupt is a user action — mark it so the
+        # autostart restart path (which only fires on exit code != 0)
+        # doesn't resurrect the session the user just interrupted.
+        session["_user_stopped"] = True
         self.host.input(sid, "\x03")
         return True
 
@@ -950,6 +966,12 @@ class SessionManager:
             return False
         # Audit H2: mark user-initiated stops so wait_exit never auto-restarts.
         session["_user_stopped"] = True
+        # Audit H4: cancel any pending auto-restart — a stopped session
+        # must not come back to life.
+        handle = session.get("_restart_handle")
+        if handle is not None:
+            handle.cancel()
+            session["_restart_handle"] = None
         if session.get("engine") == "agent":
             proc = session.get("proc")
             if proc:
@@ -1120,7 +1142,21 @@ class SessionManager:
         if retryable:
             session["_resume_retried"] = True
             try:
-                self._start_pty_retry_copy(session)
+                # Audit H1: _start_pty_retry_plain is async — calling it
+                # bare created a coroutine that was never awaited, so the
+                # reasonix "in use" recovery NEVER ran and the session
+                # stayed stuck in running with a dead pid.
+                task = asyncio.get_event_loop().create_task(
+                    self._start_pty_retry_plain(session))
+
+                def _on_done(t: asyncio.Task) -> None:
+                    if t.cancelled():
+                        return
+                    err = t.exception()
+                    if err is not None:
+                        log_error("session-manager", f"retry-copy: {err}")
+
+                task.add_done_callback(_on_done)
                 return  # restart in flight; don't mark stopped yet
             except Exception:  # noqa: BLE001
                 pass  # fall through to normal exit handling
@@ -1138,8 +1174,13 @@ class SessionManager:
             _append_log(session["log_path"], f"\r\n[webpty] exited code={code} signal={signal_}\r\n")
         self._emit("change", self._public(session))
         self._emit("session_event", {
-            "type": "crashed" if session.get("signal") else
-                    ("completed" if session.get("exit_code") == 0 else "failed"),
+            # Audit M2: a user-stopped session must be reported as
+            # "stopped", never "crashed" (which matched alert rules and
+            # emailed users over their own action). Aligned with the agent
+            # engine's wait_exit.
+            "type": "stopped" if session.get("_user_stopped") else
+                    ("crashed" if session.get("signal") else
+                     ("completed" if session.get("exit_code") == 0 else "failed")),
             "session_id": session["id"], "name": session.get("name"),
             "tool": session.get("tool"), "project": session.get("cwd"),
             "state": "stopped", "exit_code": session.get("exit_code"),
@@ -1150,7 +1191,11 @@ class SessionManager:
         # with backoff, up to max_restarts. Manual stop (exit_code None via
         # stop()) never restarts.
         if (code not in (0, None) and session.get("autostart")
-                and not session.get("_resume_retried")):
+                and not session.get("_resume_retried")
+                # Audit H4: a user-initiated stop (or interrupt) must never
+                # resurrect an autostart session — SIGKILL exits non-zero
+                # and used to trigger the restart path.
+                and not session.get("_user_stopped")):
             self._maybe_restart(session, code)
 
     def _maybe_restart(self, session: dict, code) -> None:  # type: ignore[no-untyped-def]
@@ -1179,6 +1224,7 @@ class SessionManager:
         def _restart_now() -> None:
             # Audit L4: a failing restart (host down etc.) must be logged,
             # not left as an unretrieved Task exception.
+            session["_restart_handle"] = None  # fired
             try:
                 task = asyncio.create_task(self.start(key))
             except Exception as err:  # noqa: BLE001
@@ -1194,7 +1240,9 @@ class SessionManager:
 
             task.add_done_callback(_on_done)
 
-        loop.call_later(wait, _restart_now)
+        # Audit H4: keep the handle so stop()/remove() can cancel a pending
+        # restart (a stopped session must not come back to life).
+        session["_restart_handle"] = loop.call_later(wait, _restart_now)
 
     def _on_host_disconnect(self) -> None:
         self.host_ready = False
@@ -1339,7 +1387,7 @@ class SessionManager:
                 pass
             await asyncio.sleep(0.3)
             try:
-                await self._start_pty_retry_copy(self.sessions.get(sid))
+                await self._start_pty_retry_plain(self.sessions.get(sid))
             except Exception:  # noqa: BLE001
                 pass
 

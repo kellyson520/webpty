@@ -708,7 +708,7 @@ class ReasonixHistoryTest(unittest.TestCase):
 
 
 class RetryCopyTest(unittest.IsolatedAsyncioTestCase):
-    """_start_pty_retry_copy 用 -c --copy 重启（reasonix 全局锁冲突时）。"""
+    """_start_pty_retry_plain 用纯启动（剥离 -c）重试 reasonix（全局锁冲突退出后）。"""
 
     def setUp(self):
         from session_manager import SessionManager
@@ -730,7 +730,7 @@ class RetryCopyTest(unittest.IsolatedAsyncioTestCase):
             return {"pid": 999, "state": "running"}
         self.host.start = spy_start
 
-        await self.sm._start_pty_retry_copy(s)
+        await self.sm._start_pty_retry_plain(s)
         self.assertEqual(len(calls), 1)
         args = calls[0]["args"]
         self.assertNotIn("-c", args)

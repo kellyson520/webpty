@@ -112,13 +112,22 @@ switch between live sessions with a swipe.
 `/api/cost/summary|by-{project,tool,model,session}|alerts|budget|reconcile|export`、
 `/api/backup/create|list|restore/{id}|diff/{a}/{b}`、
 `/api/migrate/export|import|clone|list|download/{filename}`、
-`/api/sessions`（GET/POST，`?limit=`）、`/api/sessions/{id}/start|stop|interrupt|reset|input`、
-`/api/sessions/order`、`/api/agent-config/list|update`、`/api/errors`
+`/api/sessions`（GET/POST，`?limit=`）、`/api/sessions/{id}/start|stop|interrupt|reset|input|DELETE`、
+`/api/sessions/order`、`/api/agent-config/list|update`、`/api/errors`、
+`/api/health`（探活：db 故障返回 503）、`/api/config`（GET/PUT：
+`roots|tools|providers` 热更新）、`/api/projects`（GET）/`/api/projects/create`、
+`/api/fs/list`（仅 roots/extraFolders 内，`?path=`）
 
 > `interrupt` = 中断当前回合（agent 走 SIGINT 优雅保存，pty 走 Ctrl+C）；
 > `reset` = 开始全新对话（丢弃 --resume 续聊）；`cost/export` = CSV 导出
-> （支持 `?from=&to=` 日期范围）；`/api/errors` = 后端错误环形缓冲
-> （备份/通知/校对等后台失败可见）。
+> （支持 `?from=&to=` 日期范围，含公式注入防护）；`/api/errors` = 后端
+> 错误环形缓冲；`/api/health` = systemd/监控探活；会话数上限 `max_sessions`
+> （默认 64，超限返回 409）。
+
+**安全加固 / Security defaults**：配置与数据库文件权限 `600`（umask 077）；
+备份包与迁移导出同样脱敏（apiKey/密钥置空，恢复后需重配）；HTTP 响应带
+`X-Content-Type-Options: nosniff`；连接上限 512（HTTP）/ 128（WS）+ 请求
+头读取 30s 超时 + 64 行头部上限；CSV 导出防公式注入。
 
 ---
 

@@ -474,12 +474,14 @@ def _client_read(sock: socket.socket) -> None:
         _client_cleanup(sock)
         return
     st["buf"].extend(data)
-    # Audit L3: a misbehaving peer can stream data faster than we parse;
-    # cap the per-connection input buffer at 1MB and drop the client
-    # instead of letting pty-host's single-threaded loop stall on a giant
-    # base64 decode.
+    # Audit L3/L5: a misbehaving peer can stream data faster than we parse;
+    # cap the per-connection input buffer at 1MB. Dropping the connection
+    # used to kill ALL sessions' input path (every session shares this
+    # socket) — instead drop the offending bytes and keep the connection
+    # (the client's own chunking bounds real-world input; this only guards
+    # against a runaway/malicious peer).
     if len(st["buf"]) > 1024 * 1024:
-        _client_cleanup(sock)
+        st["buf"] = st["buf"][-1024 * 1024:]
         return
     while b"\n" in st["buf"]:
         line, _, rest = st["buf"].partition(b"\n")

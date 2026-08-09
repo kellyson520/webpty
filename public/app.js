@@ -541,7 +541,13 @@ function connectSocket(entry, session, attempt = 0) {
                 entry.term.write(bin.subarray(off, off + 8192));
               }
             }
-          } catch {}
+          } catch (err) {
+            // Audit L3: a corrupt resync frame left the terminal blank
+            // with no feedback — reconnect so the server resends.
+            console.error('resync failed:', err);
+            showHint('画面同步失败，正在重新连接…', 4000);
+            try { ws.close(); } catch {}
+          }
           return;
         }
         // Audit S1b: any OTHER recognized JSON (future protocol messages)
@@ -600,7 +606,14 @@ function connectSocket(entry, session, attempt = 0) {
   // entry.socket dynamically so it keeps working across reconnects.
   if (!entry.composer) {
     entry.composer = makeHangulComposer((s) => {
-      if (entry.socket?.readyState === WebSocket.OPEN) entry.socket.send(s);
+      if (entry.socket?.readyState === WebSocket.OPEN) {
+        entry.socket.send(s);
+      } else {
+        // Audit M3: typed-while-disconnected was silently dropped (xterm
+        // local echo made it look sent). Surface it — no queue, because a
+        // replay would interleave with pty output and duplicate on retry.
+        showHint('连接已断开，刚才的输入未发送——重连后请重新输入', 4000);
+      }
     });
     // Note: no imeComposing() gate here. xterm's CompositionHelper already
     // buffers until compositionend, so partial-jamo emissions during composition
@@ -1584,7 +1597,12 @@ async function sendTextChunked(entry, text) {
   showHint(`正在粘贴 ${totalKB} KB…`, 10000);
   try {
     for (let i = 0; i < bytes.length; i += PASTE_CHUNK) {
-      if (entry.socket?.readyState !== WebSocket.OPEN) break;
+      if (entry.socket?.readyState !== WebSocket.OPEN) {
+        // Audit M3: interrupted paste — the remaining chunks would be
+        // silently dropped; say so instead of pretending it went through.
+        showHint(`粘贴中断：已发送 ${Math.ceil(i / 1024)} KB / ${totalKB} KB，重连后请重新粘贴`, 6000);
+        return;
+      }
       const part = bytes.subarray(i, i + PASTE_CHUNK);
       // Send as binary for pty sessions (bytes), text otherwise.
       if (entry.socket.binaryType === 'arraybuffer' || entry.kind === 'session') {

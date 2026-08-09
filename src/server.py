@@ -167,7 +167,10 @@ class Server:
         enabled = {}
         for k, v in self.config.get("tools", {}).items():
             if v and isinstance(v, dict):
-                enabled[k] = self._mask_api_key(v)
+                # Audit H3: dict() copy — masking in place would overwrite
+                # self.config's real apiKey, and the next save_config would
+                # persist "****xxxx" to disk (real key lost forever).
+                enabled[k] = self._mask_api_key(dict(v))
         gate = "none"
         if self.config.get("authToken"):
             gate = "token"
@@ -1304,6 +1307,14 @@ class Server:
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
+        # Audit H2: the finally block unregisters these listeners — on pty
+        # sessions on_agent_event was never assigned (UnboundLocalError on
+        # every WS close), which skipped _ws_count decrement and leaked the
+        # hb_task/outbox/listeners until the 128-connection cap DoS'd WS.
+        on_output = None
+        on_agent_event = None
+        on_change = None
+        on_reconnected = None
         # Audit S1a: protocol version handshake — new frontends ignore
         # unknown JSON silently, so this frame is harmless to old ones.
         ws.send_text(json.dumps({"type": "proto", "v": 1}))
@@ -1495,10 +1506,14 @@ class Server:
                         if not self.sessions.write(sid, payload):
                             self._input_offline_hint(sid, outbox)
         finally:
-            self.sessions.off("output", on_output)
-            self.sessions.off("agentEvent", on_agent_event)
-            self.sessions.off("change", on_change)
-            self.sessions.off("reconnected", on_reconnected)
+            if on_output is not None:
+                self.sessions.off("output", on_output)
+            if on_agent_event is not None:
+                self.sessions.off("agentEvent", on_agent_event)
+            if on_change is not None:
+                self.sessions.off("change", on_change)
+            if on_reconnected is not None:
+                self.sessions.off("reconnected", on_reconnected)
             hb_task.cancel()
             outbox.stop()
             if self._ws_count > 0:
