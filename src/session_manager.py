@@ -32,6 +32,9 @@ MAX_AGENT_BUF = 2 * 1024 * 1024  # audit M6: partial-line cap per session
 # parallel starts would collide ("session is in use") and one would get
 # duplicated via the -c --copy retry.
 SERIAL_TOOLS = frozenset({"reasonix", "opencode"})
+# Audit H1: how long an "in use" sighting must go WITHOUT further output
+# before we treat the process as hung and auto-resume it.
+IN_USE_CONFIRM_S = 5.0
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 30
 
@@ -1371,16 +1374,28 @@ class SessionManager:
                 self._emit("change", self._public(session))
         self._emit("reconnected")
 
-    def _schedule_auto_resume(self, session: dict) -> None:
-        """Kill the hung reasonix session and restart it with `-c --copy`.
+    def _confirm_auto_resume(self, session: dict) -> None:
+        """Audit H1: confirm a reasonix "in use" hang BEFORE killing.
 
-        Called when the output stream contains 'session is in use'. The
-        current process printed the error and hangs; kill it, then spawn a
-        duplicated conversation.
+        The substring alone is not proof (grep/cat/build output can
+        contain it). We wait 5s: if any further output arrived, _emit_output
+        cleared `_in_use_seen_at` and this task does nothing. Only a truly
+        hung process (error printed, then silence) gets killed + resumed.
         """
         sid = session["id"]
+        seen_at = session.get("_in_use_seen_at")
 
         async def _do() -> None:
+            await asyncio.sleep(IN_USE_CONFIRM_S)
+            cur = self.sessions.get(sid)
+            if cur is None:
+                return
+            # Confirmed hang: marker still set AND no output since.
+            if (cur.get("_in_use_seen_at") != seen_at
+                    or cur.get("state") != "running"):
+                return
+            cur.pop("_in_use_seen_at", None)
+            cur["_resume_retried"] = True
             try:
                 await self.stop(sid)
             except Exception:  # noqa: BLE001
@@ -1499,6 +1514,11 @@ class SessionManager:
 
     def _emit_output(self, session: dict, chunk: bytes) -> None:
         session["last_output_at"] = int(time.time() * 1000)
+        # Audit H1: any fresh output after an "in use" sighting cancels the
+        # pending auto-resume — the process is alive and printing (e.g. the
+        # user ran `grep "in use"`, which is NOT a hang).
+        if session.get("_in_use_seen_at"):
+            session.pop("_in_use_seen_at", None)
         self._mark_busy(session)
         if session.get("recent_buf"):
             session["recent_buf"].push(chunk)
@@ -1512,7 +1532,8 @@ class SessionManager:
         # a fresh project dir).
         if (session.get("tool") in ("reasonix", "opencode")
                 and session.get("state") == "running"
-                and not session.get("_resume_retried")):
+                and not session.get("_resume_retried")
+                and not session.get("_in_use_seen_at")):
             # "in use" may arrive split across chunks — scan a window of
             # recent output.
             window = b""
@@ -1524,8 +1545,12 @@ class SessionManager:
                     window = b""
             window += chunk[-512:]
             if b"in use" in window.lower():
-                session["_resume_retried"] = True
-                self._schedule_auto_resume(session)
+                # Audit H1: do NOT kill on the substring alone — grep/cat/
+                # build output legitimately contains "in use". Confirm the
+                # hang first: only resume if 5s pass with NO further output
+                # (a hung reasonix prints the error once and stops).
+                session["_in_use_seen_at"] = time.time()
+                self._confirm_auto_resume(session)
 
     # Cached per-session log file handle: opening/closing the log on every
     # output chunk (~60/s on an active terminal) was pure syscall overhead.

@@ -89,6 +89,9 @@ for (const b of folderSortPop.querySelectorAll('.sort-opt')) {
 let config = null;
 let projects = [];
 let sessions = [];
+// Audit M1: order confirmed by the last successful PUT /api/sessions/order.
+// The poll merge keeps this order until the server reports a different one.
+let pendingTabOrder = null;
 let activeIndex = 0;
 let pollTimer = null;
 let pollFailures = 0;
@@ -121,7 +124,18 @@ const ERR_ZH = {
   'Unknown permissionMode': '未知的权限模式',
   'limit required': '缺少预算值',
 };
-function zhErr(msg) { return ERR_ZH[msg] || msg || ''; }
+function zhErr(msg) {
+  if (!msg) return '';
+  if (ERR_ZH[msg]) return ERR_ZH[msg];
+  // Audit L2: parameterized backend messages ("Unknown permissionMode: x",
+  // "session limit reached (64) …") never exact-match — prefix rules.
+  if (msg.startsWith('Unknown permissionMode')) return '未知的权限模式';
+  if (msg.startsWith('session limit reached')) return '会话数量已达上限';
+  if (msg.startsWith('cannot edit')) return '该配置项无法编辑（值类型不受支持）';
+  if (msg.startsWith('key ')) return '该配置项的值类型不支持在线编辑';
+  if (msg.includes('not found')) return '未找到';
+  return msg;
+}
 
 const api = async (url, opts = {}) => {  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   const token = localStorage.getItem('webpty.token');
@@ -518,6 +532,11 @@ function connectSocket(entry, session, attempt = 0) {
   ws.onopen = () => {
     if (attempt > 0) showHint('', 0); // reconnected — clear the offline hint
     attempt = 0;
+    // Audit M2: reset the terminal before the server replays the recent
+    // buffer — without it, TUI frames (which start with a clear-screen
+    // sequence that lands inside the truncated ring) stacked on stale
+    // pixels and reasonix rendered misaligned after every reconnect.
+    try { entry.term.reset(); } catch {}
     ws.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
   };
   ws.onmessage = (event) => {
@@ -1927,8 +1946,14 @@ async function commitTabOrder(draggedId) {
       method: 'PUT',
       body: JSON.stringify({ ids: sessions.map((s) => s.id) })
     });
+    // Audit M1: the poll merge in loadSessionsRaw honors this order until
+    // the server confirms it — no more 3s rollback after a drag.
+    pendingTabOrder = sessions.map((s) => s.id);
   } catch (e) {
+    // Audit M1: a failed persist was silent (console.error only) — the
+    // order silently reverted on the next poll.
     console.error('reorder persist failed', e);
+    showHint('排序保存失败——刷新后将恢复原顺序', 4000);
   }
 }
 
@@ -2643,6 +2668,19 @@ async function loadSessionsRaw() {
     if (old) Object.assign(old, f);
     merged.push(old || f);
   }
+  // Audit M1: keep the user's drag order — once the server confirmed it
+  // (pendingTabOrder set), a poll must not roll the tabs back. Reorder
+  // only when the server's own list actually differs from our pending one.
+  if (pendingTabOrder && pendingTabOrder.join(',') !== merged.map((s) => s.id).join(',')) {
+    const byId = new Map(merged.map((s) => [s.id, s]));
+    const reordered = [];
+    for (const id of pendingTabOrder) {
+      const s = byId.get(id);
+      if (s) { reordered.push(s); byId.delete(id); }
+    }
+    for (const s of byId.values()) reordered.push(s);
+    return (sessions = reordered);
+  }
   return (sessions = merged);
 }
 
@@ -2676,6 +2714,18 @@ function schedulePoll(delay = 3000) {
 }
 
 function applyViewport() {
+  // Audit ML2: coalesce bursty resize events (window drag, keyboard
+  // raise/lower) into ONE refit per animation frame — otherwise every
+  // event spams fit() + a WS resize frame, each triggering a full TUI
+  // repaint on the remote side.
+  if (applyViewport._raf) return;  // already scheduled this frame
+  applyViewport._raf = requestAnimationFrame(() => {
+    applyViewport._raf = null;
+    _applyViewportNow();
+  });
+}
+
+function _applyViewportNow() {
   // visualViewport.height excludes the on-screen keyboard area on iOS / Android,
   // unlike window.innerHeight which stays at the layout-viewport size.
   const vv = window.visualViewport;
@@ -2690,8 +2740,8 @@ function applyViewport() {
   // would re-fit all terminals and spam the PTY with resize frames (each
   // triggering a TUI repaint), which is a big part of the "slow to respond
   // on mobile" problem.
-  if (applyViewport._lastH !== h) {
-    applyViewport._lastH = h;
+  if (_applyViewportNow._lastH !== h) {
+    _applyViewportNow._lastH = h;
     // Audit C2: keyboard raise/lower — snap the active chat page to the
     // bottom so the newest message stays visible above the keyboard.
     const active = sessions[activeIndex];
@@ -3443,6 +3493,7 @@ const ACFG_FIELD_META = {
   effort: { label: '推理强度 effort', ph: 'low / high / max' },
   theme: { label: '主题 theme', ph: 'dark / light' },
   model_provider: { label: '模型供应商 model_provider', ph: 'openai / anthropic' },
+  provider: { label: '供应商 provider', ph: 'openai / deepseek / zai' },
   temperature: { label: '温度 temperature', ph: '0.0 - 1.0' },
   proxy: { label: '代理 proxy', ph: 'http://host:port' },
 };

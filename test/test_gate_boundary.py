@@ -8,7 +8,14 @@ the gate was answering bare HTML/JS requests with 403 before the JS ran.
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
+
+# Audit M4: never read/write the real ~/.config/webpty from tests —
+# Server() constructs load_config(), which CREATES a default config if the
+# file is missing. Force an isolated data dir before importing server.
+os.environ["WEBPTY_DATA_DIR"] = tempfile.mkdtemp(prefix="wp-gate-")
+os.environ["WEBPTY_PROJECTS_ROOT"] = tempfile.mkdtemp(prefix="wp-gate-root-")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from server import Server  # noqa: E402

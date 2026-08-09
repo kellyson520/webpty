@@ -54,17 +54,35 @@ class ServerIntegrationTest(unittest.TestCase):
             cwd=_ROOT, env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
-        # Wait for the server to come up.
-        for _ in range(50):
-            time.sleep(0.1)
+        # Wait for the server to come up. Audit L4: on failure retry ONCE
+        # with a fresh port — the port released by _pick_port can be stolen
+        # in the TOCTOU window (flaky in parallel CI).
+        for _attempt in range(2):
             try:
-                urllib.request.urlopen(f"{cls.base}/api/config")
-                break
+                for _ in range(50):
+                    time.sleep(0.1)
+                    try:
+                        urllib.request.urlopen(f"{cls.base}/api/config")
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
+                else:
+                    raise RuntimeError("server did not come up")
+                break  # came up on this attempt
             except Exception:  # noqa: BLE001
-                continue
+                cls.proc.kill()
+                cls.proc.wait(timeout=5)
+                cls.port = _pick_port()
+                cls.base = f"http://127.0.0.1:{cls.port}"
+                env["WEBPTY_PORT"] = str(cls.port)
+                cls.proc = subprocess.Popen(
+                    [sys.executable, os.path.join(_ROOT, "src", "server.py")],
+                    cwd=_ROOT, env=env,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                )
         else:
             cls.proc.kill()
-            raise RuntimeError("server did not come up")
+            raise RuntimeError("server did not come up (2 attempts)")
 
     @classmethod
     def tearDownClass(cls):

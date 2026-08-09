@@ -13,6 +13,12 @@ _TEST_DIR = tempfile.mkdtemp(prefix="webpty-sm-test-")
 os.environ["WEBPTY_DATA_DIR"] = _TEST_DIR
 os.environ["WEBPTY_PROJECTS_ROOT"] = os.path.join(_TEST_DIR, "projects")
 
+
+def tearDownModule():
+    """Audit L3: don't leave the module temp dir behind."""
+    import shutil
+    shutil.rmtree(_TEST_DIR, ignore_errors=True)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from session_manager import (  # noqa: E402
     SessionManager, normalize_tool_result,
@@ -354,6 +360,38 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
             self.sm._maybe_restart(s, 1)
         self.assertEqual(self.sm._restart_counts.get(s["id"]), None)
         self.sm.start = orig
+
+    async def test_in_use_sighting_cancelled_by_fresh_output(self):
+        """Audit H1: "in use" in output must NOT kill the session when the
+        process keeps printing (grep 'in use' etc.) — only a confirmed
+        silence-of-5s triggers the resume."""
+        import session_manager as _sm
+        _sm.IN_USE_CONFIRM_S = 0.3  # shorten the confirm window for the test
+        s = self.sm.create(name="rx1", cwd="/tmp", tool="reasonix")
+        s["state"] = "running"
+        s["recent_buf"] = None  # no ring buffer in unit test
+        stops = []
+        orig_stop = self.sm.stop
+        async def spy_stop(sid):
+            stops.append(sid)
+        self.sm.stop = spy_stop
+        # 1) sighting sets the marker
+        self.sm._emit_output(s, b"session is in use\n")
+        self.assertIsNotNone(s.get("_in_use_seen_at"))
+        # 2) fresh output cancels it
+        self.sm._emit_output(s, b"still alive\n")
+        self.assertIsNone(s.get("_in_use_seen_at"))
+        await asyncio.sleep(0.8)  # confirm window elapses
+        self.assertEqual(stops, [], "有后续输出 → 不得 kill 会话")
+        # 3) a real hang (sighting then silence) DOES resume
+        s2 = self.sm.create(name="rx2", cwd="/tmp", tool="reasonix")
+        s2["state"] = "running"
+        s2["recent_buf"] = None
+        self.sm._emit_output(s2, b"session is in use\n")
+        self.assertIsNotNone(s2.get("_in_use_seen_at"))
+        await asyncio.sleep(0.8)
+        self.assertIn(s2["id"], stops, "确认挂起后应 kill + 恢复")
+        self.sm.stop = orig_stop
 
     async def test_stall_detection(self):
         """turn_active 且超时无输出 → stalled 事件;否则不报。"""

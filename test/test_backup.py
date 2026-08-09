@@ -26,6 +26,9 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.db.close()
+        # Audit L3: don't leak wp-bak-* dirs in /tmp.
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     async def test_create_backup_makes_tar_with_manifest(self):
         b = await create_backup_async(self.data, self.config, self.db)

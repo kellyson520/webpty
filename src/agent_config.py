@@ -200,9 +200,20 @@ def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> t
     # agent's native config further.
     try:
         import tomllib
-        tomllib.loads(content)
+        parsed = tomllib.loads(content)
     except Exception:  # noqa: BLE001 — unparseable file: refuse to edit
         return content, False
+
+    # Audit M3: if the target key already exists with a non-single-string
+    # value (array, multiline string, table), a line-level rewrite can't
+    # replace it safely — the regex would miss and we'd append a duplicate
+    # key that the TOML parser resolves to the OLD value (silent no-op).
+    # Refuse loudly instead of returning a false "replaced".
+    existing = parsed.get(key)
+    if existing is not None and not isinstance(existing, str):
+        raise ValueError(
+            f"key {key!r} 的值是数组/多行/表格类型，行级替换不安全——"
+            "请直接编辑配置文件（webpty 已保留 .bak 备份）")
 
     # Line scan that only touches the top-level scope: track when we're
     # inside a [section] (lines starting with '[' after whitespace) and only
@@ -327,46 +338,50 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
 
     changed: list[str] = []
     if fmt == "toml":
-        for key, raw in values.items():
-            # Section-scoped keys arrive dotted (model_providers.<id>.base_url).
-            # Resolve against the spec BEFORE the exact-key membership check.
-            spec = None
-            if key in TOML_KEYS[tool]:
-                spec = TOML_KEYS[tool][key]
-            else:
-                prefix = key.split(".", 1)[0]
-                if prefix in TOML_KEYS[tool] \
-                        and isinstance(TOML_KEYS[tool][prefix], tuple) \
-                        and len(TOML_KEYS[tool][prefix]) == 2 \
-                        and isinstance(TOML_KEYS[tool][prefix][1], dict):
-                    spec = TOML_KEYS[tool][prefix]
-            if spec is None:
-                continue
-            # Section-scoped keys: "model_providers.<id>.base_url" — spec is
-            # (section_re, {key: (line_re, fmt)}) from _SECTION_KEYS.
-            if isinstance(spec, tuple) and len(spec) == 2 \
-                    and isinstance(spec[1], dict):
-                sec_re, sub_keys = spec
-                content, replaced = _set_toml_section_key(
-                    content, sec_re, key, sub_keys, str(raw))
+        try:
+            for key, raw in values.items():
+                # Section-scoped keys arrive dotted (model_providers.<id>.base_url).
+                # Resolve against the spec BEFORE the exact-key membership check.
+                spec = None
+                if key in TOML_KEYS[tool]:
+                    spec = TOML_KEYS[tool][key]
+                else:
+                    prefix = key.split(".", 1)[0]
+                    if prefix in TOML_KEYS[tool] \
+                            and isinstance(TOML_KEYS[tool][prefix], tuple) \
+                            and len(TOML_KEYS[tool][prefix]) == 2 \
+                            and isinstance(TOML_KEYS[tool][prefix][1], dict):
+                        spec = TOML_KEYS[tool][prefix]
+                if spec is None:
+                    continue
+                # Section-scoped keys: "model_providers.<id>.base_url" — spec is
+                # (section_re, {key: (line_re, fmt)}) from _SECTION_KEYS.
+                if isinstance(spec, tuple) and len(spec) == 2 \
+                        and isinstance(spec[1], dict):
+                    sec_re, sub_keys = spec
+                    content, replaced = _set_toml_section_key(
+                        content, sec_re, key, sub_keys, str(raw))
+                    if not replaced:
+                        return {"ok": False,
+                                "error": f"cannot edit {key}: provider section not found"}
+                    changed.append(key)
+                    continue
+                # temperature 期望 TOML 数值:非数值拒绝写入(避免静默写入
+                # 字符串使 codex 配置无效)。
+                if key == "temperature":
+                    try:
+                        float(raw)
+                    except (TypeError, ValueError):
+                        return {"ok": False, "error": "temperature must be numeric"}
+                content, replaced = _replace_toml(
+                    content, key, spec, str(raw))
                 if not replaced:
                     return {"ok": False,
-                            "error": f"cannot edit {key}: provider section not found"}
+                            "error": f"cannot edit {key}: file is not valid TOML"}
                 changed.append(key)
-                continue
-            # temperature 期望 TOML 数值:非数值拒绝写入(避免静默写入
-            # 字符串使 codex 配置无效)。
-            if key == "temperature":
-                try:
-                    float(raw)
-                except (TypeError, ValueError):
-                    return {"ok": False, "error": "temperature must be numeric"}
-            content, replaced = _replace_toml(
-                content, key, spec, str(raw))
-            if not replaced:
-                return {"ok": False,
-                        "error": f"cannot edit {key}: file is not valid TOML"}
-            changed.append(key)
+        except ValueError as err:
+            # Audit M3: _replace_toml refuses array/multiline/table values.
+            return {"ok": False, "error": str(err)}
     else:  # json
         try:
             obj = json.loads(content)
@@ -387,6 +402,13 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "no supported keys provided"}
 
     # Atomic write: temp file + rename, keep original permissions.
+    # Audit M3: keep a .bak of the pre-edit file so a mistaken key write
+    # (bad api_key etc.) can always be reverted by hand.
+    try:
+        import shutil
+        shutil.copy2(path, path + ".bak")
+    except OSError:
+        pass  # backup is best-effort
     try:
         mode = os.stat(path).st_mode & 0o777
         tmp = f"{path}.webpty-tmp.{os.getpid()}"

@@ -729,6 +729,13 @@ class Server:
                 raise HttpError(400, "name and event_type required")
             if not isinstance(body.get("matcher_json", "{}"), str):
                 raise HttpError(400, "matcher_json must be a string")
+            # Audit L1: a bad matcher JSON silently matched NOTHING (rules
+            # returned None → never fired). Reject at write time.
+            try:
+                import json as _json
+                _json.loads(body.get("matcher_json") or "{}")
+            except _json.JSONDecodeError:
+                raise HttpError(400, "matcher_json is not valid JSON")
             rid = await self.db.upsert_rule(body)
             return await self._send_json(writer, 201, {"id": rid}, headers)
         m = re.match(r"^/api/notify/rules/(\d+)$", path)
@@ -738,6 +745,12 @@ class Server:
                 raise HttpError(400, "name and event_type required")
             if not isinstance(body.get("matcher_json", "{}"), str):
                 raise HttpError(400, "matcher_json must be a string")
+            # Audit L1: reject bad matcher JSON at write time.
+            try:
+                import json as _json
+                _json.loads(body.get("matcher_json") or "{}")
+            except _json.JSONDecodeError:
+                raise HttpError(400, "matcher_json is not valid JSON")
             body["id"] = int(m.group(1))
             await self.db.upsert_rule(body)
             return await self._send_json(writer, 200, {"ok": True}, headers)
@@ -1112,6 +1125,10 @@ class Server:
         cache = "no-store"
         if path.startswith(_VENDOR_PREFIXES):
             cache = "public, max-age=604800, immutable"
+        elif path.startswith("/fonts/"):
+            # Audit M5: fonts (2×~1.4MB woff2) were no-store — every page
+            # load re-downloaded them. Static, immutable: cache long.
+            cache = "public, max-age=604800, immutable"
         elif path in ("/app.js", "/styles.css") and (query or {}).get("v"):
             # Versioned app assets (?v=<content-hash>): the URL changes when
             # the file changes, so they may be cached immutably — no-store was
@@ -1156,7 +1173,17 @@ class Server:
         # (hash changes with the bytes). index.html itself stays no-store.
         if path == "/index.html":
             import hashlib as _hl
-            for asset in ("/app.js", "/styles.css"):
+            # Audit ML1: vendor files are cached `immutable` — bump their
+            # URL (hash) on every deploy so patched xterm never lingers 7d.
+            assets = ["/app.js", "/styles.css",
+                      "/vendor/xterm/lib/xterm.js",
+                      "/vendor/xterm-fit/lib/addon-fit.js",
+                      "/vendor/xterm-canvas/lib/addon-canvas.js",
+                      "/vendor/xterm-unicode11/lib/addon-unicode11.js",
+                      "/vendor/xterm-web-links/lib/addon-web-links.js",
+                      "/vendor/xterm/css/xterm.css",
+                      "/fonts/D2Coding.woff2"]
+            for asset in assets:
                 asset_path = os.path.join(self.pub, asset.lstrip("/"))
                 try:
                     # Cache the hash by (mtime, size) — recomputing sha256 of

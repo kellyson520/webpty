@@ -101,6 +101,28 @@ class AgentConfigTest(unittest.TestCase):
         content = open(p, encoding="utf-8").read()
         self.assertIn("unclosed", content)  # 原样保留
 
+    def test_toml_array_value_refused(self):
+        """Audit M3: array/multiline/table values can't be line-replaced —
+        refuse loudly instead of appending a duplicate key (silent no-op)."""
+        p = self._write(".codex/config.toml", 'model = ["a", "b"]\n')
+        res = ac.update_config("codex", {"model": "gpt-5.2"})
+        self.assertFalse(res["ok"])
+        self.assertIn("数组", res.get("error", ""))
+        content = open(p, encoding="utf-8").read()
+        self.assertIn('["a", "b"]', content)  # 原样保留
+        self.assertEqual(content.count("model"), 1)  # 无重复键
+
+    def test_update_creates_bak(self):
+        """Audit M3: every successful update keeps a .bak of the pre-edit
+        file so a mistaken key write can always be reverted."""
+        p = self._write(".codex/config.toml", 'model = "gpt-5"\n')
+        res = ac.update_config("codex", {"model": "gpt-5.2"})
+        self.assertTrue(res["ok"])
+        bak = p + ".bak"
+        self.assertTrue(os.path.exists(bak))
+        with open(bak, encoding="utf-8") as f:
+            self.assertIn("gpt-5", f.read())
+
     def test_json_replace_env_values(self):
         p = self._write(".claude/settings.json", json.dumps({
             "env": {"ANTHROPIC_BASE_URL": "https://old",

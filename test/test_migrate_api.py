@@ -133,7 +133,9 @@ class MigrateParserTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        os.environ.setdefault("WEBPTY_DATA_DIR", tempfile.mkdtemp(prefix="wp-mp-"))
+        # Audit M4: setdefault would INHERIT a real WEBPTY_DATA_DIR from the
+        # environment (or another test module) — force an isolated one.
+        os.environ["WEBPTY_DATA_DIR"] = tempfile.mkdtemp(prefix="wp-mp-")
         sys.path.insert(0, SRC)
         from server import parse_multipart
         cls.parse = staticmethod(parse_multipart)
