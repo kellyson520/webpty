@@ -269,6 +269,7 @@ class Server:
     async def _handle_request(self, reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> None:
         ws_owned = False
+        headers: dict[str, str] = {}
         try:
             request_line = await reader.readline()
             if not request_line:
@@ -278,7 +279,6 @@ class Server:
             if len(parts) < 2:
                 raise HttpError(400, "Bad request line")
             method, target = parts[0], parts[1]
-            headers: dict[str, str] = {}
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
@@ -315,7 +315,7 @@ class Server:
             # JSON error instead of a dropped connection.
             log_error("http", err)
             try:
-                await self._send_json(writer, 500, {"error": str(err)}, {})
+                await self._send_json(writer, 500, {"error": "internal server error"}, headers)
             except Exception:  # noqa: BLE001
                 pass
         finally:

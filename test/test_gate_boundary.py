@@ -88,6 +88,31 @@ class GateBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"bad-token", body)
         self.assertIn(b"forbidden", body)
 
+    async def test_unhandled_exception_returns_500(self):
+        """未捕获异常 → 500 JSON 通用文案(而非连接重置或泄露内部细节)。"""
+        s = Server()
+        s.config["roots"] = ["/root"]  # fs/list 根目录守卫放行,让 mock 真正被调用
+
+        async def fake_authorize(reader, headers, url):
+            return {"ok": True}
+
+        s._authorize = fake_authorize
+        orig = Server._list_dir_entries
+
+        def boom(self, raw):
+            raise ValueError("boom")
+
+        Server._list_dir_entries = boom
+        try:
+            w = FakeWriter()
+            await s._handle_request(FakeReader("/api/fs/list?path=/root"), w)
+        finally:
+            Server._list_dir_entries = orig
+        self.assertIn("500", w.status_line or "")
+        body = b"".join(w.data)
+        self.assertIn(b"error", body)
+        self.assertNotIn(b"boom", body)
+
 
 if __name__ == "__main__":
     unittest.main()
