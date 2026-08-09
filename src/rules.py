@@ -46,6 +46,10 @@ def quiet_hours_active(rule: dict, now: datetime | None = None) -> bool:
         eh, em = (int(x) for x in end.split(":", 1))
     except ValueError:
         return False
+    # Audit L1 (v26): "24:00" / "23:99" parsed silently and produced a
+    # never-matching or always-matching window — reject out-of-range.
+    if not (0 <= sh < 24 and 0 <= sm < 60 and 0 <= eh < 24 and 0 <= em < 60):
+        return False
     cur = now.hour * 60 + now.minute
     s = sh * 60 + sm
     e = eh * 60 + em

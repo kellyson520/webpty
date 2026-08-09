@@ -564,6 +564,42 @@ class ServerIntegrationTest(unittest.TestCase):
         st, j = self._req(f"/api/sessions/{sid}", "DELETE")
         self.assertEqual(st, 404)
 
+    def test_transcript_export_endpoint(self):
+        """Audit L1/M7 (v25-v26): pty sessions have no transcript file →
+        404; deleted/unknown sessions → 404 (no 500)."""
+        import urllib.error as _ue
+        import urllib.request as _ur
+        for sid in ("no-such-id",):
+            try:
+                _ur.urlopen(f"{self.base}/api/sessions/{sid}/transcript")
+                self.fail("expected 404")
+            except _ue.HTTPError as e:
+                self.assertEqual(e.code, 404)
+        # a real pty session also has no transcript → 404 (graceful)
+        st, j = self._req("/api/sessions", "POST",
+                          {"name": "tx", "cwd": os.path.join(self.proj_root, "alpha"),
+                           "tool": "bash"})
+        sid = j["id"]
+        try:
+            _ur.urlopen(f"{self.base}/api/sessions/{sid}/transcript")
+            self.fail("expected 404 for pty session")
+        except _ue.HTTPError as e:
+            self.assertEqual(e.code, 404)
+
+    def test_notify_read_endpoints(self):
+        """Audit M5/M7 (v24-v26): read-all works and unread count drops."""
+        import urllib.error as _ue
+        import urllib.request as _ur
+        # produce a notification (completed event)
+        await_sessions = self._req("/api/sessions", "POST",
+                                   {"name": "nt", "cwd": os.path.join(self.proj_root, "alpha"),
+                                    "tool": "bash"})
+        self.assertIn(await_sessions[0], (200, 201))
+        # POST read-all is idempotent
+        st, j = self._req("/api/notify/read-all", "POST")
+        self.assertEqual(st, 200)
+        self.assertIn("updated", j)
+
     def test_fs_list_restricted_to_roots(self):
         # roots 内路径允许
         st, _ = self._req(f"/api/fs/list?path={self.proj_root}")

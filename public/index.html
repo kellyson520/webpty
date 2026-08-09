@@ -257,6 +257,10 @@
                 <option value="notify">notify（仅通知中心）</option>
               </select>
             </label>
+            <label class="field">静默时段（本地时间，跨午夜支持如 22:00-06:00）
+              <input id="notify-rule-quiet-start" class="inp" type="time" value="" />
+              <input id="notify-rule-quiet-end" class="inp" type="time" value="" />
+            </label>
             <label class="field">matcher JSON（可选）
               <input id="notify-rule-matcher" class="inp" type="text"
                      placeholder='{"tool":"codex"}' />
@@ -297,6 +301,12 @@
               <input id="cost-budget" class="inp" type="number" step="0.01" min="0">
             </label>
             <button id="cost-budget-set" class="btn" type="button">设置</button>
+            <label class="field">价格覆盖 $/1M（模型 · 输入 · 输出；模型名留空 = 移除该覆盖）
+              <input id="price-model" class="inp" placeholder="deepseek-v4-flash" />
+              <input id="price-in" class="inp" type="number" min="0" step="0.001" placeholder="输入" style="width:5em" />
+              <input id="price-out" class="inp" type="number" min="0" step="0.001" placeholder="输出" style="width:5em" />
+              <button id="price-set" class="btn" type="button">覆盖/移除</button>
+            </label>
             <button id="cost-reconcile" class="btn" type="button">⟳ 日志校对</button>
             <select id="cost-reconcile-tool" class="sel" title="校对哪个工具的日志">
               <option value="claude">claude</option>

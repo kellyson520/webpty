@@ -123,8 +123,20 @@ async def create_backup_async(data_dir: str, config: dict, db: Database) -> dict
     filename = (f"webpty-{time.strftime('%Y%m%d-%H%M%S')}"
                 f"-{time.time_ns() % 1000000:06d}.tar.gz")
     path = os.path.join(backups_dir, filename)
-    with open(path, "wb") as f:
-        f.write(blob)
+    # Audit M4 (v26): write tmp + rename — ENOSPC mid-write used to leave
+    # a half-written tar.gz in the backups dir, retried every 10 min,
+    # accumulating garbage on a full disk.
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(blob)
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     sha = hashlib.sha256(blob).hexdigest()
     bid = await db.add_backup({
         "filename": filename, "size_bytes": len(blob), "sha256": sha,
@@ -302,6 +314,17 @@ async def rotate(db: Database, retention: int = 7) -> list[int]:
             log_error("backup-rotate", err)
             continue
         deleted.append(row["id"])
+    # Audit M4 (v26): sweep half-written tmp files (ENOSPC leftovers).
+    try:
+        backups_dir = os.path.join(os.path.dirname(db.path), "backups")
+        for name in os.listdir(backups_dir):
+            if name.endswith(".tmp."):
+                try:
+                    os.remove(os.path.join(backups_dir, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
     return deleted
 
 

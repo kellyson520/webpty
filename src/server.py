@@ -50,6 +50,8 @@ MAX_HTTP_CONNECTIONS = 512  # audit H2: HTTP-side connection ceiling
 REQUEST_READ_TIMEOUT = 30.0  # audit H2: slowloris guard for header/body reads
 MAX_HEADER_LINES = 64  # audit H2: header-line cap
 _conn_sem = asyncio.Semaphore(MAX_HTTP_CONNECTIONS)
+# Audit M5 (v26): disk-low flip state (notify once per transition).
+_disk_low_active = False
 
 _CLAUDE_MTIME_TTL = 30.0  # claude history mtime cache TTL (seconds)
 
@@ -382,8 +384,10 @@ class Server:
                 if not auth["ok"]:
                     # Audit L2 (v24): REST semantics — missing/invalid
                     # credentials are 401; a peer that IS authenticated but
-                    # not allowed is 403. The frontend keeps matching on
-                    # 403+bad-token for backward compat.
+                    # not allowed is 403. New frontends match 401||403;
+                    # very old cached frontends only matched 403, but their
+                    # WS retry path (openWs T5, attempt>=3) still surfaces
+                    # the token gate, so they self-heal.
                     status = 401 if auth.get("reason") == "bad-token" else 403
                     await self._send_json(writer, status,
                                           {"error": "forbidden", "reason": auth["reason"]},
@@ -544,6 +548,39 @@ class Server:
             save_config(self.config)
             self._claude_mtime_cache.clear()  # roots changed → rescan
             return await self._send_json(writer, 200, {"roots": self.config["roots"]}, headers)
+
+        if path == "/api/config/prices" and method == "PUT":
+            # Audit M3 (v26): user price overrides (per-1M USD) — merge
+            # into config.prices; the estimated flag honors them.
+            body = await self._read_json(reader, headers)
+            incoming = body.get("prices") if isinstance(body.get("prices"), dict) else {}
+            merged = dict(self.config.get("prices") or {})
+            changed = False
+            for model, price in incoming.items():
+                model = str(model).strip()
+                if not model:
+                    continue
+                if price is None:
+                    merged.pop(model, None)  # null = remove override
+                    changed = True
+                    continue
+                if not isinstance(price, dict):
+                    raise HttpError(400, f"price for {model} must be an object")
+                try:
+                    pin = float(price.get("input"))
+                    pout = float(price.get("output"))
+                except (TypeError, ValueError):
+                    raise HttpError(400, f"price for {model} needs numeric input/output")
+                if pin < 0 or pout < 0 or not math.isfinite(pin) or not math.isfinite(pout):
+                    raise HttpError(400, f"price for {model} must be finite and >= 0")
+                merged[model] = {"input": pin, "output": pout,
+                                 "cache_hit": float(price.get("cache_hit") or 0)}
+                changed = True
+            if changed:
+                self.config["prices"] = merged
+                save_config(self.config)
+            return await self._send_json(writer, 200, {"ok": True,
+                                                       "prices": merged}, headers)
 
         if path == "/api/config/tools" and method == "PUT":
             body = await self._read_json(reader, headers)
@@ -726,7 +763,13 @@ class Server:
 
         m = re.match(r"^/api/sessions/([^/]+)/start$", path)
         if m and method == "POST":
-            await self.sessions.start(m.group(1))
+            # Audit H2 (v26): RuntimeError (agent concurrency cap, unknown
+            # tool) used to bubble into a generic 500 — the Chinese error
+            # was lost and the user saw nothing. Surface as 409.
+            try:
+                await self.sessions.start(m.group(1))
+            except (RuntimeError, ValueError) as err:
+                raise HttpError(409, str(err))
             return await self._send_json(writer, 200, self.sessions.public(m.group(1)), headers)
 
         m = re.match(r"^/api/sessions/([^/]+)/stop$", path)
@@ -1884,10 +1927,13 @@ async def main() -> None:
             # Audit M4: disk-space watch — a full data partition kills the
             # DB silently; notify (notification center + optional email)
             # before it becomes an outage.
+            # Audit M5 (v26): flip detection — notify once on the
+            # transition, and send a recovery event when space returns.
             try:
                 st = os.statvfs(data_dir)
                 free_pct = st.f_bavail / st.f_blocks * 100.0
-                if free_pct < 10.0:
+                low_now = free_pct < 10.0
+                if low_now and not _disk_low_active:
                     await notifier.handle_event({
                         "type": "disk_low", "level": "warn",
                         "title": "磁盘空间不足",
@@ -1896,6 +1942,15 @@ async def main() -> None:
                         "tool": None, "project": None, "session_id": None,
                         "ts": time.time(),
                     })
+                elif not low_now and _disk_low_active:
+                    await notifier.handle_event({
+                        "type": "disk_ok", "level": "info",
+                        "title": "磁盘空间已恢复",
+                        "body": f"数据目录 {data_dir} 剩余 {free_pct:.1f}%",
+                        "tool": None, "project": None, "session_id": None,
+                        "ts": time.time(),
+                    })
+                _disk_low_active = low_now
             except Exception as err:  # noqa: BLE001
                 log_error("disk-watch", err)
             await asyncio.sleep(86400)  # daily

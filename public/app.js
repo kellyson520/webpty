@@ -1851,7 +1851,8 @@ function renderTabs() {
     if (dot.className !== cls) dot.className = cls;
     if (dot.dataset.tool !== s.tool) dot.dataset.tool = s.tool;
     // Audit M4 (v24): refresh the hover label with the latest model.
-    const title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}`;
+    // Audit H2 (v26): surface start failures on hover too.
+    const title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}${s.last_error ? ' ⚠ ' + s.last_error : ''}`;
     if (tab.dataset.title !== title) { tab.title = title; tab.dataset.title = title; }
   });
   // Remove tabs for sessions that no longer exist.
@@ -2626,6 +2627,12 @@ async function activateTool(project, tool, existing) {
     await refreshSessions();
     const idx = sessions.findIndex((s) => s.id === created.id);
     if (idx >= 0) scrollToIndex(idx);
+    // Audit H2 (v26): the API returns startError when the session was
+    // created but its start failed (concurrency cap etc.) — surface it
+    // instead of showing a silently-stopped session.
+    if (created.startError) {
+      showHint(`创建成功，但启动失败：${zhErr(created.startError)}`, 6000);
+    }
   } catch (e) {
     alert(zhErr(e.message));
   }
@@ -2793,7 +2800,11 @@ function updatePageMeta() {
 
 async function startSession(id) {
   try { await api(`/api/sessions/${id}/start`, { method: 'POST', body: '{}' }); }
-  catch (e) { console.warn('start failed:', e.message); }
+  catch (e) {
+    // Audit H2 (v26): starting the 7th agent (concurrency cap) or an
+    // unknown tool was silently swallowed — tell the user why it failed.
+    showHint(zhErr(e.message) || '启动失败', 5000);
+  }
   schedulePoll(0);
 }
 
@@ -3200,7 +3211,10 @@ document.getElementById('notify-rule-add').onclick = async () => {
       event_type: type, matcher_json: matcher,
       action: document.getElementById('notify-rule-action').value,
       level: document.getElementById('notify-rule-level').value,
-      quiet_start: '', quiet_end: '', enabled: 1 }) });
+      // Audit M2 (v26): quiet window UI (empty = no suppression).
+      quiet_start: document.getElementById('notify-rule-quiet-start').value || '',
+      quiet_end: document.getElementById('notify-rule-quiet-end').value || '',
+      enabled: 1 }) });
     document.getElementById('notify-rule-name').value = '';
     refreshNotifyPanel();
   } catch (e) {
@@ -3269,6 +3283,38 @@ costBackdrop.addEventListener('click', (ev) => {
   if (ev.target === costBackdrop) costBackdrop.hidden = true;
 });
 document.getElementById('cost-period').onchange = refreshCostPanel;
+// Audit M3 (v26): per-model price overrides (removes the 估算 badge).
+document.getElementById('price-set').onclick = async () => {
+  const model = document.getElementById('price-model').value.trim();
+  const pin = document.getElementById('price-in').value;
+  const pout = document.getElementById('price-out').value;
+  try {
+    let prices;
+    if (!model) {
+      // empty model name = remove the override entered previously? No —
+      // removal needs a model name; require it for clarity.
+      alert('请输入要覆盖/移除的模型名');
+      return;
+    }
+    if (pin === '' && pout === '') {
+      prices = { [model]: null }; // remove override
+    } else {
+      const i = parseFloat(pin);
+      const o = parseFloat(pout);
+      if (!Number.isFinite(i) || !Number.isFinite(o) || i < 0 || o < 0) {
+        alert('请输入有效的输入/输出价格'); return;
+      }
+      prices = { [model]: { input: i, output: o } };
+    }
+    await api('/api/config/prices', { method: 'PUT', body: JSON.stringify({ prices }) });
+    document.getElementById('price-model').value = '';
+    document.getElementById('price-in').value = '';
+    document.getElementById('price-out').value = '';
+    refreshCostPanel();
+  } catch (e) {
+    alert(zhErr(e.message));
+  }
+};
 document.getElementById('cost-budget-set').onclick = async () => {
   const n = parseFloat(document.getElementById('cost-budget').value || '0');
   // Audit M1 (v24): negative values were silently clamped to "budget

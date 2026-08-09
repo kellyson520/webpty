@@ -241,6 +241,11 @@ class SessionManager:
                     self._close_log_fh(session)
                     os.replace(log_path, new_log)
                     session["log_path"] = new_log
+                # Audit M1 (v26): the rotated .1 segment embeds the old name
+                # too — leave it behind and tail_log/remove would miss it
+                # (orphan disk leak + missing replay segment after restart).
+                if new_log != log_path and os.path.exists(log_path + ".1"):
+                    os.replace(log_path + ".1", new_log + ".1")
             except OSError:
                 pass  # log rename is best-effort; metadata still updates
         self._persist()
@@ -364,8 +369,9 @@ class SessionManager:
             max_agents = int(self.config.get("max_agent_concurrency") or 6)
             running = sum(
                 1 for s in self.sessions.values()
-                if s.get("engine") == "agent" and s.get("state") == "running")
-            if running >= max_agents and session.get("state") != "running":
+                if s.get("engine") == "agent"
+                and s.get("state") in ("running", "starting"))
+            if running >= max_agents and session.get("state") not in ("running", "starting"):
                 raise RuntimeError(
                     f"运行中的 agent 已达上限（{max_agents}）——请先停止其他 agent 会话")
             return await self._start_agent(session, tool)
@@ -561,6 +567,13 @@ class SessionManager:
     async def _start_agent(self, session: dict, tool: dict) -> dict:
         if session.get("state") == "running":
             return session
+        # Audit H1 (v26): claim the slot BEFORE the first await — the old
+        # code set state="running" only after create_subprocess_exec, so
+        # concurrent starts (autostart gather, manual double-click) all
+        # passed the max_agent_concurrency check in _start_locked and
+        # OVER-ADMITTED agents (cgroup OOM risk). "starting" now counts.
+        session["state"] = "starting"
+        self._emit("change", self._public(session))
         command = resolve_command(tool.get("command"))
         # Audit 2.1: per-session permission mode overrides the tool default
         # (created via the new-session form / session API).

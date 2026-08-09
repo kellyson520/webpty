@@ -592,12 +592,39 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         # only the "removed" event — no failed/crashed ghost
         self.assertEqual([e["type"] for e in events], ["removed"])
 
-    async def test_agent_send_rejected_while_turn_active(self):
-        # A2: no interleaved turns — messages are rejected with a system
-        # hint while turn_active is set.
-        import json as _json
-        s1 = self.sm.create(name="ag3", cwd="/a", tool="claude-chat")
+    async def test_rename_updates_name_and_moves_log(self):
+        """Audit M3/M4/M1 (v24-v26): rename persists and relocates the
+        on-disk log (plus its .1 segment) so tail/delete find them."""
+        import os as _os
+        s1 = self.sm.create(name="old-name", cwd="/a", tool="bash")
+        log = _os.path.join(_TEST_DIR, "old-name-session1.log")
+        open(log, "w").write("x")
+        open(log + ".1", "w").write("rotated")
+        s1["log_path"] = log
+        ok = self.sm.rename(s1["id"], "new-name")
+        self.assertTrue(ok)
+        self.assertEqual(s1["name"], "new-name")
+        new_log = _os.path.join(_TEST_DIR, "new-name-session1.log")
+        self.assertEqual(s1["log_path"], new_log)
+        self.assertFalse(_os.path.exists(log))
+        self.assertTrue(_os.path.exists(new_log))
+        self.assertTrue(_os.path.exists(new_log + ".1"))  # .1 moved too
+        self.assertFalse(_os.path.exists(log + ".1"))
+
+    async def test_agent_concurrency_cap_rejects_concurrent(self):
+        """Audit H1/M7 (v26): two agents started while the cap is 1 — the
+        second must be rejected (the old code over-admitted because
+        state=running was set only after the first await)."""
+        self.sm.config["max_agent_concurrency"] = 1
+        s1 = self.sm.create(name="conc1", cwd="/a", tool="claude-chat")
         s1["engine"] = "agent"
+        s2 = self.sm.create(name="conc2", cwd="/a", tool="claude-chat")
+        s2["engine"] = "agent"
+        # claim the only slot the way _start_agent does (before its awaits)
+        s1["state"] = "starting"
+        with self.assertRaises(RuntimeError):
+            await self.sm._start_locked(s2["id"])
+        self.assertEqual(s2["state"], "stopped")
         s1["state"] = "running"
         s1["turn_active"] = True
 
