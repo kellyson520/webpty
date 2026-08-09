@@ -432,6 +432,13 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_agent_config_read_returns_ok(self):
+        """/api/agent-config/read 路由不再 AttributeError(此前必现连接重置)。"""
+        # 用存在的工具(codex)请求;即使本机无配置文件也应返回 200 + ok=False
+        st, j = self._req("/api/agent-config/read?tool=codex")
+        self.assertEqual(st, 200)
+        self.assertIn("ok", j)
+
 
 class ServerUnitTest(unittest.IsolatedAsyncioTestCase):
     """Pure unit tests for server helper functions (no server process)."""

@@ -496,7 +496,7 @@ class Server:
 
         if path == "/api/agent-config/read" and method == "GET":
             from agent_config import read_config
-            tool = self._query_param(path, "tool") or ""
+            tool = query.get("tool", [""])[0]
             if tool not in _AGENT_CONFIG_TOOLS:
                 return await self._send_json(writer, 400,
                                              {"error": "unknown tool"}, headers)
