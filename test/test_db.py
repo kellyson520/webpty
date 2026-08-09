@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 
 from db import Database
@@ -95,6 +96,31 @@ class DatabaseTest(unittest.IsolatedAsyncioTestCase):
             "mode": "merge", "status": "done", "log": "ok"})
         self.assertEqual(len(await self.db.list_migrations()), 1)
         self.assertGreater(mid, 0)
+
+    async def test_prune_old_data_removes_expired_and_checkpoints(self):
+        # Insert an old notification (ts in the past) + a fresh one.
+        old_ts = time.time() - 200 * 86400  # ~200 days ago
+        nid_old = await self.db.execute(
+            "INSERT INTO notifications (ts, event_type, level, tool, project,"
+            " session_id, title, body, dedup_key, delivered)"
+            " VALUES (?, 'output', 'info', 'bash', '/root', '', 'old', 'x',"
+            " 'old-key', 0)", (old_ts,))
+        await self.db.add_notification({
+            "event_type": "output", "level": "info", "tool": "bash",
+            "project": "/root", "session_id": "", "title": "fresh",
+            "body": "y", "dedup_key": "fresh-key"})
+        # Same for usage rows.
+        await self.db.execute(
+            "INSERT INTO token_usage (ts, session_id, model, tokens_in,"
+            " tokens_out, cost, source) VALUES (?, 's1', 'm', 1, 1, 0,"
+            " 'realtime')", (old_ts,))
+        result = await self.db.prune_old_data(retention_days=90)
+        self.assertEqual(result["deleted_notifications"], 1)
+        self.assertEqual(result["deleted_usage"], 1)
+        # Fresh rows survive.
+        rows = await self.db.query(
+            "SELECT title FROM notifications WHERE title='fresh'")
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

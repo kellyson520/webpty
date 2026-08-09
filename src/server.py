@@ -1210,7 +1210,20 @@ async def main() -> None:
         except Exception as err:  # noqa: BLE001
             print(f"[webpty] autostart error: {err}", flush=True)
 
+    async def _prune_loop() -> None:
+        """Daily retention sweep + WAL checkpoint — bounded DB growth."""
+        await asyncio.sleep(90)  # after the first backup run
+        while True:
+            try:
+                result = await db.prune_old_data()
+                if result.get("deleted_notifications") or result.get("deleted_usage"):
+                    print(f"[webpty] pruned old data: {result}", flush=True)
+            except Exception as err:  # noqa: BLE001
+                log_error("prune", err)
+            await asyncio.sleep(86400)  # daily
+
     backup_task = asyncio.create_task(_backup_loop())
+    asyncio.create_task(_prune_loop())
     # 定时重试未送达的 SMTP 通知(默认每 5 分钟),失败只记日志不退出
     notify_task = asyncio.create_task(_notify_retry_loop(notifier))
     asyncio.create_task(_autostart())

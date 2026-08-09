@@ -128,6 +128,27 @@ class Database:
         rows = await self.query(sql, params)
         return rows[0] if rows else None
 
+    async def prune_old_data(self, retention_days: int = 90) -> dict:
+        """Delete notifications and usage rows older than retention_days,
+        then checkpoint the WAL (low-footprint: bounded DB growth)."""
+        cutoff = _ts() - retention_days * 86400
+        deleted_notif = await self.execute(
+            "DELETE FROM notifications WHERE ts < ?", (cutoff,))
+        deleted_usage = await self.execute(
+            "DELETE FROM token_usage WHERE ts < ?", (cutoff,))
+        # WAL checkpoint: shrink the -wal file so it can't grow unbounded.
+        try:
+            assert self._conn is not None
+            async with self._lock:
+                row = self._conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            checkpoint = dict(row) if row else {}
+        except Exception:  # noqa: BLE001 — checkpoint is best-effort
+            checkpoint = {}
+        return {"deleted_notifications": deleted_notif,
+                "deleted_usage": deleted_usage,
+                "checkpoint": checkpoint}
+
     # ---- notifications -------------------------------------------------
     async def add_notification(self, n: dict) -> int:
         return await self.execute(
