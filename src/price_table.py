@@ -39,11 +39,29 @@ DEFAULT_PRICES: dict[str, dict] = {
     "deepseek-v4":   {"input": 0.27, "output": 1.1,  "cache_hit": 0.07,  "currency": "USD"},
     "deepseek-v3":   {"input": 0.27, "output": 1.1,  "cache_hit": 0.07,  "currency": "USD"},
     "deepseek-reasoner": {"input": 0.55, "output": 2.19, "cache_hit": 0.07, "currency": "USD"},
+    # Audit M3 (v23): deepseek-v4-flash/pro are reasonix's DEFAULT models —
+    # the v4 family price (0.27/1.1) overstated flash ~10×; exact entries
+    # beat the family prefix.
+    "deepseek-v4-flash": {"input": 0.02, "output": 0.05, "cache_hit": 0.005, "currency": "USD"},
+    "deepseek-v4-pro":   {"input": 0.27, "output": 1.1,  "cache_hit": 0.07,  "currency": "USD"},
+    # Audit M4 (v23): gpt-5.2 / claude-opus-4-5 are DEFAULT_PROVIDERS
+    # options — family-prefix pricing overstated them 2.5-3×.
+    "gpt-5.2":         {"input": 0.50, "output": 2.0,  "cache_hit": 0.05,  "currency": "USD"},
+    "gpt-5.1":         {"input": 0.50, "output": 2.0,  "cache_hit": 0.05,  "currency": "USD"},
+    "claude-opus-4-5": {"input": 5.0,  "output": 25.0, "cache_hit": 0.5,   "currency": "USD"},
+    "claude-opus-4":   {"input": 15.0, "output": 75.0, "cache_hit": 1.5,   "currency": "USD"},
     # Codex gateway model (codex CLI reports these)
     "o3-mini":       {"input": 1.1,  "output": 4.4,  "cache_hit": 0.55,  "currency": "USD"},
     "o4-mini":       {"input": 1.1,  "output": 4.4,  "cache_hit": 0.55,  "currency": "USD"},
 }
 _FALLBACK = {"input": 1.0, "output": 2.0, "cache_hit": 0.1, "currency": "USD"}
+
+
+def _has_exact_price(model: str) -> bool:
+    """Audit M3/M4 (v23): True only for an EXACT price-table match (or a
+    user config override) — family/prefix matches are estimates and must be
+    flagged as such in the UI."""
+    return model in DEFAULT_PRICES
 
 
 def _match_default(model: str) -> dict | None:

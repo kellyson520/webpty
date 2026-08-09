@@ -176,12 +176,15 @@ class CostTracker:
     async def grouped(self, group: str, period: str) -> list[dict]:
         rows = await self.db.usage_grouped(group, period)
         if group == "model":
-            # Audit L2: flag rows priced via family/fallback (no exact
-            # price-table match) so the UI can mark them "估算".
-            from price_table import _match_default
+            # Audit L2/M3 (v23): flag rows priced via family/fallback (no
+            # exact price-table match, no user override) so the UI marks
+            # them "估算" — prefix pricing overstated flash-class models.
+            from price_table import _has_exact_price
+            user_prices = self.config.get("prices") or {}
             for r in rows:
                 name = r.get("name") or ""
-                r["estimated"] = _match_default(name) is None
+                r["estimated"] = not (
+                    name in user_prices or _has_exact_price(name))
         return rows
 
     async def export_rows(self, period: str, frm: str | None = None,

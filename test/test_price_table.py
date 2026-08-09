@@ -17,7 +17,11 @@ class PriceTableTest(unittest.TestCase):
         # 真实模型 ID 前缀匹配家族价
         self.assertEqual(get_price("claude-opus-4-8", {})["input"], 15.0)
         self.assertEqual(get_price("gpt-5.4", {})["input"], 1.25)
-        self.assertEqual(get_price("deepseek-v4-flash", {})["input"], 0.27)
+        # Audit M3 (v23): exact entries beat the family prefix.
+        self.assertEqual(get_price("deepseek-v4-flash", {})["input"], 0.02)
+        self.assertEqual(get_price("deepseek-v4-pro", {})["input"], 0.27)
+        self.assertEqual(get_price("gpt-5.2", {})["input"], 0.50)
+        self.assertEqual(get_price("claude-opus-4-5", {})["input"], 5.0)
         # 家族回退
         self.assertEqual(get_price("claude-anything-new", {})["input"], 3.0)
         # gemini 家族

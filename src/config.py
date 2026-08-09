@@ -248,9 +248,11 @@ def normalize_config(raw: dict) -> dict:
     # Audit I1: restart/budget must be dicts — a hand-edited string would
     # make _maybe_restart / CostTracker crash with AttributeError and
     # silently disable auto-restart + budget alerts.
-    for seg in ("restart", "budget"):
+    # Audit L5 (v23): same guard for notify/prices — a hand-typed string
+    # under "notify" broke EVERY notification event silently.
+    for seg in ("restart", "budget", "notify", "prices"):
         if not isinstance(merged.get(seg), dict):
-            merged[seg] = default_config().get(seg)
+            merged[seg] = default_config().get(seg) or {}
 
     # providers: user presets override built-ins; non-dict → defaults.
     raw_providers = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}

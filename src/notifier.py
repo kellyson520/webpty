@@ -10,6 +10,20 @@ import time
 from html import escape
 from typing import Any
 
+# Audit L3 (v23): user-facing event names in Chinese (notification-center
+# titles/bodies AND email subject/body were English).
+EVENT_ZH = {
+    "completed": "已完成",
+    "failed": "失败",
+    "crashed": "崩溃",
+    "terminated": "已停止",
+    "stopped": "已停止",
+    "removed": "已删除",
+    "disk_low": "磁盘空间不足",
+    "budget_over": "预算超限",
+    "budget_ok": "预算恢复",
+}
+
 from mailer import Mailer
 from rules import match_rule, quiet_hours_active
 
@@ -82,8 +96,9 @@ class Notifier:
                 {r.get("name") or r.get("event_type") or "?" for r in matched})),
             "session_id": event.get("session_id"),
             "title": f"{event.get('tool', 'session')} "
-                     f"{event.get('type', 'event')}",
-            "body": f"会话 {event.get('name')} 已 {event.get('type')}",
+                     f"{EVENT_ZH.get(event.get('type', ''), event.get('type', 'event'))}",
+            "body": f"会话 {event.get('name')} "
+                    f"{EVENT_ZH.get(event.get('type', ''), event.get('type', 'event'))}",
             "dedup_key": dedup_key,
         })
         wants_mail = any(r.get("action") == "email" for r in matched)
@@ -98,13 +113,14 @@ class Notifier:
         if not self.mailer.enabled():
             await self.db.mark_delivered(nid, True)
             return
+        zh = EVENT_ZH.get(event.get("type", ""), event.get("type", ""))
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self.mailer.send,
-            f"[webpty] {event.get('tool')} {event.get('type')}",
+            f"[webpty] {event.get('tool')} {zh}",
             HTML_TMPL.format(
                 title=escape(str(event.get("name", "session"))),
-                body=escape(str(event.get("type", ""))),
+                body=escape(zh),
                 meta=escape(f"project: {event.get('project')}\n"
                             f"exit_code: {event.get('exit_code')}"),
             ))

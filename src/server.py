@@ -649,7 +649,13 @@ class Server:
 
         if path == "/api/sessions/order" and method == "PUT":
             body = await self._read_json(reader, headers)
-            self.sessions.reorder(body.get("ids") if isinstance(body.get("ids"), list) else [])
+            ids = body.get("ids")
+            # Audit L2 (v23): bad payloads returned a false 200 — the
+            # reorder silently didn't happen and the frontend kept its
+            # pending order forever. Reject early.
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                raise HttpError(400, "ids must be a list of session ids")
+            self.sessions.reorder(ids)
             return await self._send_json(writer, 200, {"ok": True}, headers)
 
         if path == "/api/sessions" and method == "POST":
@@ -1277,7 +1283,6 @@ class Server:
             await writer.drain()
             writer.close()
             return
-        self._ws_count += 1
         path = urllib.parse.urlparse(target).path
         m = re.match(r"^/ws/sessions/([^/]+)$", path)
         if not m:
@@ -1313,6 +1318,12 @@ class Server:
             await writer.drain()
             writer.close()
             return
+        # Audit H1 (v23): count the connection ONLY after every validation
+        # and the handshake succeeded — the old increment ran before the
+        # path/sid/auth/accept checks, and every early return leaked it;
+        # 128 malformed Upgrade requests (no token needed — bad paths are
+        # rejected BEFORE auth) exhausted the cap and DoS'd all real WS.
+        self._ws_count += 1
         asyncio.create_task(self._ws_session(ws, sid))
 
     def _input_offline_hint(self, sid: str, outbox) -> None:

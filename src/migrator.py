@@ -237,11 +237,22 @@ class Migrator(WorkerInterface):
         # validation — instead of bypassing it with a raw update (a replace
         # of an old package used to drop new-version defaults until the
         # next restart).
-        from config import normalize_config
-        incoming = normalize_config(incoming)
+        # Audit M1 (v23): normalize only for REPLACE. For merge, updating
+        # with the full "defaults + package" object would wipe every
+        # target-side key the package doesn't carry (tools/providers/roots
+        # would be replaced wholesale) — merge must apply ONLY the keys the
+        # package explicitly carries, exactly as before v22.
         if mode == "replace":
+            from config import normalize_config
+            # Audit L6 (v23): sanitize drops credentials — a replace would
+            # silently clear the target's authToken/allowedLogins, turning
+            # a bindHost=0.0.0.0 deployment into an open gate after restart.
+            # Write the target's CURRENT gate settings back.
+            for k in ("authToken", "allowedLogins"):
+                if k in self.config:
+                    incoming[k] = self.config[k]
             self.config.clear()
-            self.config.update(incoming)
+            self.config.update(normalize_config(incoming))
         else:  # merge (default): package values win for keys it carries,
             # existing keys absent from the package are kept (no clear)
             self.config.update(incoming)

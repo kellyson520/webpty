@@ -327,6 +327,17 @@ class SessionManager:
         if not tool:
             raise ValueError(f"Unknown tool: {session.get('tool')}")
         if tool.get("engine") == "agent":
+            # Audit M2 (v23): cap CONCURRENT RUNNING agents — the cgroup
+            # MemoryMax (2G) assumes a handful of agent CLIs; 64 sessions ×
+            # 300MB each would OOM-kill the whole service. Admit at most
+            # max_agent_concurrency (default 6) simultaneous agents.
+            max_agents = int(self.config.get("max_agent_concurrency") or 6)
+            running = sum(
+                1 for s in self.sessions.values()
+                if s.get("engine") == "agent" and s.get("state") == "running")
+            if running >= max_agents and session.get("state") != "running":
+                raise RuntimeError(
+                    f"运行中的 agent 已达上限（{max_agents}）——请先停止其他 agent 会话")
             return await self._start_agent(session, tool)
         return await self._start_pty(session, tool)
 

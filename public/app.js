@@ -137,6 +137,17 @@ function zhErr(msg) {
   return msg;
 }
 
+// Audit L4 (v23): adaptive USD formatting — toFixed(4) showed "$0.0000"
+// for sub-cent sessions (gpt-5-nano short chats) as if they were free.
+function fmtUsd(v) {
+  const n = Number(v || 0);
+  if (!isFinite(n)) return '$0';
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 0.01) return `$${n.toFixed(3)}`;
+  if (n > 0) return `$${n.toFixed(6)}`;
+  return '$0';
+}
+
 const api = async (url, opts = {}) => {  const headers = { 'content-type': 'application/json', ...(opts.headers || {}) };
   const token = localStorage.getItem('webpty.token');
   if (token) headers['authorization'] = `Bearer ${token}`;
@@ -552,9 +563,9 @@ function openWs(entry, session, attempt, { onopen, onmessage, reconnect }) {
   };
   ws.onmessage = (event) => onmessage(event, ws);
   ws.onerror = () => {
-    // Distinguish network-level failure from a clean close; onclose
-    // always follows, so the reconnect logic stays there.
-    entry.lastWsError = 'network';
+    // Network-level failure; onclose always follows, so the reconnect
+    // logic lives there (audit L1 v23: the old lastWsError marker was
+    // write-only dead code — dropped with the refactor).
   };
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
@@ -1414,7 +1425,7 @@ function renderChatItem(entry, item) {
       const parts = [item.isError ? (item.text || '出错') : '完成'];
       if (typeof item.durationMs === 'number') parts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
       if (typeof item.numTurns === 'number') parts.push(`${item.numTurns} 回合`);
-      if (typeof item.costUsd === 'number') parts.push(`$${item.costUsd.toFixed(4)}`);
+      if (typeof item.costUsd === 'number') parts.push(fmtUsd(item.costUsd));
       el.textContent = parts.join('  ·  ');
       entry.logEl.appendChild(el);
       break;
@@ -3072,8 +3083,8 @@ async function refreshCostPanel() {
   const alertsArr = Array.isArray(alerts) ? alerts : [];
   const over = alertsArr.some((a) => a.active);
   document.getElementById('cost-cards').innerHTML =
-    `<div class="cost-card${over ? ' over' : ''}"><div class="v">$${Number(sum.cost || 0).toFixed(4)}</div><div class="l">实际成本(工具上报)</div></div>` +
-    `<div class="cost-card"><div class="v">$${Number(sum.estimated || 0).toFixed(4)}</div><div class="l">估算(未上报时)</div></div>` +
+    `<div class="cost-card${over ? ' over' : ''}"><div class="v">${fmtUsd(sum.cost)}</div><div class="l">实际成本(工具上报)</div></div>` +
+    `<div class="cost-card"><div class="v">${fmtUsd(sum.estimated)}</div><div class="l">估算(未上报时)</div></div>` +
     `<div class="cost-card"><div class="v">${esc(sum.tokens_in ?? 0)}</div><div class="l">输入 tokens</div></div>` +
     `<div class="cost-card"><div class="v">${esc(sum.tokens_out ?? 0)}</div><div class="l">输出 tokens</div></div>` +
     `<div class="cost-card${over ? ' over' : ''}"><div class="v">${over ? '超限' : '正常'}</div><div class="l">预算状态</div></div>`;
@@ -3081,7 +3092,7 @@ async function refreshCostPanel() {
   const byModelRows = (byModel || []).map((g) =>
     `<div class="panel-item">
        <div class="item-main">
-         <div class="item-title">${esc(g.name)} <span class="badge">$${Number(g.cost || 0).toFixed(4)}</span>${g.estimated ? ' <span class="badge warn">估算价</span>' : ''}</div>
+         <div class="item-title">${esc(g.name)} <span class="badge">${fmtUsd(g.cost)}</span>${g.estimated ? ' <span class="badge warn">估算价</span>' : ''}</div>
          <div class="item-sub">${esc(g.tokens_in ?? 0)} in / ${esc(g.tokens_out ?? 0)} out</div>
        </div>
      </div>`).join('');
@@ -3090,7 +3101,7 @@ async function refreshCostPanel() {
       `<div class="panel-item">
          <span class="dot" style="background:var(--tool-codex)"></span>
          <div class="item-main">
-           <div class="item-title">${esc(g.name)} <span class="badge">$${Number(g.cost || 0).toFixed(4)}</span></div>
+           <div class="item-title">${esc(g.name)} <span class="badge">${fmtUsd(g.cost)}</span></div>
            <div class="item-sub">${esc(g.tokens_in ?? 0)} in / ${esc(g.tokens_out ?? 0)} out</div>
          </div>
        </div>`).join('') ||
