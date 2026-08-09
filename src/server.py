@@ -621,6 +621,14 @@ class Server:
             ok = await self.notifier.test_message()
             return await self._send_json(writer, 200, {"ok": ok}, headers)
 
+        # --- diagnostics ----------------------------------------------------
+        if path == "/api/errors" and method == "GET":
+            # Audit S2: backend errors (backup/notifier/reconcile/...) were
+            # stdout-only; surface the ring buffer so the UI can show them.
+            from logging_util import recent_errors
+            return await self._send_json(
+                writer, 200, {"errors": recent_errors()}, headers)
+
         # --- cost -----------------------------------------------------------
         if path == "/api/cost/summary" and method == "GET":
             period = (query.get("period") or ["day"])[0]
@@ -713,6 +721,7 @@ class Server:
         m = re.match(r"^/api/backup/restore/(\d+)$", path)
         if m and method == "POST":
             from backup import restore_backup
+            # F3: sha256 + gunzip run in a thread inside restore_backup.
             res = await restore_backup(int(m.group(1)), self.data_dir, self.db,
                                        self.config)
             if res.get("ok") and isinstance(res.get("config"), dict):
@@ -723,6 +732,7 @@ class Server:
         m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
         if m and method == "GET":
             from backup import diff_backups
+            # F3: the tar gunzip/parse runs in a thread inside diff_backups.
             diff = await diff_backups(int(m.group(1)), int(m.group(2)), self.db)
             return await self._send_json(writer, 200, diff, headers)
 
@@ -1079,6 +1089,9 @@ class Server:
     async def _ws_session(self, ws, sid: str) -> None:  # type: ignore[no-untyped-def]
         session = self.sessions.get(sid)
         is_agent = session is not None and session.get("engine") == "agent"
+        # Audit S1a: protocol version handshake — new frontends ignore
+        # unknown JSON silently, so this frame is harmless to old ones.
+        ws.send_text(json.dumps({"type": "proto", "v": 1}))
         # Replay window state (pty sessions): bytes of recent_output already
         # delivered. Declared here so on_resync (defined for both engines)
         # can reset them via nonlocal.
@@ -1219,6 +1232,12 @@ class Server:
                     if text.startswith("{"):
                         try:
                             msg = json.loads(text)
+                            # Audit S1c: control messages must carry
+                            # __ctl:true — otherwise a user typing valid
+                            # JSON like {"type":"resize"} into bash would be
+                            # hijacked as a control message and swallowed.
+                            if msg.get("__ctl") is not True:
+                                raise ValueError("not a control message")
                             if msg.get("type") == "user" and isinstance(msg.get("text"), str):
                                 self.sessions.agent_send(sid, msg["text"])
                                 continue
@@ -1226,7 +1245,7 @@ class Server:
                                     and isinstance(msg.get("rows"), (int, float)):
                                 self.sessions.resize(sid, int(msg["cols"]), int(msg["rows"]))
                                 continue
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, ValueError):
                             pass
                     if not is_agent:
                         self.sessions.write(sid, payload)

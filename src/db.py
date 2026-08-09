@@ -227,6 +227,27 @@ class Database:
              int(u.get("tokens_in", 0)), int(u.get("tokens_out", 0)),
              float(u.get("cost", 0.0)), u.get("source", "realtime")))
 
+    async def add_usage_batch(self, rows: list[dict]) -> int:
+        """Bulk insert in one transaction (audit F2): the reconciler pushes
+        thousands of posthoc rows at once — one commit per row was the
+        bottleneck."""
+        if not rows:
+            return 0
+        assert self._conn is not None
+        async with self._lock:
+            self._conn.executemany(
+                """INSERT INTO token_usage
+                   (ts, project, tool, model, session_id, tokens_in,
+                    tokens_out, cost, source)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [(u.get("ts", _ts()), u.get("project"), u.get("tool"),
+                  u.get("model"), u.get("session_id"),
+                  int(u.get("tokens_in", 0)), int(u.get("tokens_out", 0)),
+                  float(u.get("cost", 0.0)), u.get("source", "posthoc"))
+                 for u in rows])
+            self._conn.commit()
+        return len(rows)
+
     def _period_start(self, period: str) -> float:
         now = time.time()
         if period == "week":

@@ -142,11 +142,20 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
                         os.path.basename(row["filename"]))
     if not os.path.exists(path):
         return {"ok": False, "message": "file missing"}
-    if _sha256_file(path) != row["sha256"]:
+    # Audit F3: sha256 + gunzip are synchronous and can take seconds for
+    # MB-scale backups — off the event loop.
+    import asyncio
+
+    def _read_pkg() -> bytes:
+        if _sha256_file(path) != row["sha256"]:
+            raise ValueError("sha256 mismatch")
+        with tarfile.open(path, "r:gz") as tf:
+            return tf.extractfile(tf.getmember("manifest.json")).read()
+
+    try:
+        raw = await asyncio.to_thread(_read_pkg)
+    except ValueError:
         return {"ok": False, "message": "sha256 mismatch"}
-    with tarfile.open(path, "r:gz") as tf:
-        member = tf.getmember("manifest.json")
-        raw = tf.extractfile(member).read()
     if row.get("encrypted"):
         key = (config or {}).get("backup", {}).get("encryption_key") or ""
         if not key:
@@ -201,6 +210,15 @@ async def restore_backup(backup_id: int, data_dir: str, db: Database,
     return {"ok": True, "message": "restored", "config": merged}
 
 
+def _read_manifest(path: str) -> dict:
+    """Synchronous tar.gz manifest read — called via asyncio.to_thread."""
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            return json.loads(tf.extractfile("manifest.json").read())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
     async def _load(bid: int) -> dict:
         """Read the state dict from a backup package by id."""
@@ -212,8 +230,9 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
         if not os.path.exists(path):
             return {}
         try:
-            with tarfile.open(path, "r:gz") as tf:
-                return json.loads(tf.extractfile("manifest.json").read())
+            # Audit F3: gunzip + parse off the event loop.
+            import asyncio
+            return await asyncio.to_thread(_read_manifest, path)
         except Exception:  # noqa: BLE001 — encrypted manifests are ciphertext
             return {}
 

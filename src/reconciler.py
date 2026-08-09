@@ -23,15 +23,20 @@ def scan_claude_logs(projects_dir: str) -> list[dict]:
                 continue
             session_id = fn[:-6]  # strip .jsonl
             path = os.path.join(root, fn)
-            # Single-file cap (plan Task 5): a runaway session log must not
-            # stall the whole reconcile scan.
+            # Audit F1: files over the cap used to be skipped ENTIRELY —
+            # long claude sessions' costs were never recorded. Read the
+            # trailing MAX_SCAN_FILE_BYTES instead (a >50MB log still costs
+            # at most one bounded pass and the most recent usage lives at
+            # the tail).
             try:
-                if os.path.getsize(path) > MAX_SCAN_FILE_BYTES:
-                    continue
+                size = os.path.getsize(path)
             except OSError:
                 continue
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
+                    if size > MAX_SCAN_FILE_BYTES:
+                        f.seek(size - MAX_SCAN_FILE_BYTES)
+                        f.readline()  # drop the partial first line
                     for line in f:
                         u = parse_usage(line, "claude")
                         if u:
@@ -49,10 +54,46 @@ class Reconciler:
         self.config = config
 
     async def reconcile(self, projects_dir: str, tool: str = "claude") -> int:
-        added = 0
-        for u in scan_claude_logs(projects_dir):
-            added += await self._add_one(u, tool)
-        return added
+        # Audit F2: batch dedup + insert instead of one SELECT + one INSERT
+        # (each with its own commit) per row — 100k rows went from minutes
+        # to seconds.
+        rows = list(scan_claude_logs(projects_dir))
+        if not rows:
+            return 0
+        keys = [(u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
+                for u in rows]
+        seen = set()
+        # Chunk the key query to stay inside SQLite's variable limit.
+        CHUNK = 500
+        for i in range(0, len(keys), CHUNK):
+            part = keys[i:i + CHUNK]
+            placeholders = ",".join(["(?,?,?)"] * len(part))
+            flat = [x for k in part for x in k]
+            existing = await self.db.query(
+                f"SELECT session_id, tokens_in, tokens_out FROM token_usage "
+                f"WHERE (session_id, tokens_in, tokens_out) IN ({placeholders})",
+                tuple(flat))
+            for r in existing:
+                seen.add((r["session_id"] or "", r["tokens_in"], r["tokens_out"]))
+        batch = []
+        for u in rows:
+            key = (u.get("session_id") or "", u["tokens_in"], u["tokens_out"])
+            if key in seen:
+                continue
+            model = u.get("model") or tool
+            cost = u.get("cost")
+            if cost is None:
+                cost = cost_for(model, u["tokens_in"], u["tokens_out"],
+                                self.config, cached_in=u.get("cached_in", 0),
+                                cached_write=u.get("cached_write", 0))
+            batch.append({
+                "project": u.get("project"), "tool": tool, "model": model,
+                "session_id": u.get("session_id"),
+                "tokens_in": u["tokens_in"], "tokens_out": u["tokens_out"],
+                "cost": cost, "source": "posthoc"})
+        if batch:
+            await self.db.add_usage_batch(batch)
+        return len(batch)
 
     async def _add_one(self, u: dict, tool: str) -> int:
         """Insert a single scanned usage row (dedup + cost). Returns 1 when

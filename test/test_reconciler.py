@@ -75,17 +75,26 @@ class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s["tokens_out"], 150)
 
 
-    async def test_scan_skips_huge_files(self):
-        """超大日志文件被跳过(单文件上限)。"""
+    async def test_scan_tail_of_huge_files(self):
+        """超大日志文件读取尾部(审计 F1):不再是整体跳过,尾部 usage 仍被扫到。"""
         import os as _os
         from reconciler import MAX_SCAN_FILE_BYTES
         big = _os.path.join(self.projects, "proj-a", "huge.jsonl")
-        # 造一个超过上限的文件(稀疏写)
+        usage_line = ('{"type":"usage","message":{"usage":{"input_tokens":7,'
+                      '"output_tokens":3}}}\n')
         with open(big, "wb") as f:
-            f.seek(MAX_SCAN_FILE_BYTES + 10)
-            f.write(b"{}")
+            # Fill real bytes up to the cap, then the usage line at the
+            # tail — the tail-read must parse it.
+            chunk = b'{"type":"ignored","message":{}}\n'
+            written = 0
+            while written + len(chunk) < MAX_SCAN_FILE_BYTES:
+                f.write(chunk)
+                written += len(chunk)
+            f.write(usage_line.encode())
         items = scan_claude_logs(self.projects)
-        self.assertFalse(any(i["session_id"] == "huge" for i in items))
+        hits = [i for i in items if i["session_id"] == "huge"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["tokens_in"], 7)
 
 
 if __name__ == "__main__":

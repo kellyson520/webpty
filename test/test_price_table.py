@@ -16,13 +16,29 @@ class PriceTableTest(unittest.TestCase):
     def test_prefix_matching(self):
         # 真实模型 ID 前缀匹配家族价
         self.assertEqual(get_price("claude-opus-4-8", {})["input"], 15.0)
-        self.assertEqual(get_price("claude-haiku-4-5-20251001", {})["input"], 0.80)
         self.assertEqual(get_price("gpt-5.4", {})["input"], 1.25)
         self.assertEqual(get_price("deepseek-v4-flash", {})["input"], 0.27)
         # 家族回退
         self.assertEqual(get_price("claude-anything-new", {})["input"], 3.0)
         # gemini 家族
         self.assertAlmostEqual(get_price("gemini-2.5-pro", {})["input"], 0.15)
+
+    def test_exact_version_prices_beat_family(self):
+        # Audit E1: dated/versioned ids hit the exact entries (longest
+        # prefix), correcting the family price where it was wrong.
+        self.assertEqual(get_price("claude-haiku-4-5-20251001", {})["input"], 1.0)
+        self.assertEqual(get_price("gpt-4o-mini", {})["input"], 0.15)
+        self.assertEqual(get_price("gpt-5-mini-latest", {})["input"], 0.25)
+        self.assertEqual(get_price("gpt-5-nano", {})["input"], 0.05)
+        self.assertEqual(get_price("codex-mini-latest", {})["input"], 0.25)
+        self.assertEqual(get_price("deepseek-chat", {})["input"], 0.28)
+
+    def test_config_override_prefix_matches(self):
+        # Audit E2: a configured prefix covers dated ids too.
+        cfg = {"prices": {"claude-haiku-4-5": {"input": 2.0, "output": 8.0,
+                                               "cache_hit": 0.2, "currency": "USD"}}}
+        p = get_price("claude-haiku-4-5-20251001", cfg)
+        self.assertEqual(p["input"], 2.0)
 
     def test_config_overrides(self):
         cfg = {"prices": {"claude": {"input": 99.0, "output": 99.0,

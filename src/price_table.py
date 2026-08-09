@@ -23,6 +23,14 @@ DEFAULT_PRICES: dict[str, dict] = {
     "o1":            {"input": 15.0, "output": 60.0, "cache_hit": 1.5,   "currency": "USD"},
     "o3":            {"input": 2.0,  "output": 8.0,  "cache_hit": 0.5,   "currency": "USD"},
     "codex":         {"input": 2.5,  "output": 10.0, "cache_hit": 0.5,   "currency": "USD"},
+    # Audit E1: exact-version entries beat the family prefix (longest
+    # prefix wins), so these correct the family price where it was wrong.
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_hit": 0.10, "currency": "USD"},
+    "gpt-4o-mini":      {"input": 0.15, "output": 0.60, "cache_hit": 0.075, "currency": "USD"},
+    "gpt-5-mini":       {"input": 0.25, "output": 2.0, "cache_hit": 0.025, "currency": "USD"},
+    "gpt-5-nano":       {"input": 0.05, "output": 0.40, "cache_hit": 0.005, "currency": "USD"},
+    "codex-mini":       {"input": 0.25, "output": 2.0, "cache_hit": 0.025, "currency": "USD"},
+    "deepseek-chat":    {"input": 0.28, "output": 0.42, "cache_hit": 0.028, "currency": "USD"},
     # Reasonix / OpenCode (DeepSeek-class gateway pricing)
     "reasonix":      {"input": 0.55, "output": 2.19, "cache_hit": 0.07,  "currency": "USD"},
     "opencode":      {"input": 0.55, "output": 2.19, "cache_hit": 0.07,  "currency": "USD"},
@@ -65,8 +73,19 @@ def _match_default(model: str) -> dict | None:
 
 def get_price(model: str, config: dict) -> dict:
     prices = config.get("prices") or {}
-    if isinstance(prices, dict) and model in prices and isinstance(prices[model], dict):
-        return prices[model]
+    if isinstance(prices, dict):
+        # Exact match first, then longest-prefix match (audit E2: a
+        # configured "claude-haiku-4-5" must cover the dated
+        # "claude-haiku-4-5-20251001" id too).
+        if model in prices and isinstance(prices[model], dict):
+            return prices[model]
+        best = None
+        for key in prices:
+            if (model.startswith(key) and isinstance(prices[key], dict)
+                    and (best is None or len(key) > len(best))):
+                best = key
+        if best is not None:
+            return prices[best]
     hit = _match_default(model)
     return hit if hit is not None else _FALLBACK
 

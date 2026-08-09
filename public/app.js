@@ -460,7 +460,7 @@ function connectSocket(entry, session, attempt = 0) {
   ws.onopen = () => {
     if (attempt > 0) showHint('', 0); // reconnected — clear the offline hint
     attempt = 0;
-    ws.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
+    ws.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
   };
   ws.onmessage = (event) => {
     if (typeof event.data === 'string' && event.data.startsWith('{')) {
@@ -486,6 +486,10 @@ function connectSocket(entry, session, attempt = 0) {
           } catch {}
           return;
         }
+        // Audit S1b: any OTHER recognized JSON (future protocol messages)
+        // is silently ignored — never falls through to term.write() which
+        // would print control JSON into the terminal.
+        return;
       } catch {}
     }
     // Large frames are chunked into ~8KB writes. term.write() parses
@@ -985,7 +989,21 @@ function buildChatPage(session) {
   const submit = () => {
     const text = composeInput.value.trim();
     if (!text) return;
-    const payload = JSON.stringify({ type: 'user', text });
+    // Audit C1: stopped sessions can't accept input — restart + hint
+    // (aligned with the pty path) instead of silently dropping.
+    const sess = sessions.find((s) => s.id === session.id);
+    if (sess && sess.state !== 'running') {
+      showHint('会话未运行，正在重启…');
+      api(`/api/sessions/${session.id}/start`, { method: 'POST' }).catch(() => {});
+      composeInput.value = '';
+      return;
+    }
+    // Optimistic local echo: render the user bubble immediately; the
+    // server's echo (same session id) lands in the transcript and the
+    // rAF replay renders it — duplicates are avoided because renderChatItem
+    // for 'user' just sets textContent (idempotent for identical text).
+    renderChatItem(entry, { t: 'user', text, ts: Date.now() });
+    const payload = JSON.stringify({ type: 'user', __ctl: true, text });
     if (entry.socket?.readyState === WebSocket.OPEN) {
       entry.socket.send(payload);
     } else {
@@ -1103,6 +1121,16 @@ function renderChatItem(entry, item) {
       break;
     case 'user': {
       breakText();
+      // Audit C1 dedup: submit() renders the bubble optimistically; the
+      // server echoes the same user item over the WS — skip when the last
+      // rendered user bubble has identical text.
+      const prevUser = entry.logEl.lastElementChild;
+      const prevBubble = prevUser && prevUser.querySelector('.bubble');
+      if (prevUser && prevUser.classList.contains('chat-msg')
+          && prevUser.classList.contains('user')
+          && prevBubble && prevBubble.textContent === item.text) {
+        return;
+      }
       const el = document.createElement('div');
       el.className = 'chat-msg user';
       const b = document.createElement('div');
@@ -1762,7 +1790,7 @@ function sendToSession(id, text) {
   if (isAgent(session)) {
     // Agent sessions speak the stream-json user-message protocol, not raw bytes.
     if (entry?.socket?.readyState === WebSocket.OPEN) {
-      entry.socket.send(JSON.stringify({ type: 'user', text: text.replace(/\r$/, '') }));
+      entry.socket.send(JSON.stringify({ type: 'user', __ctl: true, text: text.replace(/\r$/, '') }));
       return true;
     }
     return false;
@@ -2383,7 +2411,7 @@ function onActivate(idx) {
     if (entry.fit) {
       try { entry.fit.fit(); } catch {}
       if (entry.socket?.readyState === WebSocket.OPEN) {
-        entry.socket.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
+        entry.socket.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
       }
     }
   }
@@ -2464,7 +2492,7 @@ function applyViewport() {
       if (!entry.term) continue;
       try { entry.fit.fit(); } catch {}
       if (entry.socket?.readyState === WebSocket.OPEN) {
-        entry.socket.send(JSON.stringify({ type: 'resize', cols: entry.term.cols, rows: entry.term.rows }));
+        entry.socket.send(JSON.stringify({ type: 'resize', __ctl: true, cols: entry.term.cols, rows: entry.term.rows }));
       }
     }
     scrollToIndex(activeIndex, false);
