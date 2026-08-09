@@ -656,8 +656,19 @@ class Server:
             return await self._send_json(writer, 201, {"backup": b}, headers)
         if path == "/api/backup/list" and method == "GET":
             from backup import list_backups
+            rows = await list_backups(self.db)
+            # Annotate each row with its kind (real backup vs migrate-export
+            # package) so the UI can hide restore for migrate packages.
+            import json as _json
+            for r in rows:
+                try:
+                    man = _json.loads(r.get("manifest_json") or "{}")
+                    r["kind"] = "migrate-export" if isinstance(man, dict) \
+                        and man.get("kind") == "migrate-export" else "backup"
+                except Exception:  # noqa: BLE001
+                    r["kind"] = "backup"
             return await self._send_json(
-                writer, 200, {"backups": await list_backups(self.db)}, headers)
+                writer, 200, {"backups": rows}, headers)
         m = re.match(r"^/api/backup/restore/(\d+)$", path)
         if m and method == "POST":
             from backup import restore_backup

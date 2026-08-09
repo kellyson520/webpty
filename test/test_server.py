@@ -440,6 +440,17 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn("ok", j)
 
 
+    def test_fs_list_restricted_to_roots(self):
+        # roots 内路径允许
+        st, _ = self._req(f"/api/fs/list?path={self.proj_root}")
+        self.assertEqual(st, 200)
+        # roots 外路径拒绝（403）
+        st, _ = self._req("/api/fs/list?path=/etc")
+        self.assertEqual(st, 403)
+        # 空 path（系统根浏览起点）允许
+        st, _ = self._req("/api/fs/list")
+        self.assertEqual(st, 200)
+
 class ServerUnitTest(unittest.IsolatedAsyncioTestCase):
     """Pure unit tests for server helper functions (no server process)."""
 
@@ -484,6 +495,7 @@ class ServerUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(calls), 2)
 
 
+
 async def asyncio_open_conn(port):
     import asyncio
 
@@ -491,16 +503,6 @@ async def asyncio_open_conn(port):
 
 
 
-    def test_fs_list_restricted_to_roots(self):
-        # roots 内路径允许
-        st, _ = self._req(f"/api/fs/list?path={self.proj_root}")
-        self.assertEqual(st, 200)
-        # roots 外路径拒绝（403）
-        st, _ = self._req("/api/fs/list?path=/etc")
-        self.assertEqual(st, 403)
-        # 空 path（系统根浏览起点）允许
-        st, _ = self._req("/api/fs/list")
-        self.assertEqual(st, 200)
 
 
 if __name__ == "__main__":

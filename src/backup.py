@@ -219,11 +219,18 @@ async def diff_backups(a_id: int, b_id: int, db: Database) -> list[dict]:
 
 async def rotate(db: Database, retention: int = 7) -> list[int]:
     rows = await db.list_backups()
-    if len(rows) <= retention:
+    # Only real backups count toward the retention quota — migrate-export
+    # packages are registered too (so they get cleaned up) but must not push
+    # genuine snapshots out of the window.
+    import json as _json
+    real = [r for r in rows if not _is_migrate_export_row(r)]
+    if len(real) <= retention:
         return []
-    doomed = rows[retention:]
+    doomed_ids = {r["id"] for r in real[retention:]}
     deleted = []
-    for row in doomed:
+    for row in rows:
+        if row["id"] not in doomed_ids:
+            continue
         path = os.path.join(os.path.dirname(db.path), "backups",
                             os.path.basename(row["filename"]))
         if os.path.exists(path):
@@ -231,3 +238,14 @@ async def rotate(db: Database, retention: int = 7) -> list[int]:
         await db.delete_backup(row["id"])
         deleted.append(row["id"])
     return deleted
+
+
+def _is_migrate_export_row(row: dict) -> bool:
+    """True when a backups-table row is a migrate-export package (not a real
+    backup snapshot that restore can handle)."""
+    import json as _json
+    try:
+        man = _json.loads(row.get("manifest_json") or "{}")
+        return isinstance(man, dict) and man.get("kind") == "migrate-export"
+    except Exception:  # noqa: BLE001 — unparseable manifest = treat as backup
+        return False

@@ -295,7 +295,7 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
     # Atomic write: temp file + rename, keep original permissions.
     try:
         mode = os.stat(path).st_mode & 0o777
-        tmp = path + ".webpty-tmp"
+        tmp = f"{path}.webpty-tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp, mode)

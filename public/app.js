@@ -2495,13 +2495,13 @@ async function refreshBackupPanel() {
     const t = new Date((b.created_at || 0) * 1000);
     const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
     return `<div class="panel-item">
-      <span class="dot" style="background:var(--accent)"></span>
+      <span class="dot" style="background:${b.kind === 'migrate-export' ? '#d29922' : 'var(--accent)'}"></span>
       <div class="item-main">
-        <div class="item-title">${esc(b.filename)} ${b.encrypted ? '<span class="badge warn">加密</span>' : ''}</div>
+        <div class="item-title">${esc(b.filename)} ${b.encrypted ? '<span class="badge warn">加密</span>' : ''}${b.kind === 'migrate-export' ? '<span class="badge warn">迁移包</span>' : ''}</div>
         <div class="item-sub">${esc((Number(b.size_bytes || 0) / 1024).toFixed(1))}KB · ${when} · SHA256 ${esc((b.sha256 || '').slice(0, 10))}…</div>
       </div>
       <div class="item-side">
-        <button class="btn sm" data-restore="${esc(b.id)}" type="button">恢复</button>
+        ${b.kind === 'migrate-export' ? '' : `<button class="btn sm" data-restore="${esc(b.id)}" type="button">恢复</button>`}
       </div>
     </div>`;
   }).join('') ||
