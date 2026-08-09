@@ -30,6 +30,11 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Audit M3: the DB stores notifications/usage — owner-only perms.
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
         self._create_schema()
 
     def close(self) -> None:

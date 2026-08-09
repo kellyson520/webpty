@@ -170,8 +170,13 @@ def handle_start(sock: socket.socket, msg: dict) -> None:
     cmd = msg.get("command") or ""
     args = [str(a) for a in (msg.get("args") or [])]
     cwd = msg.get("cwd") or os.getcwd()
-    cols = int(msg.get("cols") or 120)
-    rows = int(msg.get("rows") or 30)
+    # Audit H1: defensive int parsing — bad types previously raised
+    # ValueError inside on_line (crashed the whole host).
+    try:
+        cols = max(1, min(int(msg.get("cols") or 120), 1000))
+        rows = max(1, min(int(msg.get("rows") or 30), 1000))
+    except (TypeError, ValueError):
+        cols, rows = 120, 30
 
     env = dict(os.environ)
     for k, v in (msg.get("env") or {}).items():
@@ -304,8 +309,14 @@ def handle_resize(msg: dict) -> None:
     session = sessions.get(msg.get("id"))
     if not session:
         return
-    session["cols"] = int(msg.get("cols") or session["cols"])
-    session["rows"] = int(msg.get("rows") or session["rows"])
+    # Audit H1: bad types here previously raised ValueError inside on_line.
+    try:
+        cols = int(msg["cols"]) if msg.get("cols") is not None else session["cols"]
+        rows = int(msg["rows"]) if msg.get("rows") is not None else session["rows"]
+    except (TypeError, ValueError):
+        return
+    session["cols"] = max(1, min(cols, 1000))
+    session["rows"] = max(1, min(rows, 1000))
     if session["alive"]:
         try:
             import fcntl
@@ -352,27 +363,33 @@ def handle_list(sock: socket.socket, msg: dict) -> None:
 
 
 def on_line(sock: socket.socket, line: str) -> None:
+    # Audit H1: ANY malformed message must be ignored, never crash the
+    # daemon (a crash kills every session). JSON-valid-but-wrong-shaped
+    # payloads (list, null, missing fields, bad types) previously raised
+    # AttributeError/TypeError/ValueError inside the handlers.
     try:
         msg = json.loads(line)
-    except json.JSONDecodeError:
-        return
-    op = msg.get("op")
-    if op == "list":
-        handle_list(sock, msg)
-    elif op == "start":
-        handle_start(sock, msg)
-    elif op == "attach":
-        handle_attach(sock, msg)
-    elif op == "detach":
-        handle_detach(sock, msg)
-    elif op == "input":
-        handle_input(msg)
-    elif op == "resize":
-        handle_resize(msg)
-    elif op == "kill":
-        handle_kill(sock, msg)
-    elif op == "forget":
-        handle_forget(sock, msg)
+        if not isinstance(msg, dict):
+            return
+        op = msg.get("op")
+        if op == "list":
+            handle_list(sock, msg)
+        elif op == "start":
+            handle_start(sock, msg)
+        elif op == "attach":
+            handle_attach(sock, msg)
+        elif op == "detach":
+            handle_detach(sock, msg)
+        elif op == "input":
+            handle_input(msg)
+        elif op == "resize":
+            handle_resize(msg)
+        elif op == "kill":
+            handle_kill(sock, msg)
+        elif op == "forget":
+            handle_forget(sock, msg)
+    except Exception:  # noqa: BLE001 — malformed input must not kill the host
+        pass
 
 
 def _drop_session(sid: str) -> None:
@@ -551,28 +568,33 @@ def main() -> None:
             events = sel.select(timeout=timeout)
             _flush_expired(time.monotonic())
             for key, _mask in events:
-                kind = key.data
-                if kind[0] == "accept":
-                    on_connection(kind[1])
-                elif kind[0] == "client":
-                    sock = kind[1]
-                    _client_read(sock)
-                elif kind[0] == "output":
-                    sid = kind[1]
-                    session = sessions.get(sid)
-                    if not session:
-                        continue
-                    try:
-                        chunk = os.read(session["master_fd"], 65536)
-                    except OSError:
-                        continue
-                    if chunk:
-                        session["buffer"].push(chunk)
-                        session["pending"].append(chunk)
-                        pending_bytes = sum(len(c) for c in session["pending"])
-                        if (pending_bytes >= MAX_OUTPUT_BYTES
-                                or time.monotonic() - session["last_flush"] >= FLUSH_DELAY):
-                            _flush_output(session)
+                # Audit H1: one bad event must never kill the daemon and
+                # all its sessions — log and continue.
+                try:
+                    kind = key.data
+                    if kind[0] == "accept":
+                        on_connection(kind[1])
+                    elif kind[0] == "client":
+                        sock = kind[1]
+                        _client_read(sock)
+                    elif kind[0] == "output":
+                        sid = kind[1]
+                        session = sessions.get(sid)
+                        if not session:
+                            continue
+                        try:
+                            chunk = os.read(session["master_fd"], 65536)
+                        except OSError:
+                            continue
+                        if chunk:
+                            session["buffer"].push(chunk)
+                            session["pending"].append(chunk)
+                            pending_bytes = sum(len(c) for c in session["pending"])
+                            if (pending_bytes >= MAX_OUTPUT_BYTES
+                                    or time.monotonic() - session["last_flush"] >= FLUSH_DELAY):
+                                _flush_output(session)
+                except Exception:  # noqa: BLE001
+                    continue
     except KeyboardInterrupt:
         pass
     finally:

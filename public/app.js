@@ -1693,7 +1693,13 @@ function renderTabs() {
         await refreshSessions();
       };
       tab.appendChild(closeBtn);
-      tab.onclick = () => scrollToIndex(idx);
+      tab.onclick = () => {
+        // Audit M2: resolve the index at click time — sessions can be
+        // reordered (drag) or removed between renders, so a captured
+        // index goes stale and clicks the wrong tab.
+        const liveIdx = sessions.findIndex((s) => s.id === session.id);
+        if (liveIdx >= 0) scrollToIndex(liveIdx);
+      };
       tabsEl.appendChild(tab);
       existing.set(s.id, tab);
     }
@@ -2607,7 +2613,20 @@ function onActivate(idx) {
 
 async function loadConfig() { return (config = await api('/api/config')); }
 async function loadProjects() { return (projects = await api('/api/projects')); }
-async function loadSessionsRaw() { return (sessions = await api('/api/sessions')); }
+async function loadSessionsRaw() {
+  const fresh = await api('/api/sessions');
+  // Audit M1: in-place merge instead of wholesale replacement — tab
+  // closures and the active-entry pointers keep stable object references,
+  // so field updates (state/busy/cost) reach the UI without a rebuild.
+  const oldById = new Map(sessions.map((s) => [s.id, s]));
+  const merged = [];
+  for (const f of fresh) {
+    const old = oldById.get(f.id);
+    if (old) Object.assign(old, f);
+    merged.push(old || f);
+  }
+  return (sessions = merged);
+}
 
 async function refreshSessions() {
   const before = sessions.map((s) => s.id).join(',');

@@ -195,6 +195,14 @@ class SessionManager:
     def create(self, *, name: str, cwd: str, tool: str, args: str = "",
                autostart: bool = False,
                permissionMode: str | None = None) -> dict:
+        # Audit M5: cap session count — a runaway client (or autostart
+        # storm) creating thousands of sessions would grow memory/logs/DB
+        # without bound. Default 64; configurable via config.max_sessions.
+        max_sessions = int(self.config.get("max_sessions") or 64)
+        if len(self.sessions) >= max_sessions:
+            raise ValueError(
+                f"session limit reached ({max_sessions}) — remove some "
+                "sessions first")
         sid = str(uuid.uuid4())
         session = self._inflate({
             "id": sid, "name": name or os.path.basename(cwd) or cwd,

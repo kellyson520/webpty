@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 
 from logging_util import log_error
 from price_table import cost_for
@@ -66,6 +67,11 @@ class CostTracker:
         session; summary prefers actual over estimates (Task 4)."""
         cost = event.get("costUsd")
         if not isinstance(cost, (int, float)) or cost < 0:
+            return
+        # Audit M6: NaN/Inf would poison the summary (SUM(cost) → NaN).
+        if not math.isfinite(float(cost)):
+            return
+        if float(cost) > 1e9:  # sanity: >$1B per turn is a parsing artifact
             return
         session_id = event.get("session_id") or sid or ""
         if not session_id:

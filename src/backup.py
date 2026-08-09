@@ -48,8 +48,13 @@ async def collect_state(data_dir: str, config: dict, db: Database) -> dict:
         sessions = stored.get("sessions", []) if isinstance(stored, dict) else []
     except (OSError, json.JSONDecodeError):
         sessions = []
-    return {"config": config, "notify_rules": rules, "sessions": sessions,
-            "prices": config.get("prices", {})}
+    # Audit H3: backups were packing the RAW config — every tools[].apiKey,
+    # providers[].apiKey and even backup.encryption_key landed in a
+    # plaintext tar.gz on disk. Redact exactly like migrate exports do, so
+    # a backup file is safe to copy around.
+    from migrator import redact_config
+    return {"config": redact_config(config), "notify_rules": rules,
+            "sessions": sessions, "prices": config.get("prices", {})}
 
 
 def _atomic_write_json(path: str, obj) -> None:

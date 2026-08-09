@@ -200,6 +200,8 @@ RestartSec=3
 # the default 1024 soft limit; give the service headroom.
 LimitNOFILE=65536
 TimeoutStopSec=30
+# Audit L2: bound memory — a runaway agent session must not OOM the host.
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target
@@ -219,6 +221,7 @@ if systemctl is-active --quiet webpty.service; then
   echo "✔ webpty is running:  http://${BIND_HOST}:${PORT}/"
   echo "  (log: journalctl -u webpty.service -f)"
   echo "  (keep tools in sync: ./install.sh --update-cli)"
+  echo "  (front-end changed? hard-refresh the browser (Ctrl+Shift+R) to bust the cache)"
   echo "  (gate: set authToken in \$(data dir)/config.json to require a token — see README)"
 else
   echo "✘ webpty failed to start — check: journalctl -u webpty.service -n 50" >&2

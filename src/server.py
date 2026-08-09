@@ -46,6 +46,10 @@ mimetypes.add_type("font/woff2", ".woff2")
 _VENDOR_PREFIXES = ("/vendor/",)
 _LOCK_FD = None  # single-instance flock fd (held in main)
 MAX_WS_CONNECTIONS = 128  # audit K1: concurrent WS cap
+MAX_HTTP_CONNECTIONS = 512  # audit H2: HTTP-side connection ceiling
+REQUEST_READ_TIMEOUT = 30.0  # audit H2: slowloris guard for header/body reads
+MAX_HEADER_LINES = 64  # audit H2: header-line cap
+_conn_sem = asyncio.Semaphore(MAX_HTTP_CONNECTIONS)
 
 _CLAUDE_MTIME_TTL = 30.0  # claude history mtime cache TTL (seconds)
 
@@ -328,7 +332,14 @@ class Server:
         ws_owned = False
         headers: dict[str, str] = {}
         try:
-            request_line = await reader.readline()
+            # Audit H2: a client that connects and never sends headers
+            # (slowloris) previously held a task + 64KB buffer forever.
+            try:
+                request_line = await asyncio.wait_for(
+                    reader.readline(), timeout=REQUEST_READ_TIMEOUT)
+            except (asyncio.TimeoutError, ConnectionError, OSError):
+                writer.close()
+                return
             if not request_line:
                 writer.close()
                 return
@@ -337,7 +348,16 @@ class Server:
                 raise HttpError(400, "Bad request line")
             method, target = parts[0], parts[1]
             while True:
-                line = await reader.readline()
+                # Audit H2: cap header count (64) — a client flooding headers
+                # would otherwise grow the dict without bound.
+                if len(headers) >= MAX_HEADER_LINES:
+                    raise HttpError(431, "Too many headers")
+                try:
+                    line = await asyncio.wait_for(
+                        reader.readline(), timeout=REQUEST_READ_TIMEOUT)
+                except (asyncio.TimeoutError, ConnectionError, OSError):
+                    writer.close()
+                    return
                 if line in (b"\r\n", b"\n", b""):
                     break
                 k, _, v = line.decode("latin-1").partition(":")
@@ -362,7 +382,6 @@ class Server:
                                           headers)
                     return
             # everything else (static SPA assets) → route directly
-
             await self._route(method, target, headers, reader, writer)
         except HttpError as err:
             await self._send_json(writer, err.status, {"error": err.message}, headers)
@@ -632,7 +651,12 @@ class Server:
 
         if path == "/api/sessions" and method == "POST":
             body = await self._read_json(reader, headers)
-            session = self.sessions.create(**self._validate_session_input(body))
+            try:
+                session = self.sessions.create(
+                    **self._validate_session_input(body))
+            except ValueError as err:
+                # Audit M5: session-count cap surfaced as 409, not a 500.
+                raise HttpError(409, str(err))
             start_error = None
             if body.get("start"):
                 try:
@@ -750,14 +774,26 @@ class Server:
             to = (query.get("to") or [""])[0]
             rows = await self.cost.export_rows(period, frm or None, to or None)
             import io as _io, csv as _csv
+
+            def _csv_safe(v):
+                """Audit M4: spreadsheet formula injection — a cell starting
+                with = + - @ or tab would execute in Excel/Sheets."""
+                if v is None:
+                    return ""
+                s = str(v)
+                if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+                    return "'" + s
+                return s
+
             buf = _io.StringIO()
             w = _csv.writer(buf)
             w.writerow(["ts", "session_id", "tool", "model",
                         "tokens_in", "tokens_out", "cost_usd", "source"])
             for r in rows:
-                w.writerow([r.get("ts"), r.get("session_id"), r.get("tool"),
-                            r.get("model"), r.get("tokens_in"), r.get("tokens_out"),
-                            r.get("cost"), r.get("source")])
+                w.writerow([_csv_safe(r.get("ts")), _csv_safe(r.get("session_id")),
+                            _csv_safe(r.get("tool")), _csv_safe(r.get("model")),
+                            _csv_safe(r.get("tokens_in")), _csv_safe(r.get("tokens_out")),
+                            _csv_safe(r.get("cost")), _csv_safe(r.get("source"))])
             data = buf.getvalue().encode("utf-8")
             head = (
                 "HTTP/1.1 200 OK\r\n"
@@ -1497,13 +1533,26 @@ class Server:
         return {
             200: "OK", 201: "Created", 400: "Bad Request", 403: "Forbidden",
             404: "Not Found", 405: "Method Not Allowed", 413: "Payload Too Large",
-            500: "Internal Server Error",
+            431: "Request Header Fields Too Large", 500: "Internal Server Error",
         }.get(status, "OK")
 
 
 async def _serve_client(server: Server, reader: asyncio.StreamReader,
                         writer: asyncio.StreamWriter) -> None:
-    await server._handle_request(reader, writer)
+    # Audit H2: cap concurrent connections so a slowloris/connection flood
+    # can't exhaust fds (WS has its own 128 cap; this is the HTTP-side
+    # ceiling). Once the cap is reached new connections are refused fast.
+    if _conn_sem.locked():
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    await _conn_sem.acquire()
+    try:
+        await server._handle_request(reader, writer)
+    finally:
+        _conn_sem.release()
 
 
 def _backup_settings(config: dict) -> tuple[float, int]:
@@ -1535,6 +1584,11 @@ async def _notify_retry_loop(notifier, interval_s: float = 300.0) -> None:
 
 
 async def main() -> None:
+    # Audit M3: config.json and the DB hold authToken / apiKeys — make
+    # everything we create owner-only by default (umask 077 applies to
+    # logs/backups/tmp files too); explicit chmods below pin 600 on the
+    # most sensitive files.
+    os.umask(0o077)
     config = load_config()
     port = effective_port(config.get("port"))
     bind_host = config.get("bindHost", "0.0.0.0")

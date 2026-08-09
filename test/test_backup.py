@@ -53,6 +53,26 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
         # sessions 是运行时状态,restore 不恢复(防幽灵会话)
         self.assertNotIn("sessions", restored)
 
+    async def test_backup_redacts_api_keys(self):
+        """Audit H3: backup packages must NOT contain plaintext apiKeys /
+        encryption_key — same redaction as migrate exports (this test runs
+        with NO encryption_key so the package is plaintext and the
+        redaction itself is what protects the secrets)."""
+        import tarfile as _tf
+        self.config["tools"] = {"claude": {
+            "command": "claude", "apiKey": "sk-secret-123"}}
+        self.config["providers"] = [{"name": "p", "apiKey": "pk-secret"}]
+        self.config["backup"] = {"retention": 2}  # no encryption key
+        b = await create_backup_async(self.data, self.config, self.db)
+        path = os.path.join(self.data, "backups", b["filename"])
+        with _tf.open(path) as tf:
+            raw = tf.extractfile(tf.getmember("manifest.json")).read()
+        body = raw.decode("utf-8", "replace")
+        self.assertNotIn("sk-secret", body)
+        self.assertNotIn("pk-secret", body)
+        # redacted keys still exist as empty strings (shape preserved)
+        self.assertIn("apiKey", body)
+
     async def test_restore_imports_notify_rules(self):
         await self.db.upsert_rule({"name": "r1", "event_type": "failed",
                                    "matcher_json": "{}", "action": "email",

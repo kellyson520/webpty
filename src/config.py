@@ -292,6 +292,12 @@ def save_config(config: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, config_path)
+        # Audit M3: config holds authToken — never leave it world-readable
+        # even if a previous version created it with looser perms.
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass
     except OSError as err:
         # Audit M2: a full disk / permission error must not 500 a session
         # create/remove (memory is already updated). Log it — the error

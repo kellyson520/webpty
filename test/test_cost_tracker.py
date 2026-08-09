@@ -188,6 +188,27 @@ class CostTrackerTest(unittest.IsolatedAsyncioTestCase):
         # it must NOT appear in estimated (double-count).
         self.assertAlmostEqual(s["estimated"], 0.0, places=6)
 
+    async def test_actual_cost_rejects_nan_and_absurd(self):
+        """Audit M6: NaN/Inf/absurd costUsd must not be recorded — they
+        would poison SUM(cost) in the summary."""
+        import math as _m
+        for bad in (float("nan"), float("inf"), -1.0, 2e9):
+            self.c.handle_agent_event({
+                "t": "result", "costUsd": bad, "session_id": f"s-m6-{bad}",
+                "model": "m", "tool": "reasonix"})
+        await asyncio.sleep(0.15)
+        rows = await self.db.query(
+            "SELECT COUNT(*) AS n FROM token_usage WHERE source='actual'")
+        self.assertEqual(rows[0]["n"], 0)
+        # a legit value still lands
+        self.c.handle_agent_event({
+            "t": "result", "costUsd": 0.42, "session_id": "s-m6-ok",
+            "model": "m", "tool": "reasonix"})
+        await asyncio.sleep(0.1)
+        rows = await self.db.query(
+            "SELECT COUNT(*) AS n FROM token_usage WHERE source='actual'")
+        self.assertEqual(rows[0]["n"], 1)
+
     async def test_check_budget_fires_once_on_flip(self):
         """Audit C: check_budget fires the callback only on state flips."""
         await self.db.add_usage({
