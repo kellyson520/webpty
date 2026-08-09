@@ -122,7 +122,6 @@ class Server:
         # claude history mtime cache: key = abs project path, value =
         # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
         self._claude_mtime_cache: dict[str, tuple[float, float]] = {}
-        self._ws_clients: dict[str, list] = {}  # session id -> ws objects
         self.db = db
         self.notifier = notifier
         self.cost = cost
@@ -707,7 +706,7 @@ class Server:
 
         # --- static assets -----------------------------------------------------
         if method in ("GET", "HEAD"):
-            await self._serve_static(writer, method, path, headers)
+            await self._serve_static(writer, method, path, headers, query)
             return
 
         raise HttpError(405, "Method not allowed")
@@ -850,7 +849,7 @@ class Server:
         return compressed, "gzip"
 
     async def _serve_static(self, writer: asyncio.StreamWriter, method: str, path: str,
-                            headers: dict[str, str]) -> None:
+                            headers: dict[str, str], query: dict | None = None) -> None:
         if path == "/":
             path = "/index.html"
         # Prevent path traversal.
@@ -863,6 +862,18 @@ class Server:
         cache = "no-store"
         if path.startswith(_VENDOR_PREFIXES):
             cache = "public, max-age=604800, immutable"
+        elif path in ("/app.js", "/styles.css") and (query or {}).get("v"):
+            # Versioned app assets (?v=<content-hash>): the URL changes when
+            # the file changes, so they may be cached immutably — no-store was
+            # forcing a re-download of ~400KB per page load.
+            import hashlib
+            try:
+                with open(full, "rb") as _f:
+                    h = hashlib.sha256(_f.read()).hexdigest()[:16]
+                if (query.get("v") or [""])[0] == h:
+                    cache = "public, max-age=604800, immutable"
+            except OSError:
+                pass
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         try:
             with open(full, "rb") as f:
@@ -875,6 +886,24 @@ class Server:
         # 明文客户端看到不一致的内容。
         if path in self._gzip_cache and self._gzip_meta.get(path) != frozen:
             del self._gzip_cache[path]
+        # Inject ?v=<content-hash> into the app asset references so browsers
+        # can cache them immutably while a deploy still busts the cache
+        # (hash changes with the bytes). index.html itself stays no-store.
+        if path == "/index.html":
+            import hashlib as _hl
+            for asset in ("/app.js", "/styles.css"):
+                asset_path = os.path.join(self.pub, asset.lstrip("/"))
+                try:
+                    with open(asset_path, "rb") as _f:
+                        h = _hl.sha256(_f.read()).hexdigest()[:16]
+                    body = body.replace(
+                        f'href="{asset}"'.encode(),
+                        f'href="{asset}?v={h}"'.encode())
+                    body = body.replace(
+                        f'src="{asset}"'.encode(),
+                        f'src="{asset}?v={h}"'.encode())
+                except OSError:
+                    pass
         body, enc = self._maybe_gzip(headers, body, cache_key=path)
         if enc is not None:
             self._gzip_meta[path] = frozen

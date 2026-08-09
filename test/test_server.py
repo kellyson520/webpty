@@ -320,6 +320,23 @@ class ServerIntegrationTest(unittest.TestCase):
         with urllib.request.urlopen(req) as resp:
             self.assertIsNone(resp.headers.get("Content-Encoding"))
 
+    def test_index_injects_versioned_assets_and_caches_them(self):
+        # /index.html 引用 app.js/styles.css 时带 ?v=<content-hash>
+        with urllib.request.urlopen(f"{self.base}/index.html") as resp:
+            html = resp.read().decode()
+        self.assertIn('src="/app.js?v=', html)
+        self.assertIn('href="/styles.css?v=', html)
+        # 无版本参数的 app.js 保持 no-store（旧缓存可被部署失效）
+        with urllib.request.urlopen(f"{self.base}/app.js") as resp:
+            self.assertEqual(resp.headers.get("Cache-Control"), "no-store")
+        # 带正确 hash 的版本化请求 → immutable
+        ver = html.split('src="/app.js?v=', 1)[1].split('"', 1)[0]
+        with urllib.request.urlopen(f"{self.base}/app.js?v={ver}") as resp:
+            self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
+        # 错误 hash → 不缓存（防陈旧引用长期驻留）
+        with urllib.request.urlopen(f"{self.base}/app.js?v=deadbeef") as resp:
+            self.assertEqual(resp.headers.get("Cache-Control"), "no-store")
+
     # --- WebSocket -----------------------------------------------------------
     async def _ws_roundtrip(self, sid, payload):
         reader, writer = await asyncio_open_conn(self.port)
