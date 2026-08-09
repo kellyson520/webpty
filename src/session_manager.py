@@ -743,13 +743,18 @@ class SessionManager:
         return True
 
     async def autostart(self) -> None:
+        # reasonix-family CLIs hold a global session lock — starting them in
+        # parallel would trip "session is in use"; everything else can boot
+        # concurrently (audit F4b: N serial host.start RTTs → ~1 RTT).
+        serial_tools = {"reasonix", "opencode"}
+        fast: list[str] = []
         for session in list(self.sessions.values()):
             tool = self.config.get("tools", {}).get(session.get("tool"))
             engine = (tool or {}).get("engine", "pty")
             try:
                 if engine == "agent":
                     if session.get("autostart"):
-                        await self.start(session["id"])
+                        fast.append(session["id"])
                     continue
                 host_view = self.host_sessions.get(session["id"])
                 if host_view:
@@ -757,9 +762,18 @@ class SessionManager:
                         continue
                 if not session.get("autostart"):
                     continue
-                await self.start(session["id"])
+                if session.get("tool") in serial_tools:
+                    await self.start(session["id"])
+                else:
+                    fast.append(session["id"])
             except Exception as err:  # noqa: BLE001
                 print(f"autostart {session.get('name')} failed: {err}", flush=True)
+        if fast:
+            results = await asyncio.gather(
+                *(self.start(sid) for sid in fast), return_exceptions=True)
+            for sid, res in zip(fast, results):
+                if isinstance(res, Exception):
+                    print(f"autostart {sid} failed: {res}", flush=True)
 
     # --- host event handlers ---------------------------------------------------------
     def _on_host_output(self, sid: str, chunk: bytes) -> None:

@@ -224,8 +224,9 @@ async def _ensure_host_running() -> None:
             "python src/pty_host_windows.py "
             "(pip install -r requirements-windows.txt)"
         )
-    # Not up — spawn detached, then poll. Use subprocess (not os.fork) so the
-    # child never inherits asyncio's epoll fds.
+    # Not up — spawn detached. Do NOT poll 4s here (audit F4: it blocked
+    # server startup before the listener even bound); the host monitor in
+    # SessionManager retries connect + reattaches, so fail fast and let it.
     import subprocess
 
     devnull = os.open(os.devnull, os.O_RDWR)
@@ -237,7 +238,9 @@ async def _ensure_host_running() -> None:
         )
     finally:
         os.close(devnull)
-    for _ in range(40):
+    # One short connect attempt (~300ms) to catch immediate spawn failures,
+    # then hand off to the monitor.
+    for _ in range(3):
         await asyncio.sleep(0.1)
         try:
             await _try_connect(0.3)
