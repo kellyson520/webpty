@@ -122,6 +122,15 @@ class BackupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diff[0]["key"], "_error")
         self.assertIn("migrate package", diff[0]["message"])
 
+    async def test_restore_handles_non_dict_manifest(self):
+        """manifest_json 是合法 JSON 但非 dict(如 "[]")时,restore 返回
+        ok=false 而非 AttributeError/500。"""
+        bid = await self.db.add_backup({
+            "filename": "weird.tar.gz", "size_bytes": 1, "sha256": "x",
+            "manifest_json": "[]", "encrypted": 0, "retained": 1})
+        res = await restore_backup(bid, self.data, self.db, self.config)
+        self.assertFalse(res["ok"])
+
     async def test_encrypted_roundtrip(self):
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM

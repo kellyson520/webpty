@@ -33,6 +33,8 @@ def _is_migrate_export(row: dict) -> bool:
         m = json.loads(row.get("manifest_json") or "{}")
     except (json.JSONDecodeError, TypeError):
         return False
+    if not isinstance(m, dict):
+        return False
     return m.get("kind") == "migrate-export"
 
 
