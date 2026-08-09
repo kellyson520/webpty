@@ -45,7 +45,14 @@ const notifyMessages = document.getElementById('notify-messages');
 document.getElementById('notify-read-all').addEventListener('click', async () => {
   try {
     await api('/api/notify/read-all', { method: 'POST' });
-    refreshNotifyPanel();
+    // Audit L5 (v25): update in place — refreshNotifyPanel() rebuilt the
+    // whole list (scroll position lost); here we only clear unread state.
+    notifyMessages.querySelectorAll('.panel-item.unread').forEach((el) => {
+      el.classList.remove('unread');
+    });
+    const cnt = document.getElementById('notify-messages-count');
+    const total = (cnt.textContent.match(/^\d+/) || ['0'])[0];
+    if (cnt) cnt.textContent = total;
   } catch (e) {
     alert(zhErr(e.message));
   }
@@ -385,7 +392,12 @@ function makeTerminal(session, host) {
       background: '#f5f5f5',
       foreground: '#1a1a1a',
       cursor: isTUI ? 'rgba(0,0,0,0)' : '#1f7a3d',
-      cursorAccent: isTUI ? 'rgba(0,0,0,0)' : '#f5f5f5'
+      cursorAccent: isTUI ? 'rgba(0,0,0,0)' : '#f5f5f5',
+      // Audit M1 (v25): xterm's default near-white selection vanished on
+      // the light background — give it a visible green tint.
+      selectionBackground: 'rgba(31,122,61,0.35)',
+      selectionForeground: '#1a1a1a',
+      selectionInactiveBackground: 'rgba(31,122,61,0.20)'
     } : {
       background: '#0f0f0f',
       foreground: '#ededed',
@@ -1828,13 +1840,19 @@ function renderTabs() {
     }
     // Update only the volatile parts.
     tab.classList.toggle('active', idx === activeIndex);
-    tab.querySelector('.tab-name').textContent = s.name;
+    // Audit L4 (v25): skip identical writes — textContent assignment
+    // replaces the text node + fires MutationObservers every 3s poll.
+    if (tab.dataset.name !== s.name) {
+      tab.querySelector('.tab-name').textContent = s.name;
+      tab.dataset.name = s.name;
+    }
     const dot = tab.querySelector('.tab-dot');
     const cls = `tab-dot ${isAgent(s) ? 'web' : 'cli'} ${dotStatus(s)}`;
     if (dot.className !== cls) dot.className = cls;
     if (dot.dataset.tool !== s.tool) dot.dataset.tool = s.tool;
     // Audit M4 (v24): refresh the hover label with the latest model.
-    tab.title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}`;
+    const title = `${s.tool || ''}${s.model ? ' · ' + s.model : ''} · ${s.cwd || ''}`;
+    if (tab.dataset.title !== title) { tab.title = title; tab.dataset.title = title; }
   });
   // Remove tabs for sessions that no longer exist.
   for (const el of Array.from(tabsEl.children)) {
@@ -2233,6 +2251,15 @@ function openMenu(sessionId) {
       alert(zhErr(e.message));
     }
   });
+  // Audit L1 (v25): download the transcript JSONL for archival.
+  addMenuItem('导出记录', () => {
+    const a = document.createElement('a');
+    a.href = `/api/sessions/${encodeURIComponent(session.id)}/transcript`;
+    a.download = `${(session.name || 'session')}.transcript.jsonl`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
 
   addMenuSep();
   addMenuLabel('工作流');
@@ -2242,7 +2269,41 @@ function openMenu(sessionId) {
 
   addMenuSep();
   addMenuLabel('外观');
-  // Audit M7 (v24): minimal settings — font size + light/dark theme.
+  // Audit M7 (v24) + M2 (v25): settings apply LIVE — rebuildTrack would
+  // close every socket + replay every transcript (MBs) per switch.
+  const applySettings = () => {
+    document.body.classList.toggle(
+      'theme-light', localStorage.getItem('webpty.theme') === 'light');
+    const light = localStorage.getItem('webpty.theme') === 'light';
+    const savedFs = parseInt(localStorage.getItem('webpty.fontSize') || '', 10);
+    const fs = Number.isFinite(savedFs) ? Math.max(12, Math.min(24, savedFs)) : null;
+    for (const [, entry] of live) {
+      if (!entry.term) continue;
+      try {
+        entry.term.options.theme = light ? {
+          background: '#f5f5f5', foreground: '#1a1a1a',
+          cursor: entry.term.options.theme.cursor,
+          cursorAccent: entry.term.options.theme.cursorAccent,
+          selectionBackground: 'rgba(31,122,61,0.35)',
+          selectionForeground: '#1a1a1a',
+          selectionInactiveBackground: 'rgba(31,122,61,0.20)'
+        } : {
+          background: '#0f0f0f', foreground: '#ededed',
+          cursor: entry.term.options.theme.cursor,
+          cursorAccent: entry.term.options.theme.cursorAccent
+        };
+        if (fs) entry.term.options.fontSize = fs;
+        entry.fit.fit();
+        if (entry.socket?.readyState === WebSocket.OPEN) {
+          entry.socket.send(JSON.stringify({
+            type: 'resize', __ctl: true,
+            cols: entry.term.cols, rows: entry.term.rows
+          }));
+        }
+      } catch {}
+    }
+    renderTabs();
+  };
   addMenuItem(`字号：${localStorage.getItem('webpty.fontSize') || '默认'}`, () => {
     const v = prompt('终端字号（12-24px，取消 = 恢复默认）：', localStorage.getItem('webpty.fontSize') || '15');
     if (v === null) localStorage.removeItem('webpty.fontSize');
@@ -2250,15 +2311,12 @@ function openMenu(sessionId) {
       const n = parseInt(v, 10);
       localStorage.setItem('webpty.fontSize', Number.isFinite(n) ? String(Math.max(12, Math.min(24, n))) : '15');
     }
-    rebuildTrack();
-    renderTabs();
+    applySettings();
   });
   addMenuItem(`主题：${localStorage.getItem('webpty.theme') === 'light' ? '浅色' : '深色'}`, () => {
     const cur = localStorage.getItem('webpty.theme') === 'light';
     localStorage.setItem('webpty.theme', cur ? 'dark' : 'light');
-    document.body.classList.toggle('theme-light', !cur);
-    rebuildTrack();
-    renderTabs();
+    applySettings();
   });
 
   addMenuSep();
@@ -2831,6 +2889,13 @@ function schedulePoll(delay = 3000) {
       pollFailures = 0;
     } catch (e) {
       console.error(e);
+      // Audit H1 (v25): the poll loop was the ONE unguarded path — a
+      // revoked token (401/403) made it retry silently forever with no
+      // token gate. Surface it exactly like the WS reconnect path does.
+      if (e.message === 'forbidden' || e.message === 'bad-token') {
+        showTokenGate();
+        return;
+      }
       pollFailures = (pollFailures || 0) + 1;
     }
     const base = pollFailures > 2 ? Math.min(30000, 3000 * 2 ** (pollFailures - 2)) : 3000;
@@ -3035,6 +3100,33 @@ function openNotifyPanel() {
   notifyBackdrop.hidden = false;
   refreshNotifyPanel();
 }
+// Audit L3 (v25): single notification-item renderer shared by the first
+// page (refreshNotifyPanel) and loadMoreNotify — both need unread styling
+// + click-to-read; the duplicated template drifted.
+function notifyItemHtml(m) {
+  const t = new Date((m.ts || 0) * 1000);
+  const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
+  const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
+  return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')} ${m.read ? '' : 'unread'}" data-nid="${m.id}">
+    <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
+    <div class="item-main">
+      <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
+      <div class="item-sub">${esc(m.tool || '')} ${esc(m.project || '')} · ${when} · ${m.delivered ? '已发送' : '待重试'}</div>
+    </div>
+  </div>`;
+}
+
+function bindNotifyReadClicks(container) {
+  container.querySelectorAll('.panel-item[data-nid]').forEach((el) => {
+    el.onclick = async () => {
+      const nid = el.dataset.nid;
+      if (!el.classList.contains('unread')) return;
+      el.classList.remove('unread');
+      api(`/api/notify/messages/${nid}/read`, { method: 'POST' }).catch(() => {});
+    };
+  });
+}
+
 async function refreshNotifyPanel() {
   notifyPage = 1;
   const [rules, msgs] = await Promise.all([
@@ -3056,29 +3148,10 @@ async function refreshNotifyPanel() {
        </div>
      </div>`).join('') ||
     `<div class="empty-tip">暂无规则 — 点击「添加规则」创建第一条通知规则</div>`;
-  notifyMessages.innerHTML = msgList.map((m) => {
-    const t = new Date((m.ts || 0) * 1000);
-    const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
-    const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
-    // Audit M5 (v24): unread highlight + click-to-read.
-    return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')} ${m.read ? '' : 'unread'}" data-nid="${m.id}">
-      <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
-      <div class="item-main">
-        <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
-        <div class="item-sub">${esc(m.tool || '')} ${esc(m.project || '')} · ${when} · ${m.delivered ? '已发送' : '待重试'}</div>
-      </div>
-    </div>`;
-  }).join('') ||
+  notifyMessages.innerHTML = msgList.map(notifyItemHtml).join('') ||
     `<div class="empty-tip">暂无消息 — 会话事件触发后将显示在这里</div>`;
   // Audit M5 (v24): click marks a message read.
-  notifyMessages.querySelectorAll('.panel-item[data-nid]').forEach((el) => {
-    el.onclick = async () => {
-      const nid = el.dataset.nid;
-      if (!el.classList.contains('unread')) return;
-      el.classList.remove('unread');
-      api(`/api/notify/messages/${nid}/read`, { method: 'POST' }).catch(() => {});
-    };
-  });
+  bindNotifyReadClicks(notifyMessages);
   const cnt = document.getElementById('notify-messages-count');
   if (cnt) cnt.textContent = `${msgs.total ?? msgList.length}${msgs.unread ? `（${msgs.unread} 未读）` : ''}`;
   // Audit F1: pagination — the API pages at 20; show a load-more button
@@ -3094,19 +3167,8 @@ async function loadMoreNotify() {
   try {
     const msgs = await api(`/api/notify/messages?page=${notifyPage}`).catch(() => ({ items: [] }));
     const items = msgs.items || [];
-    const html = items.map((m) => {
-      const t = new Date((m.ts || 0) * 1000);
-      const when = isNaN(t) ? '' : t.toLocaleString('zh-CN', { hour12: false });
-      const lvlCls = m.level === 'critical' ? 'err' : (m.level === 'warn' ? 'warn' : 'ok');
-      return `<div class="panel-item ${m.level === 'critical' ? 'critical' : (m.level === 'warn' ? 'warn' : '')}">
-        <span class="dot" style="background:${m.level === 'critical' ? 'var(--danger)' : (m.level === 'warn' ? '#d29922' : 'var(--accent)')}"></span>
-        <div class="item-main">
-          <div class="item-title">${esc(m.title)} <span class="badge ${lvlCls}">${esc(m.level)}</span></div>
-          <div class="item-sub">${esc(m.tool || '')} ${esc(m.project || '')} · ${when} · ${m.delivered ? '已发送' : '待重试'}</div>
-        </div>
-      </div>`;
-    }).join('');
-    notifyMessages.insertAdjacentHTML('beforeend', html);
+    notifyMessages.insertAdjacentHTML('beforeend', items.map(notifyItemHtml).join(''));
+    bindNotifyReadClicks(notifyMessages); // audit L3 (v25): paginated rows are clickable too
     const total = msgs.total ?? (notifyPage * 20);
     const moreEl = document.getElementById('notify-load-more');
     if (moreEl) moreEl.hidden = !(total > (notifyPage * 20));

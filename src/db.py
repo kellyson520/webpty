@@ -237,8 +237,15 @@ class Database:
         await self.execute("UPDATE notifications SET read=1 WHERE id=?", (notif_id,))
 
     async def mark_all_read(self) -> int:
-        """Audit M5 (v24): batch read; returns the number updated."""
-        cur = await self.execute("UPDATE notifications SET read=1 WHERE read=0")
+        """Audit M5 (v24): batch read; returns the number updated.
+        Audit M3 (v25): bound by the CURRENT max id — a notification that
+        arrives mid-batch must not be marked read."""
+        row = await self.query_one(
+            "SELECT MAX(id) AS m FROM notifications")
+        max_id = row["m"] if row and row["m"] is not None else 0
+        cur = await self.execute(
+            "UPDATE notifications SET read=1 WHERE read=0 AND id <= ?",
+            (max_id,))
         return cur if cur else 0
 
     async def dedup_recent(self, dedup_key: str, window_s: float = 60.0) -> bool:

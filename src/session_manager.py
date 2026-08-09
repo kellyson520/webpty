@@ -227,7 +227,22 @@ class SessionManager:
         cleaned = safe_name(str(name or "")).strip() or session.get("name")
         if cleaned == session.get("name"):
             return True
+        old_name = session.get("name")
         session["name"] = cleaned
+        # Audit M4 (v25): the on-disk log filename embeds the name — move
+        # it so the user can find the log under the NEW name (close the
+        # cached handle first; the session is re-created on next start).
+        log_path = session.get("log_path")
+        if log_path:
+            try:
+                base, ext = os.path.splitext(log_path)
+                new_log = base.replace(safe_name(str(old_name or "")), cleaned, 1) + ext
+                if new_log != log_path and os.path.exists(log_path):
+                    self._close_log_fh(session)
+                    os.replace(log_path, new_log)
+                    session["log_path"] = new_log
+            except OSError:
+                pass  # log rename is best-effort; metadata still updates
         self._persist()
         self._emit("change", self._public(session))
         return True
@@ -956,6 +971,11 @@ class SessionManager:
         full history and the client should say so."""
         session = self.sessions.get(sid)
         return bool(session and session.get("_transcript_truncated"))
+
+    def transcript_path(self, sid: str) -> str | None:
+        """Audit L1 (v25): on-disk transcript JSONL path (for export)."""
+        session = self.sessions.get(sid)
+        return session.get("_transcript_path") if session else None
 
     async def stop(self, sid: str) -> bool:
         session = self.sessions.get(sid)

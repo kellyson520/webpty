@@ -686,6 +686,44 @@ class Server:
                 "startError": start_error,
             }, headers)
 
+        m = re.match(r"^/api/sessions/([^/]+)/transcript$", path)
+        if m and method == "GET":
+            # Audit L1 (v25): stream the session's transcript JSONL for
+            # export/archival (session delete wipes it — this is the way to
+            # keep a copy).
+            import urllib.parse as _up
+            try:
+                sid = _up.unquote(m.group(1))
+            except (ValueError, UnicodeDecodeError):
+                raise HttpError(400, "bad session id")
+            tx_path = self.sessions.transcript_path(sid)
+            if not tx_path or not os.path.exists(tx_path):
+                raise HttpError(404, "no transcript for this session")
+            size = os.path.getsize(tx_path)
+            safe = os.path.basename(tx_path)
+            headers = {"content-type": "application/x-ndjson",
+                       "content-disposition":
+                           f'attachment; filename="{safe}"',
+                       "content-length": str(size),
+                       "x-content-type-options": "nosniff"}
+            writer.write(b"HTTP/1.1 200 OK\r\n" +
+                         b"\r\n".join(f"{k}: {v}".encode() for k, v in headers.items()) +
+                         b"\r\n\r\n")
+            await writer.drain()
+            f = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: open(tx_path, "rb"))
+            try:
+                while True:
+                    chunk = await asyncio.get_event_loop().run_in_executor(
+                        None, f.read, 65536)
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+                    await writer.drain()
+            finally:
+                await asyncio.get_event_loop().run_in_executor(None, f.close)
+            return True
+
         m = re.match(r"^/api/sessions/([^/]+)/start$", path)
         if m and method == "POST":
             await self.sessions.start(m.group(1))
@@ -1336,7 +1374,11 @@ class Server:
             return
         auth = await self._authorize(reader, headers, target)
         if not auth["ok"]:
-            writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+            # Audit H1 (v25): align with the HTTP API — bad-token is 401,
+            # not 403 (the old split confused the WS retry paths).
+            status = 401 if auth.get("reason") == "bad-token" else 403
+            reason = b"Unauthorized" if status == 401 else b"Forbidden"
+            writer.write(f"HTTP/1.1 {status} {reason.decode()}\r\nConnection: close\r\n\r\n".encode())
             await writer.drain()
             writer.close()
             return

@@ -98,6 +98,13 @@ class DbUpgradeTest(unittest.TestCase):
             s = await db.usage_summary("month")
             # realtime rows land in estimated, not cost (cost = actual only)
             self.assertAlmostEqual(s["estimated"], 0.5, places=6)
+            # Audit L2 (v25): read-state paths must work on a migrated DB.
+            ns = await db.list_notifications(1)
+            self.assertEqual(ns["unread"], 1)
+            updated = await db.mark_all_read()
+            self.assertGreaterEqual(updated, 1)
+            ns2 = await db.list_notifications(1)
+            self.assertEqual(ns2["unread"], 0)
 
         asyncio.run(_smoke())
         # user_version should now be >= 1.
