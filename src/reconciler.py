@@ -75,6 +75,15 @@ def scan_tool_logs(sessions_dir: str, tool: str,
                 base = fn[:-6]
                 m = _re.match(r"^[\d.:\-]+-", base)
                 model = base[m.end():] if m else (base or tool)
+                # Audit H3 (v28): recovery/checkpoint copies embed the model
+                # in the middle: deepseek-v4-flash-6b0ea59…-recovery-f56c….jsonl
+                # — the tail parsed as the model name and fell back to the
+                # whole-family price (0.27 vs 0.02 → 13× overcharge). Cut at
+                # the longest known model prefix from the price table.
+                from price_table import longest_prefix
+                best = longest_prefix(model)
+                if best:
+                    model = model[:len(best)]
             t_in = t_out = 0
             try:
                 size = os.path.getsize(path)

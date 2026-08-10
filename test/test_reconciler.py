@@ -57,6 +57,35 @@ class ReconcilerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["model"], "deepseek-v4-flash")
         self.assertEqual(items[0]["session_id"], "20260808-010000-deepseek-v4-flash")
 
+    def test_recovery_filename_model_trimmed(self):
+        """Audit H3 (v28): reasonix recovery/checkpoint copies embed the
+        model mid-name — the garbage tail must be trimmed to the known
+        price-table prefix (was parsed whole → 13× family-price overcharge)."""
+        import json as _json
+        rx = os.path.join(self.tmp, "reasonix")
+        d = os.path.join(rx, "projects", "-root-webpty", "sessions")
+        os.makedirs(d)
+        fn = ("20260807-124828.221742337-deepseek-v4-flash-"
+              "6b0ea5910e4b-d98d070d8f51-recovery-f56c7c3d38a2c740.jsonl")
+        with open(os.path.join(d, fn), "w", encoding="utf-8") as f:
+            f.write(_json.dumps({"role": "user", "content": "x" * 40}) + "\n")
+        items = scan_tool_logs(rx, "reasonix")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["model"], "deepseek-v4-flash")
+
+    def test_opencode_dir_is_not_reasonix(self):
+        """Audit H2 (v28): opencode scan must NOT walk the reasonix dir."""
+        import json as _json
+        rx = os.path.join(self.tmp, "reasonix")
+        d = os.path.join(rx, "projects", "-root-webpty", "sessions")
+        os.makedirs(d)
+        with open(os.path.join(d, "20260808-010000-deepseek-v4-flash.jsonl"),
+                  "w", encoding="utf-8") as f:
+            f.write(_json.dumps({"role": "user", "content": "hi"}) + "\n")
+        oc = os.path.join(self.tmp, "opencode")
+        self.assertEqual(scan_tool_logs(oc, "opencode"), [])
+        self.assertEqual(len(scan_tool_logs(rx, "reasonix")), 1)
+
     async def test_reconcile_persists_posthoc(self):
         r = Reconciler(self.db, self.cfg)
         added = await r.reconcile(self.projects)

@@ -75,9 +75,15 @@ class WebSocket:
     recv/close; the server drives handshake via `accept()`.
     """
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(self, reader: asyncio.StreamReader,
+                 writer: asyncio.StreamWriter,
+                 is_server: bool = False) -> None:
         self.reader = reader
         self.writer = writer
+        # Audit L2 (v28): RFC 6455 §5.1 — CLIENT frames must be masked;
+        # server frames must NOT be. The same class is used on both ends
+        # (tests use it as a client), so enforce per role.
+        self.is_server = is_server
         self.open = False
         self._recv_buf = bytearray()
         self._closed = False
@@ -251,6 +257,15 @@ class WebSocket:
         if hdr is _INCOMPLETE:
             return _INCOMPLETE
         fin, opcode, length, masked, offset, mask_key = hdr
+        # Audit L2 (v28): RFC 6455 — client frames MUST be masked; control
+        # frames MUST be ≤125 bytes. Accepting unmasked data frames is a
+        # handshake-evasion vector; huge control frames are memory abuse.
+        # (Server role only — this class also runs as a test client that
+        # legitimately receives unmasked server frames.)
+        if self.is_server and not masked:
+            raise WebSocketError("unmasked client frame")
+        if opcode in (_OP_PING, _OP_PONG, _OP_CLOSE) and length > 125:
+            raise WebSocketError("control frame too large")
         if len(self._recv_buf) < offset + length:
             return _INCOMPLETE
         payload = bytes(self._recv_buf[offset:offset + length])
@@ -270,6 +285,10 @@ class WebSocket:
             if hdr is _INCOMPLETE:
                 return _INCOMPLETE
             _, opcode, length, masked, offset, mask_key = hdr
+            if self.is_server and not masked:
+                raise WebSocketError("unmasked client frame")
+            if opcode in (_OP_PING, _OP_PONG, _OP_CLOSE) and length > 125:
+                raise WebSocketError("control frame too large")
             if len(self._recv_buf) < offset + length:
                 return _INCOMPLETE
             payload = bytes(self._recv_buf[offset:offset + length])
@@ -307,7 +326,7 @@ async def accept_websocket(reader: asyncio.StreamReader,
     )
     writer.write(resp.encode("ascii"))
     await writer.drain()
-    ws = WebSocket(reader, writer)
+    ws = WebSocket(reader, writer, is_server=True)
     ws.open = True
     return ws
 

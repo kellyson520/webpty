@@ -232,19 +232,25 @@ class SessionManager:
         # Audit M4 (v25): the on-disk log filename embeds the name — move
         # it so the user can find the log under the NEW name (close the
         # cached handle first; the session is re-created on next start).
+        # Audit M5 (v28): anchor on the sid, not the name — after a second
+        # rename (or hand-edited config) `base.replace(old_name, …)` misses
+        # and the log silently keeps the old name forever.
         log_path = session.get("log_path")
         if log_path:
             try:
-                base, ext = os.path.splitext(log_path)
-                new_log = base.replace(safe_name(str(old_name or "")), cleaned, 1) + ext
-                if new_log != log_path and os.path.exists(log_path):
+                old_dir = os.path.dirname(log_path)
+                new_log = os.path.join(
+                    old_dir, f"{safe_name(cleaned)}-{sid[:8]}.log")
+                if os.path.abspath(new_log) != os.path.abspath(log_path) \
+                        and os.path.exists(log_path):
                     self._close_log_fh(session)
                     os.replace(log_path, new_log)
                     session["log_path"] = new_log
                 # Audit M1 (v26): the rotated .1 segment embeds the old name
                 # too — leave it behind and tail_log/remove would miss it
                 # (orphan disk leak + missing replay segment after restart).
-                if new_log != log_path and os.path.exists(log_path + ".1"):
+                if os.path.abspath(new_log) != os.path.abspath(log_path) \
+                        and os.path.exists(log_path + ".1"):
                     os.replace(log_path + ".1", new_log + ".1")
             except OSError:
                 pass  # log rename is best-effort; metadata still updates
@@ -277,6 +283,15 @@ class SessionManager:
         timer = session.get("_busy_handle")
         if timer:
             timer.cancel()
+        # Audit M4 (v28): a pending restart (crash backoff) would still
+        # fire after removal — cancel it like _stop_locked does.
+        rhandle = session.get("_restart_handle")
+        if rhandle:
+            try:
+                rhandle.cancel()
+            except Exception as err:  # noqa: BLE001
+                log_error("session-manager", err)
+            session["_restart_handle"] = None
         self._close_log_fh(session)
         # Audit M1: close the cached transcript handle too.
         tfh = session.pop("_transcript_fh", None)

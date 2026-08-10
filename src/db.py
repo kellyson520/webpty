@@ -122,7 +122,11 @@ class Database:
                          ("last_error", "TEXT"),
                          # Audit M5 (v24): read state for the notification
                          # center (unread badge / mark-all-read).
-                         ("read", "INTEGER NOT NULL DEFAULT 0")):
+                         ("read", "INTEGER NOT NULL DEFAULT 0"),
+                         # Audit M3 (v28): quiet-hour suppression — the
+                         # center still records it, send_pending must not
+                         # mail it (it used to mail everything).
+                         ("suppress_email", "INTEGER NOT NULL DEFAULT 0")):
             try:
                 self._conn.execute(
                     f"ALTER TABLE notifications ADD COLUMN {col} {ddl}")
@@ -210,15 +214,17 @@ class Database:
 
     # ---- notifications -------------------------------------------------
     async def add_notification(self, n: dict) -> int:
+        # Audit M3 (v28): suppress_email flag — quiet-hour notifications
+        # still reach the center but never go out by mail.
         return await self.execute(
             """INSERT INTO notifications
                (ts, event_type, level, tool, project, session_id, title, body,
-                dedup_key, delivered, matched_rules)
-               VALUES (?,?,?,?,?,?,?,?,?,0,?)""",
+                dedup_key, delivered, matched_rules, suppress_email)
+               VALUES (?,?,?,?,?,?,?,?,?,0,?,?)""",
             (n.get("ts", _ts()), n["event_type"], n.get("level", "info"),
              n.get("tool"), n.get("project"), n.get("session_id"),
              n["title"], n.get("body"), n["dedup_key"],
-             n.get("matched_rules")))
+             n.get("matched_rules"), 1 if n.get("suppress_email") else 0))
 
     async def list_notifications(self, page: int, page_size: int = 20) -> dict:
         total = await self.query_one(
@@ -263,9 +269,10 @@ class Database:
 
     async def pending_notifications(self, limit: int = 50) -> list[dict]:
         # Audit T4: only rows still under the retry cap (attempts < 10).
+        # Audit M3 (v28): quiet-hour-suppressed rows never go out by mail.
         return await self.query(
             "SELECT * FROM notifications WHERE delivered=0 AND attempts < 10 "
-            "ORDER BY ts ASC LIMIT ?",
+            "AND suppress_email=0 ORDER BY ts ASC LIMIT ?",
             (limit,))
 
     async def bump_notify_attempt(self, notif_id: int, err: str) -> None:

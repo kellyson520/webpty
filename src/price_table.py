@@ -56,28 +56,46 @@ DEFAULT_PRICES: dict[str, dict] = {
 }
 _FALLBACK = {"input": 1.0, "output": 2.0, "cache_hit": 0.1, "currency": "USD"}
 
+# Audit M1 (v28): case-insensitive exact lookups.
+_LOWER_KEYS = {k.lower(): k for k in DEFAULT_PRICES}
+
 
 def _has_exact_price(model: str) -> bool:
     """Audit M3/M4 (v23): True only for an EXACT price-table match (or a
     user config override) — family/prefix matches are estimates and must be
     flagged as such in the UI."""
-    return model in DEFAULT_PRICES
+    return model.lower() in _LOWER_KEYS
+
+
+def longest_prefix(model: str) -> str | None:
+    """Longest DEFAULT_PRICES key that prefixes `model` (case-insensitive).
+
+    Audit H3/M1 (v28): used to trim garbage tails off parsed model names
+    ("deepseek-v4-flash-6b0ea59…-recovery-…" → "deepseek-v4-flash") and to
+    answer "does an exact/prefix price exist" independent of case.
+    """
+    lower = model.lower()
+    best = None
+    for key in DEFAULT_PRICES:
+        if lower.startswith(key.lower()) and (best is None or len(key) > len(best)):
+            best = key
+    return best
 
 
 def _match_default(model: str) -> dict | None:
     """Exact match, then longest prefix, then family prefix."""
-    if model in DEFAULT_PRICES:
-        return DEFAULT_PRICES[model]
+    lower = model.lower()
+    if lower in _LOWER_KEYS:
+        return DEFAULT_PRICES[_LOWER_KEYS[lower]]
     # Longest prefix that names a real model family, e.g.
     # "claude-opus-4-8" → "claude-opus", "gpt-5.4-mini" → "gpt-5".
     best = None
     for key in DEFAULT_PRICES:
-        if model.startswith(key) and (best is None or len(key) > len(best)):
+        if lower.startswith(key.lower()) and (best is None or len(key) > len(best)):
             best = key
     if best:
         return DEFAULT_PRICES[best]
     # Tool-family fallbacks for models we don't list explicitly.
-    lower = model.lower()
     if lower.startswith("claude"):
         return DEFAULT_PRICES["claude"]
     if lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
@@ -92,18 +110,19 @@ def _match_default(model: str) -> dict | None:
 def get_price(model: str, config: dict) -> dict:
     prices = config.get("prices") or {}
     if isinstance(prices, dict):
-        # Exact match first, then longest-prefix match (audit E2: a
-        # configured "claude-haiku-4-5" must cover the dated
-        # "claude-haiku-4-5-20251001" id too).
-        if model in prices and isinstance(prices[model], dict):
-            return prices[model]
+        # Audit M1 (v28): case-insensitive — "DEEPSEEK-V4-FLASH" used to
+        # fall to the family price (13× high) instead of the exact one.
+        lower = model.lower()
+        lower_prices = {str(k).lower(): v for k, v in prices.items()}
+        if lower in lower_prices and isinstance(lower_prices[lower], dict):
+            return lower_prices[lower]
         best = None
-        for key in prices:
-            if (model.startswith(key) and isinstance(prices[key], dict)
+        for key, val in lower_prices.items():
+            if (lower.startswith(key) and isinstance(val, dict)
                     and (best is None or len(key) > len(best))):
                 best = key
         if best is not None:
-            return prices[best]
+            return lower_prices[best]
     hit = _match_default(model)
     return hit if hit is not None else _FALLBACK
 

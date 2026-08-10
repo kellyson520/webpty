@@ -54,6 +54,39 @@ class NotifierTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertEqual((await self.db.list_notifications(1))["total"], 0)
 
+    async def test_quiet_email_rule_does_not_lift_level(self):
+        # Audit M3 (v28): a quiet email rule must neither send mail nor
+        # inflate the stored level — a notify rule still fires at ITS level.
+        import notifier as _nf
+        await self.db.upsert_rule({
+            "name": "quiet-crit", "event_type": "failed",
+            "matcher_json": "{}", "action": "email", "level": "critical",
+            "quiet_start": "00:00", "quiet_end": "23:59", "enabled": 1})
+        await self.db.upsert_rule({
+            "name": "notify-info", "event_type": "failed",
+            "matcher_json": "{}", "action": "notify", "level": "info",
+            "quiet_start": "", "quiet_end": "", "enabled": 1})
+        sent = []
+        orig = _nf.Notifier._send_mail
+
+        async def fake_send(self, nid, event):
+            sent.append(nid)
+
+        _nf.Notifier._send_mail = fake_send
+        try:
+            self.n.handle_event(self.event())
+            await asyncio.sleep(0.1)
+            await self.n.send_pending()
+            await asyncio.sleep(0.1)
+        finally:
+            _nf.Notifier._send_mail = orig
+        items = (await self.db.list_notifications(1))["items"]
+        self.assertEqual(len(items), 1)
+        # level comes from the notify rule (info), NOT the quiet critical one
+        self.assertEqual(items[0]["level"], "info")
+        # the quiet email rule sent nothing
+        self.assertEqual(sent, [])
+
     async def test_matched_rules_recorded(self):
         # N2: the notification records which rules matched.
         await self.db.upsert_rule({

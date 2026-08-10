@@ -891,11 +891,20 @@ class Server:
                 raise HttpError(400, "matcher_json must be a string")
             # Audit L1: a bad matcher JSON silently matched NOTHING (rules
             # returned None → never fired). Reject at write time.
+            # Audit M2 (v28): null values in matcher_json silently turned
+            # into match-everything rules; unknown keys never matched.
             try:
                 import json as _json
-                _json.loads(body.get("matcher_json") or "{}")
+                parsed = _json.loads(body.get("matcher_json") or "{}")
             except _json.JSONDecodeError:
                 raise HttpError(400, "matcher_json is not valid JSON")
+            if not isinstance(parsed, dict):
+                raise HttpError(400, "matcher_json must be an object")
+            for key, val in parsed.items():
+                if val is None:
+                    raise HttpError(400, f"matcher field {key} must not be null")
+                if key not in ("tool", "project", "session_id", "session"):
+                    raise HttpError(400, f"unknown matcher field: {key}")
             rid = await self.db.upsert_rule(body)
             return await self._send_json(writer, 201, {"id": rid}, headers)
         m = re.match(r"^/api/notify/rules/(\d+)$", path)
@@ -906,11 +915,19 @@ class Server:
             if not isinstance(body.get("matcher_json", "{}"), str):
                 raise HttpError(400, "matcher_json must be a string")
             # Audit L1: reject bad matcher JSON at write time.
+            # Audit M2 (v28): same null/unknown-field rejection as POST.
             try:
                 import json as _json
-                _json.loads(body.get("matcher_json") or "{}")
+                parsed = _json.loads(body.get("matcher_json") or "{}")
             except _json.JSONDecodeError:
                 raise HttpError(400, "matcher_json is not valid JSON")
+            if not isinstance(parsed, dict):
+                raise HttpError(400, "matcher_json must be an object")
+            for key, val in parsed.items():
+                if val is None:
+                    raise HttpError(400, f"matcher field {key} must not be null")
+                if key not in ("tool", "project", "session_id", "session"):
+                    raise HttpError(400, f"unknown matcher field: {key}")
             body["id"] = int(m.group(1))
             await self.db.upsert_rule(body)
             return await self._send_json(writer, 200, {"ok": True}, headers)
@@ -1042,10 +1059,29 @@ class Server:
                 # Audit H1 (v22): reasonix sessions live under
                 # ~/.reasonix/projects/<enc>/sessions/*.jsonl with NO usage
                 # fields — tokens are estimated from content length.
-                rx_dir = os.path.join(os.path.expanduser("~"), ".reasonix",
-                                      "projects")
+                # Audit H2 (v28): opencode previously scanned the reasonix
+                # dir too (all its sessions recorded as "opencode") —
+                # probe the real data dir and fail loudly when absent.
+                if tool == "reasonix":
+                    tool_dir = os.path.join(os.path.expanduser("~"),
+                                            ".reasonix", "projects")
+                else:
+                    tool_dir = next(
+                        (d for d in (
+                            os.path.join(os.path.expanduser("~"), ".local",
+                                         "share", "opencode"),
+                            os.path.join(os.path.expanduser("~"), ".config",
+                                         "opencode"),
+                            os.path.join(os.path.expanduser("~"),
+                                         ".opencode"),
+                        ) if os.path.isdir(d)),
+                        "")
+                if not tool_dir or not os.path.isdir(tool_dir):
+                    raise HttpError(400,
+                                    f"no {tool} data directory found "
+                                    f"(looked under ~/.local/share, ~/.config, ~)")
                 items = await loop.run_in_executor(
-                    None, scan_tool_logs, rx_dir, tool)
+                    None, scan_tool_logs, tool_dir, tool)
                 for u in items:
                     try:
                         added += await rec._add_one(u, tool)
@@ -1995,7 +2031,10 @@ async def main() -> None:
                 free_pct = st.f_bavail / st.f_blocks * 100.0
                 low_now = free_pct < 10.0
                 if low_now and not _disk_low_active:
-                    await notifier.handle_event({
+                    # Audit H1 (v28): handle_event is SYNCHRONOUS — the
+                    # `await` raised TypeError (await None), swallowed by
+                    # the except below; disk alerts never fired.
+                    notifier.handle_event({
                         "type": "disk_low", "level": "warn",
                         "title": "磁盘空间不足",
                         "body": (f"数据目录 {data_dir} 剩余 {free_pct:.1f}%"
@@ -2004,7 +2043,7 @@ async def main() -> None:
                         "ts": time.time(),
                     })
                 elif not low_now and _disk_low_active:
-                    await notifier.handle_event({
+                    notifier.handle_event({
                         "type": "disk_ok", "level": "info",
                         "title": "磁盘空间已恢复",
                         "body": f"数据目录 {data_dir} 剩余 {free_pct:.1f}%",

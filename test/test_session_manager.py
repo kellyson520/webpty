@@ -597,14 +597,16 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         on-disk log (plus its .1 segment) so tail/delete find them."""
         import os as _os
         s1 = self.sm.create(name="old-name", cwd="/a", tool="bash")
-        log = _os.path.join(_TEST_DIR, "old-name-session1.log")
+        # Audit M5 (v28): the log name is anchored on the sid, so repeated
+        # renames still relocate it — construct the fixture with the real id.
+        log = _os.path.join(_TEST_DIR, f"old-name-{s1['id'][:8]}.log")
         open(log, "w").write("x")
         open(log + ".1", "w").write("rotated")
         s1["log_path"] = log
         ok = self.sm.rename(s1["id"], "new-name")
         self.assertTrue(ok)
         self.assertEqual(s1["name"], "new-name")
-        new_log = _os.path.join(_TEST_DIR, "new-name-session1.log")
+        new_log = _os.path.join(_TEST_DIR, f"new-name-{s1['id'][:8]}.log")
         self.assertEqual(s1["log_path"], new_log)
         self.assertFalse(_os.path.exists(log))
         self.assertTrue(_os.path.exists(new_log))

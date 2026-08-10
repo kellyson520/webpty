@@ -46,18 +46,19 @@ class FrameParseTest(unittest.IsolatedAsyncioTestCase):
     def _ws(self, buf: bytes):
         import asyncio as _a
         from ws import WebSocket
-        ws = WebSocket(_a.StreamReader(), None)
+        ws = WebSocket(_a.StreamReader(), None, is_server=True)
         ws._recv_buf = bytearray(buf)
         return ws
 
     async def test_incomplete_payload_returns_sentinel(self):
         from ws import _INCOMPLETE
-        ws = self._ws(b"\x81\xfe\x10\x00" + b"ab")  # 16B payload 只给 2B
+        # masked 帧（RFC 6455）：16B payload 声明，只给 2B → 等待更多
+        ws = self._ws(b"\x81\xfe\x10\x00\x11\x22\x33\x44" + b"ab")
         self.assertIs(ws._parse_frame(), _INCOMPLETE)
 
     async def test_incomplete_extended_length_returns_sentinel(self):
         from ws import _INCOMPLETE
-        ws = self._ws(b"\x81\x7f")  # 64 位长度头只给 2B
+        ws = self._ws(b"\x81\xff\x11\x22\x33\x44")  # 64 位长度头只给 2B+mask
         self.assertIs(ws._parse_frame(), _INCOMPLETE)
 
     async def test_incomplete_mask_key_returns_sentinel(self):
@@ -82,13 +83,36 @@ class FrameParseTest(unittest.IsolatedAsyncioTestCase):
     async def test_pings_then_text_no_recursion(self):
         import asyncio as _a
         from ws import WebSocket
+        # masked ping + ping + text（RFC 6455 客户端必须 masked）
         reader = _a.StreamReader()
-        reader.feed_data(b"\x89\x00\x89\x00\x81\x01x")  # ping+ping+text
+        reader.feed_data(b"\x89\x80\x11\x22\x33\x44\x89\x80\x11\x22\x33\x44"
+                         b"\x81\x81\x11\x22\x33\x44" + bytes([ord('x') ^ 0x11]))
         ws = WebSocket(reader, None)
         frame = await ws.recv(timeout_s=1)
         self.assertIsNotNone(frame)
         self.assertEqual(frame[0], 0x1)
         self.assertEqual(frame[1], b"x")
+
+    async def test_unmasked_client_frame_rejected(self):
+        # Audit L2 (v28): RFC 6455 §5.1 — client frames must be masked.
+        # recv() converts protocol violations into a clean close (None).
+        import asyncio as _a
+        from ws import WebSocket
+        reader = _a.StreamReader()
+        reader.feed_data(b"\x81\x01x")  # unmasked text frame
+        ws = WebSocket(reader, None, is_server=True)
+        self.assertIsNone(await ws.recv(timeout_s=1))
+        self.assertTrue(ws._closed)
+
+    async def test_oversized_control_frame_rejected(self):
+        # Audit L2 (v28): control frames must be ≤125 bytes (§5.5).
+        import asyncio as _a
+        from ws import WebSocket
+        reader = _a.StreamReader()
+        reader.feed_data(b"\x89\xfe\x01\x00\x11\x22\x33\x44" + b"a" * 260)
+        ws = WebSocket(reader, None, is_server=True)
+        self.assertIsNone(await ws.recv(timeout_s=1))
+        self.assertTrue(ws._closed)
 
     def test_apply_mask_aligned_and_tail(self):
         from ws import _apply_mask

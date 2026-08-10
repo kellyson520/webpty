@@ -65,6 +65,13 @@ class Notifier:
         rules = await self.db.list_rules()
         matched = [r for r in rules if r.get("enabled")
                    and match_rule(r, event)]
+        # Audit M3 (v28): quiet email rules must not inflate the level —
+        # filter them FIRST, then compute level over what will actually
+        # fire (a quiet email rule used to lift the stored level to
+        # critical even though it never sent anything).
+        quieted = [r for r in matched
+                   if quiet_hours_active(r) and r.get("action") == "email"]
+        matched = [r for r in matched if r not in quieted]
         level = event.get("level") or self.config.get("notify", {}).get(
             "default_level", "warn")
         if matched:
@@ -74,17 +81,9 @@ class Notifier:
         dedup_key = f"{event.get('session_id')}|{event.get('type')}|{level}"
         if await self.db.dedup_recent(dedup_key, DEDUP_WINDOW_S):
             return
-        had_rules = bool(matched)
-        for rule in matched:
-            # Audit 3.3: quiet hours used to drop the WHOLE event when any
-            # matched rule was quiet — even email actions from other rules.
-            # Only skip the email send for quiet rules; the notification
-            # still lands in the center.
-            if quiet_hours_active(rule) and rule.get("action") == "email":
-                matched = [r for r in matched if r is not rule]
         # All matched rules were email-only AND quiet → skip entirely.
         # (No rules at all still records the warn notification below.)
-        if had_rules and not matched:
+        if quieted and not matched:
             return
         nid = await self.db.add_notification({
             "event_type": event.get("type", "unknown"),
@@ -100,6 +99,12 @@ class Notifier:
             "body": f"会话 {event.get('name')} "
                     f"{EVENT_ZH.get(event.get('type', ''), event.get('type', 'event'))}",
             "dedup_key": dedup_key,
+            # Audit M3 (v28): quieted email rules — record for the center,
+            # but never let send_pending mail it later (unless another
+            # non-quiet email rule is sending right now, in which case the
+            # retry path must stay open).
+            "suppress_email": bool(quieted) and not any(
+                r.get("action") == "email" for r in matched),
         })
         wants_mail = any(r.get("action") == "email" for r in matched)
         if wants_mail:
