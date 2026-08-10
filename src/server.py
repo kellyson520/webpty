@@ -255,6 +255,10 @@ class Server:
     def _list_projects(self) -> list[dict]:
         seen = set()
         out = []
+        # Audit fix (v27): mark which entries came from extraFolders so the
+        # frontend can offer a remove action only for those.
+        extra = {case_fold(os.path.abspath(str(x)))
+                 for x in (self.config.get("extraFolders") or [])}
 
         def push(full: str) -> None:
             key = case_fold(os.path.abspath(full))
@@ -271,6 +275,7 @@ class Server:
                 "mtime": mtime * 1000,
                 "claudeMtime": self._claude_history_mtime(full),
                 "reasonixMtime": self._reasonix_history_mtime(full),
+                "removable": key in extra,
             })
 
         try:
@@ -455,14 +460,40 @@ class Server:
                 raise HttpError(400, "Path does not exist" if not os.path.exists(p) else "Not a directory")
             if not isinstance(self.config.get("extraFolders"), list):
                 self.config["extraFolders"] = []
-            exists = any(case_fold(os.path.abspath(x)) == case_fold(p)
-                         for x in self.config["extraFolders"])
+            # Audit fix (v27): dedup against roots TOO — /root/webpty was
+            # re-added as an extraFolder (duplicate drawer entry) because
+            # the old check only scanned extraFolders.
+            known = [os.path.abspath(x) for x in self.config.get("roots") or []] + \
+                    [os.path.abspath(x) for x in self.config["extraFolders"]]
+            exists = any(case_fold(x) == case_fold(p) for x in known)
             is_auto = case_fold(os.path.dirname(p)) == case_fold(os.path.abspath(projects_root))
             if not exists and not is_auto:
                 self.config["extraFolders"].append(p)
                 save_config(self.config)
                 self._claude_mtime_cache.clear()
             return await self._send_json(writer, 200, self._list_projects(), headers)
+
+        if path == "/api/projects" and method == "DELETE":
+            # Audit fix (v27): mis-added folders (e.g. /etc) previously
+            # stayed in extraFolders forever — remove them so the drawer
+            # and fs/list stop offering them.
+            body = await self._read_json(reader, headers)
+            raw_path = str(body.get("path") or "").strip()
+            if not raw_path:
+                raise HttpError(400, "path required")
+            p = os.path.abspath(raw_path)
+            if not isinstance(self.config.get("extraFolders"), list):
+                raise HttpError(404, "not an extra folder")
+            kept = [x for x in self.config["extraFolders"]
+                    if case_fold(os.path.abspath(str(x))) != case_fold(p)]
+            if len(kept) == len(self.config["extraFolders"]):
+                raise HttpError(404, "not an extra folder")
+            self.config["extraFolders"] = kept
+            save_config(self.config)
+            self._claude_mtime_cache.clear()
+            return await self._send_json(writer, 200,
+                                         {"ok": True, "extraFolders": kept},
+                                         headers)
 
         if path == "/api/projects/create" and method == "POST":
             body = await self._read_json(reader, headers)
@@ -1916,6 +1947,7 @@ async def main() -> None:
 
     async def _prune_loop() -> None:
         """Daily retention sweep + WAL checkpoint — bounded DB growth."""
+        global _disk_low_active  # audit: assigned inside this nested fn
         await asyncio.sleep(90)  # after the first backup run
         while True:
             try:

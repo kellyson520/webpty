@@ -195,6 +195,46 @@ class ServerIntegrationTest(unittest.TestCase):
         self._req("/api/config/roots", "PUT",
                   {"roots": [self.proj_root]})
 
+    def test_projects_post_dedups_and_delete_removes(self):
+        # Audit fix (v27): POST /api/projects must not re-add a root as an
+        # extraFolder (duplicate drawer entry), and DELETE must remove
+        # mis-added folders.
+        import tempfile as _tf
+        outside = _tf.mkdtemp(prefix="webpty-outside-")
+        try:
+            # add an outside folder
+            st, j = self._req("/api/projects", "POST", {"path": outside})
+            self.assertEqual(st, 200)
+            extra = [p for p in j if p["path"] == outside]
+            self.assertEqual(len(extra), 1)
+            self.assertTrue(extra[0]["removable"])
+            # adding it again must not duplicate
+            st, j = self._req("/api/projects", "POST", {"path": outside})
+            self.assertEqual(st, 200)
+            self.assertEqual([p for p in j if p["path"] == outside], extra)
+            # a registered root's child is in the list but not removable;
+            # re-POSTing it must not add it to extraFolders
+            child = os.path.join(self.proj_root, "alpha")
+            st, j = self._req("/api/projects", "POST", {"path": child})
+            self.assertEqual(st, 200)
+            self.assertFalse([p for p in j if p["path"] == child][0]["removable"])
+            # DELETE on a non-extra entry → 404
+            st, j = self._req("/api/projects", "DELETE", {"path": child})
+            self.assertEqual(st, 404)
+            # DELETE the outside folder
+            st, j = self._req("/api/projects", "DELETE", {"path": outside})
+            self.assertEqual(st, 200)
+            self.assertNotIn(outside, [p["path"] for p in j["extraFolders"]])
+            # second DELETE → 404
+            st, j = self._req("/api/projects", "DELETE", {"path": outside})
+            self.assertEqual(st, 404)
+            # DELETE on a root → 404
+            st, j = self._req("/api/projects", "DELETE", {"path": self.proj_root})
+            self.assertEqual(st, 404)
+        finally:
+            import shutil as _sh
+            _sh.rmtree(outside, ignore_errors=True)
+
     def test_tools_put_updates_and_disables(self):
         # 修改现有工具 defaultArgs
         st, j = self._req("/api/config/tools", "PUT",

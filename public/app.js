@@ -155,6 +155,11 @@ function zhErr(msg) {
   if (msg.startsWith('session limit reached')) return '会话数量已达上限';
   if (msg.startsWith('cannot edit')) return '该配置项无法编辑（值类型不受支持）';
   if (msg.startsWith('key ')) return '该配置项的值类型不支持在线编辑';
+  // Audit fix (v27): folder add/remove messages.
+  if (msg === 'Path does not exist') return '路径不存在';
+  if (msg === 'Not a directory') return '不是目录';
+  if (msg === 'not an extra folder') return '该目录不是可移除的外部文件夹';
+  if (msg === 'path outside registered roots') return '路径不在已注册根目录内';
   if (msg.includes('not found')) return '未找到';
   return msg;
 }
@@ -2464,7 +2469,8 @@ folderPickerSelect.onclick = async () => {
     populateFolders();
     closeFolderPicker();
   } catch (err) {
-    alert(`添加文件夹失败: ${err.message}`);
+    // Audit fix (v27): raw English server messages leaked to the UI.
+    alert(`添加文件夹失败: ${zhErr(err.message)}`);
     folderPickerSelect.disabled = false;
   }
 };
@@ -2555,6 +2561,27 @@ function populateFolders() {
 
     btn.onclick = () => navigateToFolder(p);
     li.appendChild(btn);
+    // Audit fix (v27): mis-added folders were stuck forever — a remove
+    // button on extraFolders entries only (roots/projects_root items are
+    // not removable).
+    if (p.removable) {
+      const rm = document.createElement('button');
+      rm.className = 'folder-row-remove';
+      rm.title = '移除文件夹';
+      rm.textContent = '✕';
+      rm.onclick = async (ev) => {
+        ev.stopPropagation();
+        if (!confirm(`移除文件夹 ${p.name}（${p.path}）？仅从列表移除，不删除磁盘内容`)) return;
+        try {
+          await api('/api/projects', { method: 'DELETE', body: JSON.stringify({ path: p.path }) });
+          projects = await api('/api/projects');
+          populateFolders();
+        } catch (err) {
+          alert(`移除失败: ${zhErr(err.message)}`);
+        }
+      };
+      li.appendChild(rm);
+    }
     drawerFolders.appendChild(li);
   }
 }

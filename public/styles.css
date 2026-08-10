@@ -810,6 +810,20 @@ body.no-input-bar .key-row { display: none; }
   position: relative;
 }
 .folder-row:hover { background: rgba(255, 255, 255, 0.04); }
+.folder-row-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-right: 2px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #8a94a6);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.folder-row-remove:hover { background: rgba(255, 80, 80, 0.15); color: #ff5a5a; }
 .folder-row:active { background: rgba(255, 255, 255, 0.08); }
 .folder-row.current { background: rgba(63, 191, 127, 0.10); }
 .folder-row .folder-row-name {
