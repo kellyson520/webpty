@@ -2367,6 +2367,10 @@ drawerBackdrop.addEventListener('click', closeDrawer);
 // looking at (empty string = platform roots). Selecting confirms the path
 // itself, not an entry inside the list. Clicking a row navigates into it.
 let pickerCurrentPath = '';
+// Paths shown at the picker root view (registered roots + extra folders).
+// 'Up' must not navigate above them (fs/list rejects outside-root paths
+// with 403) — fall back to the root view in that case.
+let pickerRootPaths = [];
 
 function parentDirOf(p) {
   if (!p) return '';
@@ -2389,10 +2393,18 @@ async function loadPickerDir(p) {
   folderPickerList.innerHTML = '<li class="folder-picker-empty">加载中…</li>';
   try {
     const entries = await api(`/api/fs/list?path=${encodeURIComponent(pickerCurrentPath)}`);
+    if (!pickerCurrentPath) pickerRootPaths = entries.map(e => e.path);
     renderPickerEntries(entries);
   } catch (err) {
     folderPickerList.innerHTML = `<li class="folder-picker-empty">无法列出: ${esc(err.message)}</li>`;
   }
+}
+
+function pickerParentPath(p) {
+  const parent = parentDirOf(p);
+  if (!parent) return '';
+  const under = (pickerRootPaths || []).some(r => parent === r || parent.startsWith(r + '/'));
+  return under ? parent : '';
 }
 
 function renderPickerEntries(entries) {
@@ -2425,7 +2437,7 @@ function closeFolderPicker() {
 }
 
 addFolderBtn.onclick = openFolderPicker;
-folderPickerUp.onclick = () => loadPickerDir(parentDirOf(pickerCurrentPath));
+folderPickerUp.onclick = () => loadPickerDir(pickerParentPath(pickerCurrentPath));
 folderPickerClose.onclick = closeFolderPicker;
 folderPickerCancel.onclick = closeFolderPicker;
 folderPickerBackdrop.addEventListener('click', (ev) => {

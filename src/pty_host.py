@@ -207,7 +207,7 @@ def handle_start(sock: socket.socket, msg: dict) -> None:
                     pass
                 os.execvp(cmd, [cmd] + args)
             except Exception as err:  # noqa: BLE001 — child must not raise
-                os.write(2, f"[pty-host] exec failed: {err}\n".encode())
+                os.write(2, f"[pty-host] exec failed: {err} (command={cmd!r}, cwd={cwd!r})\n".encode())
                 os._exit(127)
     except OSError as err:
         _send(sock, {"ev": "error", "reqId": msg.get("reqId"), "id": sid,
