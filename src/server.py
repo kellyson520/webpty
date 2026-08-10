@@ -566,21 +566,11 @@ class Server:
             }, headers)
 
         if path == "/api/fs/list" and method == "GET":
+            # Local trusted deployment: allow browsing anywhere so users can
+            # navigate up past the registered roots and add directories via
+            # POST /api/projects (which registers them as extraFolders).
+            # Only directory names are exposed, never file contents.
             raw = query.get("path", [""])[0]
-            if raw:
-                # Directory enumeration is restricted to registered roots
-                # (and their subdirs). Deny arbitrary paths like /etc.
-                # Audit H1 (v27): use is_path_under_roots — the old manual
-                # `startswith(base + os.sep)` check never matched a '/' or
-                # 'C:\' root ('//' vs '/x'), so browsing broke while
-                # session/git checks (same function) allowed it.
-                req_path = os.path.abspath(raw)
-                allowed = [os.path.abspath(r)
-                           for r in (self.config.get("roots") or [])] + \
-                          [os.path.abspath(f)
-                           for f in (self.config.get("extraFolders") or [])]
-                if not is_path_under_roots(req_path, allowed):
-                    raise HttpError(403, "path outside registered roots")
             try:
                 entries = self._list_dir_entries(raw)
                 return await self._send_json(writer, 200, entries, headers)

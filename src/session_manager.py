@@ -73,6 +73,25 @@ def has_prior_conversation(cwd: str) -> bool:
     return bool(glob.glob(os.path.join(base, encode_claude_project(cwd), "*.jsonl")))
 
 
+def has_prior_codex_conversation(cwd: str) -> bool:
+    """True when codex has a recorded rollout for this working directory."""
+    import glob
+    import json as _json
+
+    target = os.path.abspath(cwd)
+    base = os.path.join(os.path.expanduser("~"), ".codex", "sessions")
+    for f in glob.glob(os.path.join(base, "**", "rollout-*.jsonl"), recursive=True):
+        try:
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                d = _json.loads(fh.readline() or "null")
+            if (isinstance(d, dict) and d.get("type") == "session_meta"
+                    and os.path.abspath(str((d.get("payload") or {}).get("cwd") or "")) == target):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _append_log(log_path: str, text: str) -> None:
     if not log_path:
         return
@@ -450,6 +469,13 @@ class SessionManager:
         user_resume = any(a in RESUME_FLAGS for a in user_args)
         if session.get("tool") == "claude" and not user_resume and has_prior_conversation(session.get("cwd")):
             argv.insert(0, "-c")
+        # codex: keep conversation history in sync with the local CLI — start
+        # with `resume --last` when the project already has a rollout, unless
+        # the user asked for a fresh chat (reset) or passed custom args.
+        if (session.get("tool") == "codex" and not user_resume
+                and not session.get("_fresh_start") and not user_args
+                and has_prior_codex_conversation(session.get("cwd"))):
+            argv = ["resume", "--last"] + argv
         # reasonix-family: do NOT auto-add -c. reasonix keeps a GLOBAL session
         # lock (one active session at a time); 'reasonix -c' tries to resume
         # the locked session and errors 'session is in use' (then hangs).
@@ -541,6 +567,8 @@ class SessionManager:
         session["state"] = "running"
         session["exit_code"] = None
         session["signal"] = None
+        if session.pop("_fresh_start", None):
+            self._persist()
         self._mark_busy(session)  # running → tab dot blinks until idle 5s
 
         try:
@@ -1058,6 +1086,13 @@ class SessionManager:
         if not session:
             return False
         if session.get("engine") != "agent":
+            # codex (pty) sessions: mark the next start as fresh so it does
+            # not auto-resume the previous conversation.
+            if session.get("tool") == "codex":
+                session["_fresh_start"] = True
+                self._persist()
+                self._emit("change", self._public(session))
+                return True
             return False
         session["agent_session_id"] = None
         self._persist()
