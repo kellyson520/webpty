@@ -257,11 +257,11 @@ class Server:
         out = []
         # Audit fix (v27): mark which entries came from extraFolders so the
         # frontend can offer a remove action only for those.
-        extra = {case_fold(os.path.abspath(str(x)))
+        extra = {case_fold(os.path.realpath(str(x)))
                  for x in (self.config.get("extraFolders") or [])}
 
         def push(full: str) -> None:
-            key = case_fold(os.path.abspath(full))
+            key = case_fold(os.path.realpath(full))  # audit L3 (v27): symlinks
             if key in seen:
                 return
             try:
@@ -280,11 +280,17 @@ class Server:
 
         try:
             for entry in os.scandir(projects_root):
-                if entry.is_dir():
+                # Audit M2 (v27): .git/.venv/.config etc. pollute the
+                # drawer under a home-dir projects_root — hide them.
+                if entry.is_dir() and not entry.name.startswith("."):
                     push(entry.path)
         except OSError:
             pass
         for p in self.config.get("extraFolders", []):
+            # extraFolders entries starting with '.' are almost certainly
+            # mistakes; keep the drawer clean.
+            if os.path.basename(str(p).rstrip("/\\")).startswith("."):
+                continue
             push(p)
         out.sort(key=lambda x: x["name"].lower())
         return out
@@ -295,12 +301,16 @@ class Server:
             # the whole filesystem here invites navigation outside the roots,
             # which the fs/list guard then rejects with 403 ("无法列出").
             roots = []
+            root_keys = set()
             for r in (self.config.get("roots") or []):
                 if r:
                     roots.append({"name": os.path.basename(r.rstrip("/\\")) or r,
                                   "path": r})
+                    root_keys.add(case_fold(os.path.abspath(r)))
             for f in (self.config.get("extraFolders") or []):
-                if f and f not in roots:
+                # Audit L1 (v27): `f not in roots` compared a string against
+                # dicts (always true) — dedup by path like POST does.
+                if f and case_fold(os.path.abspath(f)) not in root_keys:
                     roots.append({"name": os.path.basename(f.rstrip("/\\")) or f,
                                   "path": f})
             return roots
@@ -462,9 +472,10 @@ class Server:
                 self.config["extraFolders"] = []
             # Audit fix (v27): dedup against roots TOO — /root/webpty was
             # re-added as an extraFolder (duplicate drawer entry) because
-            # the old check only scanned extraFolders.
-            known = [os.path.abspath(x) for x in self.config.get("roots") or []] + \
-                    [os.path.abspath(x) for x in self.config["extraFolders"]]
+            # the old check only scanned extraFolders. realpath (L3) so a
+            # symlinked path can't dodge the check.
+            known = [os.path.realpath(x) for x in self.config.get("roots") or []] + \
+                    [os.path.realpath(x) for x in self.config["extraFolders"]]
             exists = any(case_fold(x) == case_fold(p) for x in known)
             is_auto = case_fold(os.path.dirname(p)) == case_fold(os.path.abspath(projects_root))
             if not exists and not is_auto:
@@ -485,14 +496,26 @@ class Server:
             if not isinstance(self.config.get("extraFolders"), list):
                 raise HttpError(404, "not an extra folder")
             kept = [x for x in self.config["extraFolders"]
-                    if case_fold(os.path.abspath(str(x))) != case_fold(p)]
+                    if case_fold(os.path.realpath(str(x))) != case_fold(os.path.realpath(p))]
             if len(kept) == len(self.config["extraFolders"]):
                 raise HttpError(404, "not an extra folder")
             self.config["extraFolders"] = kept
             save_config(self.config)
             self._claude_mtime_cache.clear()
+            # Audit M3 (v27): sessions whose cwd lives under the removed
+            # folder keep running — surface that so the user isn't
+            # surprised when new sessions there get rejected.
+            active = 0
+            for s in self.sessions.sessions.values():
+                cwd = str(s.get("cwd") or "")
+                if (s.get("state") == "running" and cwd
+                        and (case_fold(os.path.abspath(cwd)) == case_fold(p)
+                             or case_fold(os.path.abspath(cwd)).startswith(
+                                 case_fold(p) + os.sep))):
+                    active += 1
             return await self._send_json(writer, 200,
-                                         {"ok": True, "extraFolders": kept},
+                                         {"ok": True, "extraFolders": kept,
+                                          "active_sessions": active},
                                          headers)
 
         if path == "/api/projects/create" and method == "POST":
@@ -547,13 +570,16 @@ class Server:
             if raw:
                 # Directory enumeration is restricted to registered roots
                 # (and their subdirs). Deny arbitrary paths like /etc.
+                # Audit H1 (v27): use is_path_under_roots — the old manual
+                # `startswith(base + os.sep)` check never matched a '/' or
+                # 'C:\' root ('//' vs '/x'), so browsing broke while
+                # session/git checks (same function) allowed it.
                 req_path = os.path.abspath(raw)
                 allowed = [os.path.abspath(r)
                            for r in (self.config.get("roots") or [])] + \
                           [os.path.abspath(f)
                            for f in (self.config.get("extraFolders") or [])]
-                if not any(req_path == a or req_path.startswith(a + os.sep)
-                           for a in allowed):
+                if not is_path_under_roots(req_path, allowed):
                     raise HttpError(403, "path outside registered roots")
             try:
                 entries = self._list_dir_entries(raw)
@@ -1064,6 +1090,9 @@ class Server:
                 fresh = load_config()
                 self.config.clear()
                 self.config.update(fresh)
+                # Audit L5 (v27): restored roots/extraFolders changed —
+                # stale claude/reasonix mtime entries could linger for 30s.
+                self._claude_mtime_cache.clear()
             return await self._send_json(writer, 200, res, headers)
         m = re.match(r"^/api/backup/diff/(\d+)/(\d+)$", path)
         if m and method == "GET":

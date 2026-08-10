@@ -19,6 +19,7 @@
   --panel: #1a1a1a;
   --line: #2c2c2c;
   --text: #ededed;
+  --text-dim: #8a94a6;  /* audit L4 (v27): was fallback-only */
   --muted: #909090;
   --accent: #3fbf7f;
   --danger: #f06060;
@@ -770,6 +771,12 @@ body.no-input-bar .key-row { display: none; }
   border-top: 1px solid var(--line);
   justify-content: flex-end;
 }
+.folder-picker-manual {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px 0;
+}
+.folder-picker-manual .inp { flex: 1; }
 .folder-picker-cancel,
 .folder-picker-select {
   height: 36px;
@@ -1351,4 +1358,7 @@ body.no-input-bar .page-chat .compose-bar { display: flex; }
 body.theme-light {
   --bg: #f7f7f7; --panel: #ffffff; --fg: #1a1a1a; --muted: #666666;
   --border: rgba(0,0,0,0.12); --accent: #2f6fdb; --dot: #b8c4d4;
+  /* Audit H2 (v27): drawer/tab text stayed #ededed (contrast ≈1.04:1) —
+     --text/--text-dim/--line were never defined for light. */
+  --text: #1a1a1a; --text-dim: #5a6472; --line: #d8d8d8;
 }

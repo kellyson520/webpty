@@ -76,6 +76,12 @@
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>
           </button>
         </header>
+        <div class="folder-picker-manual">
+          <input id="folder-picker-path-input" class="inp" type="text"
+                 placeholder="或直接输入完整路径（如 /opt/myproject）"
+                 autocomplete="off" spellcheck="false" />
+          <button id="folder-picker-add" class="btn" type="button">添加</button>
+        </div>
         <ul class="folder-picker-list" id="folder-picker-list"></ul>
         <footer class="folder-picker-actions">
           <button class="folder-picker-cancel" id="folder-picker-cancel">取消</button>

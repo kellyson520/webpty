@@ -2475,6 +2475,30 @@ folderPickerSelect.onclick = async () => {
   }
 };
 
+// Audit M1 (v27): roots outside projects_root were unreachable from the
+// picker (fs/list only browses registered roots) — a manual path input
+// closes the loop: type /opt/foo → POST adds it to extraFolders.
+async function addFolderByPath() {
+  const raw = document.getElementById('folder-picker-path-input').value.trim();
+  if (!raw) return;
+  try {
+    projects = await api('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({ path: raw })
+    });
+    document.getElementById('folder-picker-path-input').value = '';
+    populateFolders();
+    // also refresh the picker root view so the new folder appears there
+    loadPickerDir('');
+  } catch (err) {
+    alert(`添加文件夹失败: ${zhErr(err.message)}`);
+  }
+}
+document.getElementById('folder-picker-add').onclick = addFolderByPath;
+document.getElementById('folder-picker-path-input').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') addFolderByPath();
+});
+
 function sortProjects(list, activeTools) {
   const arr = [...list];
   const byName = (a, b) => a.name.localeCompare(b.name);
@@ -2530,6 +2554,9 @@ function populateFolders() {
     const name = document.createElement('span');
     name.className = 'folder-row-name';
     name.textContent = p.name;
+    // Audit L2 (v27): basename collisions (e.g. /root/foo vs /opt/foo)
+    // made the two rows indistinguishable — show the full path.
+    btn.title = p.path;
     btn.appendChild(name);
 
     const dots = document.createElement('span');
@@ -2573,7 +2600,11 @@ function populateFolders() {
         ev.stopPropagation();
         if (!confirm(`移除文件夹 ${p.name}（${p.path}）？仅从列表移除，不删除磁盘内容`)) return;
         try {
-          await api('/api/projects', { method: 'DELETE', body: JSON.stringify({ path: p.path }) });
+          const res = await api('/api/projects', { method: 'DELETE', body: JSON.stringify({ path: p.path }) });
+          if (res.active_sessions > 0) {
+            // Audit M3 (v27): sessions in the removed folder keep running.
+            alert(`已移除，但仍有 ${res.active_sessions} 个运行中会话在该目录下（可继续使用，新建会话将受根目录限制）`);
+          }
           projects = await api('/api/projects');
           populateFolders();
         } catch (err) {
