@@ -2008,6 +2008,19 @@ class Server:
                             # a silent output gap.
                             outbox.resync()
                 self.sessions.on("resync", on_resync)
+                # BUGFIX (live test): re-attach to the pty-host on every WS
+                # connect. The host replies with its buffer snapshot
+                # ("attached" + replay -> resync frame, frontend wipes and
+                # replays). Without this the dedup window (skip, sized by
+                # the recent-buffer bytes already sent) is only filled by a
+                # replay that never arrives — the next len(recent) bytes of
+                # LIVE output were silently swallowed (minutes of silence on
+                # sparse output), and the terminal never received the
+                # post-disconnect state.
+                try:
+                    await self.sessions.host.attach(sid)
+                except Exception:  # noqa: BLE001 — host missing the session
+                    pass
             self.sessions.on("change", on_change)
             self.sessions.on("reconnected", on_reconnected)
 

@@ -550,6 +550,52 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_reconnect_resumes_output(self):
+        # 核心功能:WS 断线后 PTY 会话继续运行,重连后实时输出必须继续
+        # (此前 reconnect 不去重窗口吞掉 len(recent) 字节的实时输出)。
+        import asyncio
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "ws-reconn"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            ws1, head = await self._ws_roundtrip(
+                sid, b"i=0; while true; do echo TICK$i; i=$((i+1)); sleep 1; done\r")
+            self.assertIn(b"101", head)
+            got = b""
+            end = time.time() + 12
+            while time.time() < end:
+                frame = await ws1.recv(1.5)
+                if frame is None:
+                    break
+                _op, data = frame
+                got += data
+                if b"TICK2" in got:
+                    break
+            await ws1.close()
+            # 重连:应收到继续的 TICK(而非静默/重复)
+            ws2, head2 = await self._ws_roundtrip(sid, b"")
+            self.assertIn(b"101", head2)
+            got2 = b""
+            end = time.time() + 12
+            while time.time() < end:
+                frame = await ws2.recv(1.5)
+                if frame is None:
+                    break
+                _op, data = frame
+                got2 += data
+                if b"TICK7" in got2:
+                    break
+            await ws2.close()
+            return got, got2
+
+        g1, g2 = asyncio.run(run())
+        self.assertIn(b"TICK2", g1)
+        self.assertIn(b"TICK7", g2)
+
     def test_ws_agent_snapshot_via_outbox(self):
         # Agent sessions emit their transcript snapshot over the WS; this
         # exercises _ws_session's Outbox path for text frames end-to-end.
