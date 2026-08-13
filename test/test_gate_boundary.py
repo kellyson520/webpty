@@ -97,6 +97,23 @@ class GateBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"bad-token", body)
         self.assertIn(b"forbidden", body)
 
+    async def test_ws_cap_refuses_overflow(self):
+        """并发 WS 超过上限 → 429(连接在握手前被拒);未超限则继续路由。"""
+        s = Server()
+        s._ws_count = 2
+        s.max_ws_connections = 2
+        w = FakeWriter()
+        await s._handle_ws_upgrade(None, w, "/ws/sessions/x", {})
+        self.assertIn("429", w.status_line or "")
+
+        s2 = Server()
+        s2._ws_count = 1
+        s2.max_ws_connections = 2
+        w2 = FakeWriter()
+        # 未超限 → 继续校验路径(不匹配 /ws/sessions/<id> 的路径 400,而非 429)
+        await s2._handle_ws_upgrade(None, w2, "/ws/other", {})
+        self.assertIn("400", w2.status_line or "")
+
     async def test_unhandled_oserror_returns_500_json(self):
         """OSError(如 agent CLI 缺失的 FileNotFoundError)不得静默丢连接 —
         必须回 500 JSON(此前 except (ConnectionError, OSError) 把它吞了,

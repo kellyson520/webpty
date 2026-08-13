@@ -136,6 +136,15 @@ class Server:
         self._asset_hash_cache: dict[str, str] = {}  # /app.js -> sha256[:16]
         self._asset_hash_meta: dict[str, tuple[int, int]] = {}
         self._ws_count = 0
+        # Audit K1: concurrent WS cap — tunable per deployment
+        # (WEBPTY_MAX_WS_CONNECTIONS), each connection holds recv + drain +
+        # heartbeat tasks.
+        try:
+            self.max_ws_connections = int(
+                os.environ.get("WEBPTY_MAX_WS_CONNECTIONS",
+                                str(MAX_WS_CONNECTIONS)))
+        except (TypeError, ValueError):
+            self.max_ws_connections = MAX_WS_CONNECTIONS
         # claude history mtime cache: key = abs project path, value =
         # (mtime, cached_at). 30s TTL avoids a full scandir per /api/projects.
         self._claude_mtime_cache: dict[str, tuple[float, float]] = {}
@@ -1750,7 +1759,7 @@ class Server:
         # Audit K1: cap concurrent WS connections (each holds recv + drain +
         # heartbeat tasks). With the token gate off and the port reachable,
         # an unbound peer could exhaust fds — refuse past MAX_WS.
-        if self._ws_count >= MAX_WS_CONNECTIONS:
+        if self._ws_count >= self.max_ws_connections:
             writer.write(b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n")
             await writer.drain()
             writer.close()
