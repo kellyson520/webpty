@@ -5,12 +5,14 @@ undefined variable at runtime) sailed through. These greps catch the
 most common hand-slip patterns; keep them cheap and deterministic.
 """
 import os
+import re
 import subprocess
 import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "public", "app.js")
+HTML = os.path.join(ROOT, "public", "index.html")
 
 
 class FrontendSyntaxTest(unittest.TestCase):
@@ -59,6 +61,24 @@ class FrontendSyntaxTest(unittest.TestCase):
         """Audit L6: the two escaping functions must stay the same."""
         src = open(APP, encoding="utf-8").read()
         self.assertIn("const escapeHtml = esc;", src)
+
+    def test_all_dom_id_references_exist(self):
+        """DOM 契约:app.js 引用的元素 id 必须存在于 index.html,
+        或在 app.js 里动态创建(模板字面量)。漏 id 会在运行时拿到 null
+        并静默破坏对应 UI 功能。"""
+        html = open(HTML, encoding="utf-8").read()
+        html_ids = set(re.findall(r'id="([^"]+)"', html))
+        src = open(APP, encoding="utf-8").read()
+        dynamic = set(re.findall(r'id="([A-Za-z0-9_-]+)"', src))
+        dynamic |= set(re.findall(r"\.id\s*=\s*['\"]([A-Za-z0-9_-]+)['\"]", src))
+        used = set(re.findall(r"getElementById\(['\"]([^'\"]+)['\"]\)", src))
+        missing = sorted(used - html_ids - dynamic)
+        self.assertEqual(missing, [],
+                         f"getElementById target(s) missing: {missing}")
+        qs = set(re.findall(r"querySelector\('#([A-Za-z0-9_-]+)'\)", src))
+        missing_qs = sorted(qs - html_ids - dynamic)
+        self.assertEqual(missing_qs, [],
+                         f"querySelector('#...') target(s) missing: {missing_qs}")
 
 
 if __name__ == "__main__":
