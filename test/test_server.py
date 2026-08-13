@@ -108,6 +108,8 @@ class ServerIntegrationTest(unittest.TestCase):
                 return e.code, json.loads(e.read())
             except Exception:  # noqa: BLE001
                 return e.code, {}
+            finally:
+                e.close()
 
     # --- API ---------------------------------------------------------------
     def test_config(self):

@@ -131,7 +131,7 @@ async def authorize_peer(ip: str, req_headers: dict, url: str,
     if not info:
         return {"ok": False, "reason": "not-a-tailnet-peer", "peer": peer}
     allowed = [str(s).lower() for s in allowed_logins]
-    if info["loginName"].lower() not in allowed:
+    if str(info.get("loginName") or "").lower() not in allowed:
         return {
             "ok": False, "reason": "login-not-allowed",
             "peer": {**peer, **info},
