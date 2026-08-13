@@ -69,6 +69,45 @@ switch between live sessions with a swipe.
 
 ---
 
+## 韧性 / Resilience
+
+The core promise: **sessions run in the background and survive every
+disconnect** — close the browser, lose the network, restart the server, even
+kill the pty-host daemon; the supervised agent keeps working and the next
+connection restores the full terminal state.
+
+核心承诺：**会话在后台运行，任何断线都不中断**——关掉浏览器、断网、重启
+服务、甚至杀掉 pty-host 守护进程；被监督的智能体继续工作，下次连接恢复
+完整的终端状态。
+
+Verified behaviors / 已验证的行为：
+
+- **WS disconnect** → agent keeps running; reconnect replays the recent
+  buffer and resyncs a full-state snapshot (TUI apps like codex restore
+  their complete screen).
+  **WS 断线** → 智能体继续运行；重连回放最近缓冲并以全量快照 resync
+  （codex 等 TUI 应用恢复完整画面）。
+- **Server restart** → the detached pty-host keeps sessions alive;
+  autostart sessions come back automatically; logs (with 5MB rotation)
+  restore the tail across restarts.
+  **服务重启** → 分离的 pty-host 保持会话存活；autostart 会话自动恢复；
+  日志（5MB 轮转）跨重启恢复末尾内容。
+- **pty-host crash** → the host monitor respawns it and autostart sessions
+  restart with exponential backoff (10/30/90s, 3 tries, then a `failed`
+  notification event).
+  **pty-host 崩溃** → 监控自动重生宿主，autostart 会话按指数退避
+  （10/30/90s，3 次后发出 `failed` 通知事件）。
+- **Heartbeat** — idle connections are pinged and half-open ones closed
+  (close 1001) so a stale tab never pins a slot forever.
+  **心跳** — 空闲连接定期 ping，半开连接被关闭（1001），陈旧标签页不会
+  永远占用名额。
+- **Concurrency caps** — WS connections (default 128, see
+  `WEBPTY_MAX_WS_CONNECTIONS`), sessions (64), running agents (6).
+  **并发上限** — WS 连接（默认 128，见 `WEBPTY_MAX_WS_CONNECTIONS`）、
+  会话（64）、并发 agent（6）。
+
+---
+
 ## 扩展能力（合规四大件） / Extension capabilities (four compliance modules)
 
 - **通知中心**：会话 completed/failed/crashed/terminated 事件 → 规则匹配 →
@@ -275,6 +314,8 @@ Environment variables / 环境变量:
 | `WEBPTY_PROJECTS_ROOT` | Folder whose subfolders appear in the drawer / 抽屉中显示的子文件夹根目录 |
 | `WEBPTY_PORT` | Override the listen port / 覆盖监听端口 |
 | `WEBPTY_BIND_HOST` | Override the bind host / 覆盖绑定地址 |
+| `WEBPTY_AGENT_CONFIG_ROOTS` | Extra allow-listed roots for agent config discovery/editing (os.pathsep-separated) / 额外允许的 agent 配置文件根目录（os.pathsep 分隔） |
+| `WEBPTY_MAX_WS_CONNECTIONS` | Concurrent WebSocket cap, default 128 / 并发 WebSocket 上限，默认 128 |
 
 ### Tools are fully yours to configure / 工具配置完全由你掌控
 
