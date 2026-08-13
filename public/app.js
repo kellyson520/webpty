@@ -1837,7 +1837,11 @@ function renderTabs() {
         // Audit M2: resolve the index at click time — sessions can be
         // reordered (drag) or removed between renders, so a captured
         // index goes stale and clicks the wrong tab.
-        const liveIdx = sessions.findIndex((s) => s.id === session.id);
+        // BUGFIX (browser test): this used session.id — the variable
+        // session was never defined in this scope (the forEach parameter
+        // is s), so every tab click threw a silent ReferenceError and tab
+        // switching was dead; only drawer/swipe navigation still worked.
+        const liveIdx = sessions.findIndex((x) => x.id === s.id);
         if (liveIdx >= 0) scrollToIndex(liveIdx);
       };
       tabsEl.appendChild(tab);

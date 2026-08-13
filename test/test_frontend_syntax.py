@@ -62,6 +62,18 @@ class FrontendSyntaxTest(unittest.TestCase):
         src = open(APP, encoding="utf-8").read()
         self.assertIn("const escapeHtml = esc;", src)
 
+    def test_render_tabs_onclick_uses_defined_variable(self):
+        """回归:8381e6f 起 tab.onclick 引用了未定义的 session(forEach
+        参数是 s)——每次点击 tab 都抛 ReferenceError,tab 切换静默失效
+        (滑动/抽屉导航掩盖了它)。浏览器实测发现并修复。"""
+        src = open(APP, encoding="utf-8").read()
+        # 限定在 renderTabs 作用域(其他函数里 session 是合法参数)
+        start = src.index("function renderTabs")
+        nxt = src.index("function ", start + len("function renderTabs"))
+        rt = src[start:nxt]
+        self.assertNotIn("s.id === session.id", rt)
+        self.assertIn("sessions.findIndex((x) => x.id === s.id)", rt)
+
     def test_all_dom_id_references_exist(self):
         """DOM 契约:app.js 引用的元素 id 必须存在于 index.html,
         或在 app.js 里动态创建(模板字面量)。漏 id 会在运行时拿到 null
