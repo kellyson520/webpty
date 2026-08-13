@@ -550,6 +550,34 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_log_flush_visible_promptly(self):
+        # 日志句柄是块缓冲(8192);修复前输出滞留在内存,磁盘日志不增长 —
+        # 崩溃恢复 tail_log 会丢最后 ~8KB,运维看日志也是过期内容。
+        # 现在 ~1s 内落盘,6s 内必可见。
+        st, sess = self._req("/api/sessions", "POST",
+                             {"cwd": os.path.join(self.proj_root, "alpha"),
+                              "tool": "bash", "name": "log-flush"})
+        sid = sess["id"]
+        self._req(f"/api/sessions/{sid}/start", "POST")
+        time.sleep(1.5)
+        st, s = self._req(f"/api/sessions/{sid}")
+        lp = s["logPath"]
+        self.assertTrue(os.path.exists(lp))
+        self._req(f"/api/sessions/{sid}/input", "POST",
+                  {"bytes": "echo LOG_FLUSH_OK\r"})
+        end = time.time() + 6
+        seen = False
+        while time.time() < end:
+            with open(lp, "rb") as f:
+                data = f.read()
+            if b"LOG_FLUSH_OK" in data:
+                seen = True
+                break
+            time.sleep(0.5)
+        self._req(f"/api/sessions/{sid}/stop", "POST")
+        self._req(f"/api/sessions/{sid}", "DELETE")
+        self.assertTrue(seen, "session log output must hit disk promptly")
+
     def test_ws_reconnect_resumes_output(self):
         # 核心功能:WS 断线后 PTY 会话继续运行,重连后实时输出必须继续
         # (此前 reconnect 不去重窗口吞掉 len(recent) 字节的实时输出)。

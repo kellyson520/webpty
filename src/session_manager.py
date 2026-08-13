@@ -1508,6 +1508,16 @@ class SessionManager:
                 session["state"] = "stopped"
                 session["pid"] = None
                 self._emit("change", self._public(session))
+                # BUGFIX (live crash test): the pty-host died with its PTY
+                # children — no exit event ever reaches us, so the normal
+                # exit-restart path never fires and autostart sessions stay
+                # dead forever. Schedule the same backoff restart for
+                # autostart sessions here (unless the user stopped them or
+                # a restart is already pending).
+                if (session.get("autostart")
+                        and not session.get("_user_stopped")
+                        and not session.get("_restart_handle")):
+                    self._maybe_restart(session, -9)
         self._emit("reconnected")
 
     def _confirm_auto_resume(self, session: dict) -> None:
@@ -1699,20 +1709,36 @@ class SessionManager:
                 fh = open(session["log_path"], "ab", buffering=8192)
                 session["_log_fh"] = fh
                 session["_log_bytes"] = 0
+                session["_log_rot_bytes"] = 0
+                session["_log_flush_at"] = time.time()
             fh.write(chunk)
+            now = time.time()
+            session["_log_bytes"] = session.get("_log_bytes", 0) + len(chunk)
+            # BUGFIX (live test): block buffering (8192) kept everything
+            # since open invisible on disk until rotation — tail_log restore
+            # after a crash missed the last ~8KB+ and operators saw stale
+            # logs while sessions were actively printing. Flush when the
+            # buffer is about to fill OR ~1s passes (no per-chunk syscall
+            # storm, loss on crash bounded to ~1s of output).
+            if (session["_log_bytes"] >= 8192
+                    or now - session.get("_log_flush_at", 0) >= 1.0):
+                fh.flush()
+                session["_log_bytes"] = 0
+                session["_log_flush_at"] = now
             # Running-session rotation (audit L1): buffered writes bypass
             # _append_log's size check, so a long-lived reasonix session's
             # log grew unboundedly (~60 writes/s). Count bytes and check the
             # size every ~512KB; at 5MB rotate to .1 and reopen the handle.
-            session["_log_bytes"] = session.get("_log_bytes", 0) + len(chunk)
-            if session["_log_bytes"] >= 512 * 1024:
-                session["_log_bytes"] = 0
+            session["_log_rot_bytes"] = session.get("_log_rot_bytes", 0) + len(chunk)
+            if session["_log_rot_bytes"] >= 512 * 1024:
+                session["_log_rot_bytes"] = 0
                 try:
                     if os.path.getsize(session["log_path"]) > 5 * 1024 * 1024:
                         fh.flush()
                         fh.close()
                         os.replace(session["log_path"], session["log_path"] + ".1")
                         session["_log_fh"] = open(session["log_path"], "ab", buffering=8192)
+                        session["_log_flush_at"] = time.time()
                 except OSError:
                     pass
         except OSError:
