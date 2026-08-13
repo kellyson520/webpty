@@ -77,6 +77,10 @@ service (production codex/reasonix sessions + headless Chromium).
 | API 延迟 (config/sessions/health) | p50=0.6ms, p99≈1ms |
 | 会话创建+启动 (bash) | 中位 6ms |
 | 输入→输出往返 | **17ms**(修复前 1002ms——见修复清单第 16 条) |
+| WS 握手 | 0-1ms |
+| 首帧到达 | 1ms |
+| 全屏重放 (codex 423KB) | **28ms** (14.1MB/s) |
+| 会话 stop / delete | 4ms / 4ms |
 
 ## 修复清单 / Bugs fixed (16)
 
