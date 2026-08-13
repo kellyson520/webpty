@@ -111,6 +111,14 @@ JSON_KEYS: dict[str, dict[str, str]] = {
     "copilot": {
         "api_key": "github.com.oauth_token",
     },
+    "opencode": {
+        # provider is a string (built-in id) or an object; options.baseURL
+        # is where custom endpoints live. Setting base_url/api_key converts
+        # a string provider into the object form (see _set_json_path).
+        "model": "model",
+        "base_url": "provider.options.baseURL",
+        "api_key": "provider.options.apiKey",
+    },
 }
 
 # YAML tools (read-only for now: no stdlib yaml writer; edits rejected)
@@ -211,6 +219,31 @@ def read_config(tool: str, path: str | None = None) -> dict[str, Any]:
     # browser in plaintext. TOML `key = "value"` and JSON "key": "value".
     content = _mask_secret_values(content or "")
     return {"ok": True, "path": target, "content": content}
+
+
+def read_agent_env_secret(name: str) -> str | None:
+    """Look up an agent-named env secret (e.g. CODEX_API_KEY, DEEPSEEK_API_KEY):
+    the process environment first (webpty loads the agents' env files), then
+    Reasonix's global env file (~/.reasonix/.env). Returns None when absent."""
+    if not name:
+        return None
+    val = os.environ.get(name)
+    if val:
+        return val
+    for cand in (os.path.join(_HOME, ".reasonix", ".env"),
+                 os.path.join(_HOME, ".reasonix", "env")):
+        try:
+            with open(cand, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    if k.strip() == name:
+                        return v.strip().strip("'\"") or None
+        except OSError:
+            continue
+    return None
 
 
 def read_native(tool: str, path: str | None = None) -> dict[str, Any] | None:
@@ -389,18 +422,17 @@ def _set_json_path(obj: Any, path: str, value: Any) -> bool:
     parts = path.split(".")
     cur = obj
     for i, part in enumerate(parts):
-        if i == len(parts) - 1:
-            if isinstance(cur, dict):
-                cur[part] = value
-                return True
+        if not isinstance(cur, dict):
             return False
-        nxt = cur.get(part) if isinstance(cur, dict) else None
+        if i == len(parts) - 1:
+            cur[part] = value
+            return True
+        nxt = cur.get(part)
         if not isinstance(nxt, dict):
+            # Convert non-dict intermediates (e.g. opencode's string
+            # "provider") into objects so deeper keys can be set.
             nxt = {}
-            if isinstance(cur, dict):
-                cur[part] = nxt
-            else:
-                return False
+            cur[part] = nxt
         cur = nxt
     return False
 

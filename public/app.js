@@ -3838,6 +3838,7 @@ const acfgFields = document.getElementById('acfg-fields');
 const acfgRaw = document.getElementById('acfg-raw');
 const acfgPathInput = document.getElementById('acfg-path-input');
 const acfgSyncBtn = document.getElementById('acfg-sync-btn');
+const acfgSyncSecrets = document.getElementById('acfg-sync-secrets');
 let acfgCustomPath = '';
 
 // 每工具可编辑字段 → 显示名/类型/占位
@@ -4009,7 +4010,8 @@ acfgSyncBtn.onclick = async () => {
     const r = await api('/api/agent-config/sync', {
       method: 'POST',
       body: JSON.stringify({ tool: acfgTool.value,
-                             path: acfgCustomPath || undefined })
+                             path: acfgCustomPath || undefined,
+                             includeSecrets: acfgSyncSecrets.checked })
     });
     if (r.ok) {
       const lines = (r.changed || []).join('\n');

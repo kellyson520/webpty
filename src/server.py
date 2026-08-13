@@ -762,14 +762,16 @@ class Server:
             # Import the agent CLI's OWN config (codex config.toml,
             # reasonix [[providers]], claude settings.json, …) into
             # webpty's provider registry + tool.provider mapping so the
-            # two stay in sync. Secrets are never imported — api keys live
-            # in the agents' env files, not in webpty's registry.
-            from agent_config import read_native
+            # two stay in sync. Secrets are NOT imported by default; pass
+            # includeSecrets: true to also import api keys (codex env_key
+            # from the service environment, claude settings.json env, …).
+            from agent_config import read_agent_env_secret, read_native
             body = await self._read_json(reader, headers)
             tool = str(body.get("tool") or "")
             if tool not in _AGENT_CONFIG_TOOLS:
                 return await self._send_json(writer, 400,
                                              {"error": "unknown tool"}, headers)
+            include_secrets = bool(body.get("includeSecrets"))
             explicit = str(body.get("path") or "").strip() or None
             native = read_native(tool, explicit)
             if native is None:
@@ -780,6 +782,17 @@ class Server:
             data = native["data"]
             changed: list[str] = []
             providers = dict(self.config.get("providers") or {})
+
+            def import_secret(pname: str, value: str | None) -> None:
+                """Opt-in api key import (includeSecrets) — value itself is
+                never echoed back in the response."""
+                if not include_secrets or not value:
+                    return
+                p = providers.get(pname)
+                if p is None or p.get("apiKey") == value:
+                    return
+                p["apiKey"] = value
+                changed.append(f"providers.{pname}.apiKey (set)")
             tools = dict(self.config.get("tools") or {})
             tool_cfg = dict(tools.get(tool) or {})
 
@@ -819,12 +832,19 @@ class Server:
                             providers[name] = {"baseUrl": base_url,
                                                "models": [model] if model else []}
                             changed.append(f"providers.{name} (new)")
+                            match = name
                         else:
                             if str(providers[match].get("baseUrl")) != base_url:
                                 providers[match]["baseUrl"] = base_url
                                 changed.append(f"providers.{match}.baseUrl")
                             if model:
                                 adopt_model(match, model)
+                        # env_key names the env var holding this provider's
+                        # api key (CODEX_API_KEY etc.) — already loaded in
+                        # the webpty service environment.
+                        env_key = str(mp.get("env_key") or "").strip()
+                        if env_key:
+                            import_secret(match, read_agent_env_secret(env_key))
                 if active:
                     # tools.<tool>.provider → the provider that matches the
                     # agent's ACTIVE model_provider (by name, then base_url).
@@ -857,6 +877,12 @@ class Server:
                             if tool_cfg.get("provider") != match:
                                 tool_cfg["provider"] = match
                                 changed.append(f"tools.{tool}.provider={match}")
+                        # api_key_env names the env var (or ~/.reasonix/.env
+                        # entry) holding the key for this provider.
+                        env_key = str(first.get("api_key_env") or "").strip()
+                        if env_key:
+                            import_secret(match or "reasonix",
+                                          read_agent_env_secret(env_key))
             elif tool in ("cursor-agent", "agy"):
                 base_url = str(data.get("base_url") or "").strip()
                 model = str(data.get("model") or "")
@@ -888,6 +914,10 @@ class Server:
                     elif str(p.get("baseUrl")) != burl:
                         p["baseUrl"] = burl
                         changed.append("providers.anthropic.baseUrl")
+                # The key lives in settings.json itself (env.AUTH_TOKEN).
+                if isinstance(env, dict):
+                    import_secret("anthropic",
+                                  str(env.get("ANTHROPIC_AUTH_TOKEN") or "") or None)
             elif tool == "gemini":
                 burl = str(data.get("baseUrl") or "").strip()
                 if burl:
@@ -898,6 +928,35 @@ class Server:
                     elif str(p.get("baseUrl")) != burl:
                         p["baseUrl"] = burl
                         changed.append("providers.gemini.baseUrl")
+                import_secret("gemini", str(data.get("apiKey") or "") or None)
+            elif tool == "opencode":
+                # opencode.json: provider is a string or an object with
+                # options.baseURL / options.apiKey.
+                model = str(data.get("model") or "")
+                prov = data.get("provider")
+                burl = ""
+                if isinstance(prov, dict):
+                    opts = prov.get("options")
+                    if isinstance(opts, dict):
+                        burl = str(opts.get("baseURL") or "").strip()
+                if burl:
+                    match = match_by_url(burl)
+                    if match is None:
+                        providers["opencode"] = {"baseUrl": burl,
+                                                 "models": [model] if model else []}
+                        changed.append("providers.opencode (new)")
+                        match = "opencode"
+                    else:
+                        if str(providers[match].get("baseUrl")) != burl:
+                            providers[match]["baseUrl"] = burl
+                            changed.append(f"providers.{match}.baseUrl")
+                        if model:
+                            adopt_model(match, model)
+                    if tool_cfg.get("provider") != match:
+                        tool_cfg["provider"] = match
+                        changed.append(f"tools.{tool}.provider={match}")
+                    if isinstance(prov, dict) and isinstance(prov.get("options"), dict):
+                        import_secret(match, str(prov["options"].get("apiKey") or "") or None)
             else:
                 return await self._send_json(
                     writer, 400,

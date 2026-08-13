@@ -47,18 +47,25 @@ switch between live sessions with a swipe.
   **纯 Python、零运行时依赖** — 仅用标准库（asyncio + pty）；无 npm、
   无 node_modules。
 - **Agent config editor + sync** — edit each agent CLI's own config file
-  (codex / reasonix / claude / gemini / …) with precise line-level TOML
-  replacement and secret masking; a **custom path** field reaches configs
-  outside `$HOME` (or `WEBPTY_AGENT_CONFIG_ROOTS` allow-lists extra
-  roots), and **⇄ 同步到 webpty** imports the agent's active
-  `[model_providers]` into webpty's provider registry +
-  `tools.<tool>.provider` (secrets are never imported).
+  (codex / reasonix / claude / gemini / opencode / …) with precise
+  line-level TOML / JSON replacement and secret masking; a **custom path**
+  field reaches configs outside `$HOME` (or
+  `WEBPTY_AGENT_CONFIG_ROOTS` allow-lists extra roots), and **⇄ 同步到
+  webpty** imports the agent's active `[model_providers]` /
+  `[[providers]]` / `provider.options` into webpty's provider registry
+  + `tools.<tool>.provider`. Secrets are not imported by default — the
+  **包含密钥** checkbox (or `includeSecrets: true`) also imports api keys
+  from the agents' env files (`env_key` / `api_key_env` /
+  settings.json env), and responses never echo key values.
   **Agent 配置编辑 + 同步** — 精准行级替换编辑各 agent CLI 自己的配置
-  （codex / reasonix / claude / gemini / …）并掩蔽密钥；**自定义路径**可
-  直连 `$HOME` 之外的配置（或通过 `WEBPTY_AGENT_CONFIG_ROOTS` 允许
-  额外根目录）；**⇄ 同步到 webpty** 把 agent 当前生效的
-  `[model_providers]` 导入 webpty 的 providers 注册表与
-  `tools.<tool>.provider`（密钥永不导入）。
+  （codex / reasonix / claude / gemini / opencode / …）并掩蔽密钥；
+  **自定义路径**可直连 `$HOME` 之外的配置（或通过
+  `WEBPTY_AGENT_CONFIG_ROOTS` 允许额外根目录）；**⇄ 同步到 webpty** 把
+  agent 当前生效的 `[model_providers]` / `[[providers]]` /
+  `provider.options` 导入 webpty 的 providers 注册表与
+  `tools.<tool>.provider`。密钥默认不导入——勾选**包含密钥**（或
+  `includeSecrets: true`）后从 agent 的 env 文件导入 API 密钥，响应中
+  永不回显密钥值。
 
 ---
 
@@ -444,13 +451,13 @@ session manager, pty-host crash recovery, end-to-end HTTP/WebSocket
 behavior, plus the four compliance extensions (notify / cost / backup /
 migrate) end-to-end and front-end static checks (1 platform-skipped on
 POSIX). Run `python3 -m unittest discover -s test` — currently
-**358 tests, 0 failures** (version-dependent count; CI output is
+**362 tests, 0 failures** (version-dependent count; CI output is
 authoritative).
 
 212+ 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
 pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为、四大合规扩展（通知/成本/
 备份/迁移）全链路与前端静态检查（1 个平台跳过项）。运行
-`python3 -m unittest discover -s test`——当前 **358 个测试、0 失败**
+`python3 -m unittest discover -s test`——当前 **362 个测试、0 失败**
 （数量随版本变化，以 CI 输出为准）。
 
 ---

@@ -34,6 +34,8 @@ class AgentConfigTest(unittest.TestCase):
             "codex": [os.path.join(self.home, ".codex", "config.toml")],
             "claude": [os.path.join(self.home, ".claude", "settings.json")],
             "reasonix": [os.path.join(self.home, ".reasonix", "config.toml")],
+            "opencode": [os.path.join(self.home, ".config", "opencode",
+                                      "opencode.json")],
         }
 
     def _write(self, rel, content):
@@ -163,6 +165,40 @@ class AgentConfigTest(unittest.TestCase):
         parsed = tomllib.loads(content)  # 转义后必须是合法 TOML
         self.assertEqual(parsed["model_providers"]["prov"]["base_url"], raw)
         self.assertIn('"a\\"b\\\\c"', content)  # 文件里的转义形态
+
+    def test_opencode_json_provider_conversion(self):
+        """opencode provider 为字符串时,设置 base_url/api_key 转为对象形式;
+        model 直接替换。"""
+        p = self._write(".config/opencode/opencode.json",
+                        json.dumps({"model": "m1", "provider": "anthropic"}))
+        res = ac.update_config("opencode", {"base_url": "https://x/v1",
+                                            "model": "m2"})
+        self.assertTrue(res["ok"], res)
+        obj = json.load(open(p, encoding="utf-8"))
+        self.assertEqual(obj["model"], "m2")
+        self.assertEqual(obj["provider"]["options"]["baseURL"], "https://x/v1")
+        # api_key 写进同一个 options 对象
+        res = ac.update_config("opencode", {"api_key": "sk-1"})
+        self.assertTrue(res["ok"], res)
+        obj = json.load(open(p, encoding="utf-8"))
+        self.assertEqual(obj["provider"]["options"]["apiKey"], "sk-1")
+        self.assertEqual(obj["provider"]["options"]["baseURL"], "https://x/v1")
+
+    def test_env_secret_reader(self):
+        """read_agent_env_secret: 进程环境优先,回退 ~/.reasonix/.env。"""
+        with mock.patch.dict(os.environ, {"CODEX_API_KEY": "env-key"}):
+            self.assertEqual(ac.read_agent_env_secret("CODEX_API_KEY"),
+                             "env-key")
+        tmp = tempfile.mkdtemp(prefix="wp-envsec-")
+        os.makedirs(os.path.join(tmp, ".reasonix"), exist_ok=True)
+        with open(os.path.join(tmp, ".reasonix", ".env"),
+                  "w", encoding="utf-8") as f:
+            f.write("# comment\nDEEPSEEK_API_KEY = \"file-key\"\nOTHER=x\n")
+        with mock.patch.object(ac, "_HOME", tmp), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ac.read_agent_env_secret("DEEPSEEK_API_KEY"),
+                             "file-key")
+            self.assertIsNone(ac.read_agent_env_secret("MISSING"))
 
     def test_json_replace_env_values(self):
         p = self._write(".claude/settings.json", json.dumps({

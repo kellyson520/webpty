@@ -48,6 +48,8 @@ class ServerIntegrationTest(unittest.TestCase):
             "WEBPTY_PROJECTS_ROOT": cls.proj_root,
             "WEBPTY_PORT": str(cls.port),
             "WEBPTY_BIND_HOST": "127.0.0.1",
+            # agent-config sync includeSecrets 测试用密钥（服务器子进程环境）
+            "SYNC_TEST_KEY": "sk-secret-123",
         })
         cls.proc = subprocess.Popen(
             [sys.executable, os.path.join(_ROOT, "src", "server.py")],
@@ -689,6 +691,57 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertTrue(j["ok"])
         self.assertIn('model = "new"', open(cfg, encoding="utf-8").read())
         self.assertTrue(os.path.exists(cfg + ".bak"))
+
+    def test_agent_config_sync_include_secrets(self):
+        # includeSecrets 时导入 env 密钥;响应绝不回显密钥值;默认不导入。
+        tmp = tempfile.mkdtemp(prefix="wp-syncsec-")
+        cfg = os.path.join(tmp, "config.toml")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write('model_provider = "mine"\n'
+                    '[model_providers.mine]\n'
+                    'base_url = "https://sec.example/v1"\n'
+                    'env_key = "SYNC_TEST_KEY"\n')
+        st, j = self._req("/api/agent-config/sync", "POST",
+                          {"tool": "codex", "path": cfg,
+                           "includeSecrets": True})
+        self.assertEqual(st, 200)
+        self.assertTrue(any("apiKey" in c for c in j["changed"]), j)
+        self.assertNotIn("sk-secret-123", json.dumps(j))  # 不回显密钥
+        # API 响应掩蔽 apiKey;磁盘上是真实值
+        st, j = self._req("/api/config")
+        self.assertEqual(j["providers"]["mine"]["apiKey"], "****-123")
+        on_disk = json.load(open(os.path.join(self.data_dir, "config.json"),
+                                 encoding="utf-8"))
+        self.assertEqual(on_disk["providers"]["mine"]["apiKey"],
+                         "sk-secret-123")
+        # 不带 includeSecrets 的后续同步不动密钥
+        st, j = self._req("/api/agent-config/sync", "POST",
+                          {"tool": "codex", "path": cfg})
+        self.assertEqual(st, 200)
+        self.assertFalse(any("apiKey" in c for c in j["changed"]), j)
+        on_disk = json.load(open(os.path.join(self.data_dir, "config.json"),
+                                 encoding="utf-8"))
+        self.assertEqual(on_disk["providers"]["mine"]["apiKey"],
+                         "sk-secret-123")
+
+    def test_agent_config_sync_opencode(self):
+        # opencode.json 的 provider.options.baseURL + model 同步进注册表。
+        tmp = tempfile.mkdtemp(prefix="wp-ocsync-")
+        cfg = os.path.join(tmp, "opencode.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"model": "om-1",
+                       "provider": {"options":
+                                    {"baseURL": "https://oc.example/v1"}}}, f)
+        st, j = self._req("/api/agent-config/sync", "POST",
+                          {"tool": "opencode", "path": cfg})
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+        st, j = self._req("/api/config")
+        found = next((p for p in j["providers"].values()
+                      if p.get("baseUrl") == "https://oc.example/v1"), None)
+        self.assertIsNotNone(found)
+        self.assertIn("om-1", found.get("models", []))
+        self.assertEqual(j["tools"]["opencode"]["provider"], "opencode")
 
     def test_agent_config_sync_imports_provider(self):
         # codex config.toml 的 [model_providers] 段可同步进 webpty 的
