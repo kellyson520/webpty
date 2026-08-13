@@ -185,7 +185,10 @@ Service management / 服务管理：`journalctl -u webpty.service -f`、
 
 ### Requirements / 环境要求
 
-- **Python ≥ 3.10** (stdlib only — no pip packages required)
+- **Python ≥ 3.10** (stdlib only — no pip packages required). On 3.10,
+  the TOML config editor uses the vendored `tomli` backport
+  (`src/tomli/`) because `tomllib` only exists in 3.11+; 3.11+ uses
+  the stdlib module.
 - **Linux / macOS** (PTY via stdlib `pty`); **Windows** via pywinpty — see
   [Windows](#windows--windows-部署) below
   **Windows** 走 pywinpty——见下文 [Windows 部署](#windows--windows-部署)
@@ -428,13 +431,13 @@ session manager, pty-host crash recovery, end-to-end HTTP/WebSocket
 behavior, plus the four compliance extensions (notify / cost / backup /
 migrate) end-to-end and front-end static checks (1 platform-skipped on
 POSIX). Run `python3 -m unittest discover -s test` — currently
-**342 tests, 0 failures** (version-dependent count; CI output is
+**351 tests, 0 failures** (version-dependent count; CI output is
 authoritative).
 
 212+ 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
 pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为、四大合规扩展（通知/成本/
 备份/迁移）全链路与前端静态检查（1 个平台跳过项）。运行
-`python3 -m unittest discover -s test`——当前 **342 个测试、0 失败**
+`python3 -m unittest discover -s test`——当前 **351 个测试、0 失败**
 （数量随版本变化，以 CI 输出为准）。
 
 ---
