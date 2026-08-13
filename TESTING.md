@@ -70,7 +70,15 @@ service (production codex/reasonix sessions + headless Chromium).
 |---|---|
 | 新建 codex 会话 + 最小提示词 (`please reply with exactly: PONG_OK`) | ✅ **agent 真实回复 PONG_OK**——WS 输出流收到 24KB TUI 数据,全链路(WS→webpty→pty-host→codex CLI→AI provider→返回)闭合 |
 
-## 修复清单 / Bugs fixed (15)
+## 性能 / Performance (2026-08-14 实测)
+
+| 项目 | 数值 |
+|---|---|
+| API 延迟 (config/sessions/health) | p50=0.6ms, p99≈1ms |
+| 会话创建+启动 (bash) | 中位 6ms |
+| 输入→输出往返 | **17ms**(修复前 1002ms——见修复清单第 16 条) |
+
+## 修复清单 / Bugs fixed (16)
 
 - py3.10 tomllib 缺失(vendor tomli)
 - fs/list 403 守卫回归
@@ -83,6 +91,8 @@ service (production codex/reasonix sessions + headless Chromium).
 - REST 缺口(GET 单会话/GET budget/WS 404 前置/414/431)
 - TOML 段键转义、dict-as-key、NUL 400、auth 类型安全
 - 测试泄漏 5 处、DOM 契约、WS 上限可配置
+- **输出尾部整秒延迟**(has_pending select 超时错误:命令输出恒定 1002ms
+  延迟,修复后 17ms——性能级 bug,交互卡顿根源)
 
 ## 复现方法 / Reproduce
 
