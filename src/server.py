@@ -417,8 +417,19 @@ class Server:
             await self._route(method, target, headers, reader, writer)
         except HttpError as err:
             await self._send_json(writer, err.status, {"error": err.message}, headers)
-        except (ConnectionError, OSError):
+        except ConnectionError:
+            # Peer went away (reset/EOF mid-request) — nothing to answer.
             pass
+        # BUGFIX (live test): OSError used to be swallowed here too — and
+        # FileNotFoundError (agent CLI missing, e.g. claude) IS an OSError,
+        # so a failed spawn dropped the connection with NO response at all.
+        # Only peer-loss errors are silent; everything else becomes a 500.
+        except OSError as err:
+            log_error("http", err)
+            try:
+                await self._send_json(writer, 500, {"error": "internal server error"}, headers)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as err:  # noqa: BLE001 — last-resort: client gets a
             # JSON error instead of a dropped connection.
             log_error("http", err)

@@ -97,6 +97,27 @@ class GateBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"bad-token", body)
         self.assertIn(b"forbidden", body)
 
+    async def test_unhandled_oserror_returns_500_json(self):
+        """OSError(如 agent CLI 缺失的 FileNotFoundError)不得静默丢连接 —
+        必须回 500 JSON(此前 except (ConnectionError, OSError) 把它吞了,
+        spawn 失败时客户端收到空响应/连接重置)。"""
+        s = Server()
+
+        def boom(self, method, target, headers, reader, writer):
+            raise FileNotFoundError("claude missing")
+
+        orig = Server._route
+        Server._route = boom
+        try:
+            w = FakeWriter()
+            await s._handle_request(FakeReader("/app.js"), w)
+        finally:
+            Server._route = orig
+        self.assertIn("500", w.status_line or "")
+        body = b"".join(w.data)
+        self.assertIn(b"error", body)
+        self.assertNotIn(b"claude", body)  # 不泄露内部细节
+
     async def test_unhandled_exception_returns_500(self):
         """未捕获异常 → 500 JSON 通用文案(而非连接重置或泄露内部细节)。"""
         s = Server()
