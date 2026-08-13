@@ -356,6 +356,10 @@ class Server:
             try:
                 request_line = await asyncio.wait_for(
                     reader.readline(), timeout=REQUEST_READ_TIMEOUT)
+            except (asyncio.LimitOverrunError, ValueError):
+                # StreamReader's 64KB line cap (ValueError on ≤3.10,
+                # LimitOverrunError on 3.11+) — a clean 414, not a 500.
+                raise HttpError(414, "Request line too long")
             except (asyncio.TimeoutError, ConnectionError, OSError):
                 writer.close()
                 return
@@ -374,6 +378,8 @@ class Server:
                 try:
                     line = await asyncio.wait_for(
                         reader.readline(), timeout=REQUEST_READ_TIMEOUT)
+                except (asyncio.LimitOverrunError, ValueError):
+                    raise HttpError(431, "Header line too long")
                 except (asyncio.TimeoutError, ConnectionError, OSError):
                     writer.close()
                     return
@@ -1089,6 +1095,16 @@ class Server:
             return await self._send_json(writer, 200, {"ok": True}, headers)
 
         m = re.match(r"^/api/sessions/([^/]+)$", path)
+        if m and method == "GET":
+            # REST parity: single-session detail (the list endpoint is what
+            # the drawer polls, but GET-by-id is the expected REST shape and
+            # was previously a 404 for existing sessions).
+            view = self.sessions.public(m.group(1))
+            if view is None:
+                raise HttpError(404, "session not found")
+            return await self._send_json(writer, 200, view, headers)
+
+        m = re.match(r"^/api/sessions/([^/]+)$", path)
         if m and method == "PATCH":
             # Audit M3 (v24): rename a session.
             body = await self._read_json(reader, headers)
@@ -1250,6 +1266,11 @@ class Server:
         if path == "/api/cost/alerts" and method == "GET":
             return await self._send_json(
                 writer, 200, await self.cost.alerts(), headers)
+        if path == "/api/cost/budget" and method == "GET":
+            limit = float((self.config.get("budget") or {}).get("limit", 0.0) or 0.0)
+            return await self._send_json(writer, 200, {"limit": limit},
+                                         headers)
+
         if path == "/api/cost/budget" and method == "PUT":
             body = await self._read_json(reader, headers)
             if "limit" not in body:
@@ -1756,6 +1777,13 @@ class Server:
             await writer.drain()
             writer.close()
             return
+        if self.sessions.get(sid) is None:
+            # Unknown session: reject BEFORE upgrading (REST parity — a WS
+            # for a missing session used to get 101 then silence).
+            writer.write(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
         ws = await accept_websocket(reader, writer, headers, target)
         if ws is None:
             writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
@@ -2067,11 +2095,20 @@ class Server:
 
     @staticmethod
     def _status_text(status: int) -> str:
-        return {
-            200: "OK", 201: "Created", 400: "Bad Request", 403: "Forbidden",
-            404: "Not Found", 405: "Method Not Allowed", 413: "Payload Too Large",
-            431: "Request Header Fields Too Large", 500: "Internal Server Error",
-        }.get(status, "OK")
+        # Complete the map for every status the server emits — a missing
+        # entry used to render "HTTP/1.1 414 OK" etc.
+        text = {
+            200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized",
+            403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+            409: "Conflict", 413: "Payload Too Large", 414: "URI Too Long",
+            429: "Too Many Requests",
+            431: "Request Header Fields Too Large",
+            500: "Internal Server Error", 503: "Service Unavailable",
+        }.get(status)
+        if text:
+            return text
+        import http.client
+        return http.client.responses.get(status, "OK")
 
 
 async def _serve_client(server: Server, reader: asyncio.StreamReader,

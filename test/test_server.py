@@ -454,6 +454,76 @@ class ServerIntegrationTest(unittest.TestCase):
         await writer.drain()
         return ws, head
 
+    def test_sessions_get_single(self):
+        # REST 语义:按 id 取单个会话(此前对已存在会话返回 404)。
+        st, sess = self._req("/api/sessions", "POST",
+                             {"cwd": os.path.join(self.proj_root, "alpha"),
+                              "tool": "bash", "name": "single-get"})
+        sid = sess["id"]
+        st, j = self._req("/api/sessions/" + sid)
+        self.assertEqual(st, 200)
+        self.assertEqual(j["id"], sid)
+        self.assertEqual(j["name"], "single-get")
+        st, j = self._req("/api/sessions/00000000-0000-0000-0000-000000000000")
+        self.assertEqual(st, 404)
+        self._req("/api/sessions/" + sid, "DELETE")
+
+    def test_cost_budget_get_put(self):
+        # GET budget 此前 404;PUT 后 GET 反映新值。
+        st, j = self._req("/api/cost/budget")
+        self.assertEqual(st, 200)
+        self.assertIn("limit", j)
+        st, j = self._req("/api/cost/budget", "PUT", {"limit": 42.5})
+        self.assertEqual(st, 200)
+        st, j = self._req("/api/cost/budget")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["limit"], 42.5)
+        # 持久化
+        cfg = json.load(open(os.path.join(self.data_dir, "config.json"),
+                             encoding="utf-8"))
+        self.assertEqual(cfg.get("budget", {}).get("limit"), 42.5)
+        self._req("/api/cost/budget", "PUT", {"limit": 0})
+
+    def test_ws_missing_session_404(self):
+        # 不存在会话的 WS 升级必须在握手前 404(此前 101 后静默)。
+        import asyncio
+
+        async def run():
+            reader, writer = await asyncio_open_conn(self.port)
+            key = base64.b64encode(b"0123456789abcdef").decode()
+            writer.write(("GET /ws/sessions/00000000-0000-0000-0000-000000000000 "
+                          "HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                          "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+                          "Sec-WebSocket-Version: 13\r\n\r\n" % key).encode())
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readline(), 3)
+            writer.close()
+            return head
+
+        head = asyncio.run(run())
+        self.assertIn(b"404", head)
+        self.assertNotIn(b"101", head)
+
+    def test_oversized_request_line_414(self):
+        # 超过 64KB 的请求行 → 414(此前 LimitOverrunError → 500)。
+        s = socket.socket()
+        s.connect(("127.0.0.1", self.port))
+        s.sendall(b"GET /" + b"a" * 70000 + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+        s.settimeout(5)
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 8192:
+                    break
+        except OSError:
+            pass
+        s.close()
+        self.assertIn(b"414", data)
+
     def test_ws_echo(self):
         import asyncio
 
