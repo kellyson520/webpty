@@ -8,6 +8,11 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11 — vendored backport
+    import tomli as tomllib  # type: ignore[no-redef]
+
 import agent_config as ac  # noqa: E402
 
 
@@ -89,7 +94,6 @@ class AgentConfigTest(unittest.TestCase):
         content = open(p, encoding="utf-8").read()
         self.assertIn('model = "C:\\\\models\\\\gpt5"', content)
         # 转义后仍是合法 TOML
-        import tomllib
         parsed = tomllib.loads(content)
         self.assertEqual(parsed["model"], "C:\\models\\gpt5")
 

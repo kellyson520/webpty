@@ -18,6 +18,13 @@ import os
 import re
 from typing import Any
 
+# Python 3.11 ships tomllib in the stdlib; on 3.10 (Ubuntu 22.04 default
+# python3) fall back to the vendored tomli backport (src/tomli).
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover — Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
 _HOME = os.path.expanduser("~")
 
 # tool -> list of candidate config paths (first existing one wins)
@@ -199,7 +206,6 @@ def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> t
     # Refuse to edit files that aren't parseable TOML — never corrupt an
     # agent's native config further.
     try:
-        import tomllib
         parsed = tomllib.loads(content)
     except Exception:  # noqa: BLE001 — unparseable file: refuse to edit
         return content, False

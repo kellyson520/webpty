@@ -287,10 +287,9 @@ class Server:
         except OSError:
             pass
         for p in self.config.get("extraFolders", []):
-            # extraFolders entries starting with '.' are almost certainly
-            # mistakes; keep the drawer clean.
-            if os.path.basename(str(p).rstrip("/\\")).startswith("."):
-                continue
+            # ExtraFolders are EXPLICIT user additions (add-folder picker),
+            # so always show them — including dot-named ones like ~/.config.
+            # The dot-filter above only applies to the projects_root scan.
             push(p)
         out.sort(key=lambda x: x["name"].lower())
         return out
@@ -477,7 +476,8 @@ class Server:
             known = [os.path.realpath(x) for x in self.config.get("roots") or []] + \
                     [os.path.realpath(x) for x in self.config["extraFolders"]]
             exists = any(case_fold(x) == case_fold(p) for x in known)
-            is_auto = case_fold(os.path.dirname(p)) == case_fold(os.path.abspath(projects_root))
+            is_auto = (case_fold(os.path.dirname(p)) == case_fold(os.path.abspath(projects_root))
+                       and not os.path.basename(p).startswith("."))
             if not exists and not is_auto:
                 self.config["extraFolders"].append(p)
                 save_config(self.config)
@@ -566,11 +566,20 @@ class Server:
             }, headers)
 
         if path == "/api/fs/list" and method == "GET":
-            # Local trusted deployment: allow browsing anywhere so users can
-            # navigate up past the registered roots and add directories via
-            # POST /api/projects (which registers them as extraFolders).
-            # Only directory names are exposed, never file contents.
+            # Directory enumeration is restricted to registered roots (and
+            # their subdirs): deny arbitrary paths like /etc with 403.
+            # Folders outside the roots can still be added via the drawer's
+            # manual path input, which POSTs /api/projects (and registers
+            # them as extraFolders — they then become browsable).
             raw = query.get("path", [""])[0]
+            if raw:
+                req_path = os.path.abspath(raw)
+                allowed = [os.path.abspath(r)
+                           for r in (self.config.get("roots") or [])] + \
+                          [os.path.abspath(f)
+                           for f in (self.config.get("extraFolders") or [])]
+                if not is_path_under_roots(req_path, allowed):
+                    raise HttpError(403, "path outside registered roots")
             try:
                 entries = self._list_dir_entries(raw)
                 return await self._send_json(writer, 200, entries, headers)
