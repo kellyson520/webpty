@@ -563,9 +563,15 @@ def main() -> None:
             # flush (keeps latency low), 1s when idle — a host with no
             # sessions was waking 62×/s doing nothing (low-footprint core).
             _now = time.monotonic()
-            has_pending = any(
-                s.get("pending") and _now - s.get("last_flush", 0) >= FLUSH_DELAY
-                for s in sessions.values())
+            # BUGFIX (latency test): the old condition ALSO required
+            # now-last_flush >= FLUSH_DELAY — right after a flush, fresh
+            # pending output (the tail of a command's output arriving
+            # within 16ms) failed the check, the select timeout fell back
+            # to 1.0s, and the output was delayed a FULL second (the
+            # interactive terminal felt laggy). Any pending bytes must
+            # keep the timeout short; _flush_expired handles the due
+            # check itself.
+            has_pending = any(s.get("pending") for s in sessions.values())
             timeout = FLUSH_DELAY if has_pending else 1.0
             events = sel.select(timeout=timeout)
             _flush_expired(time.monotonic())

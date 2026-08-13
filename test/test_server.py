@@ -582,6 +582,53 @@ class ServerIntegrationTest(unittest.TestCase):
         self._req(f"/api/sessions/{sid}", "DELETE")
         self.assertTrue(seen, "session log output must hit disk promptly")
 
+    def test_pty_output_latency_low(self):
+        # Regression (perf): output tails were delayed a full second by a
+        # buggy has_pending condition in the pty-host main loop (select
+        # fell back to a 1s timeout right after a flush). After the fix a
+        # command's output arrives in <500ms (measured ~17ms; bug ~1001ms).
+        import asyncio
+
+        async def run():
+            st, sess = self._req("/api/sessions", "POST",
+                                 {"cwd": os.path.join(self.proj_root, "alpha"),
+                                  "tool": "bash", "name": "latency"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            ws, head = await self._ws_roundtrip(sid, b"")
+            self.assertIn(b"101", head)
+            # drain initial replay frames
+            end = time.time() + 1.2
+            while time.time() < end:
+                frame = await ws.recv(0.4)
+                if frame is None:
+                    break
+            token = "LAT" + str(int(time.time() * 1000))
+            mask = bytes([17, 34, 51, 68])  # 0x11 0x22 0x33 0x44
+            payload = ("echo " + token + "\r").encode()
+            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            t0 = time.monotonic()
+            ws.writer.write(bytes([129, 128 | len(payload)]) + mask + masked)
+            await ws.writer.drain()
+            tb = token.encode()
+            seen = 0
+            end = time.time() + 4
+            while time.time() < end and seen < 2:
+                frame = await ws.recv(0.5)
+                if frame is None:
+                    break
+                _op, data = frame
+                seen += data.count(tb)
+            elapsed = (time.monotonic() - t0) * 1000
+            await ws.close()
+            self._req(f"/api/sessions/{sid}/stop", "POST")
+            self._req(f"/api/sessions/{sid}", "DELETE")
+            return elapsed
+
+        ms = asyncio.run(run())
+        self.assertLess(ms, 500,
+                        f"output latency {ms:.0f}ms — regression (was ~1000ms)")
+
     def test_ws_reconnect_resumes_output(self):
         # 核心功能:WS 断线后 PTY 会话继续运行,重连后实时输出必须继续
         # (此前 reconnect 不去重窗口吞掉 len(recent) 字节的实时输出)。
