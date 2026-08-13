@@ -3126,6 +3126,11 @@ window.addEventListener('unhandledrejection', (ev) => {
   showFatal((ev.reason && (ev.reason.message || ev.reason)) || 'unhandled rejection');
 });
 function showFatal(msg) {
+  // BUGFIX (browser soak): xterm's internal ResizeObserver fires a
+  // benign "loop completed with undelivered notifications" warning at
+  // boot on some platforms — browser noise, NOT an app error. Filter
+  // before any DOM work, or an empty red fatal bar appears.
+  if (String(msg).indexOf('ResizeObserver loop') >= 0) return;
   let el = document.getElementById('webpty-fatal');
   if (!el) {
     el = document.createElement('div');

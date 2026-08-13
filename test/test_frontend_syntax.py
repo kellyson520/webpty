@@ -62,6 +62,14 @@ class FrontendSyntaxTest(unittest.TestCase):
         src = open(APP, encoding="utf-8").read()
         self.assertIn("const escapeHtml = esc;", src)
 
+    def test_fatal_bar_filters_resizeobserver_noise(self):
+        """浏览器浸泡实测:启动时 xterm 内部 ResizeObserver 触发一次良性
+        loop 警告,曾被 showFatal 显示成红色致命横幅。必须被过滤。"""
+        src = open(APP, encoding="utf-8").read()
+        idx = src.index("ResizeObserver loop")
+        window = src[max(0, idx - 260):idx + 60]
+        self.assertIn("return", window)  # 过滤(直接返回),而非仅注释
+
     def test_render_tabs_onclick_uses_defined_variable(self):
         """回归:8381e6f 起 tab.onclick 引用了未定义的 session(forEach
         参数是 s)——每次点击 tab 都抛 ReferenceError,tab 切换静默失效
