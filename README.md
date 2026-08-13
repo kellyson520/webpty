@@ -492,13 +492,13 @@ session manager, pty-host crash recovery, end-to-end HTTP/WebSocket
 behavior, plus the four compliance extensions (notify / cost / backup /
 migrate) end-to-end and front-end static checks (1 platform-skipped on
 POSIX). Run `python3 -m unittest discover -s test` — currently
-**362 tests, 0 failures** (version-dependent count; CI output is
+**374 tests, 0 failures** (version-dependent count; CI output is
 authoritative).
 
 212+ 个测试覆盖路径、参数解析、环形缓冲、认证、配置合并、会话管理、
 pty-host 崩溃自愈、端到端 HTTP/WebSocket 行为、四大合规扩展（通知/成本/
 备份/迁移）全链路与前端静态检查（1 个平台跳过项）。运行
-`python3 -m unittest discover -s test`——当前 **362 个测试、0 失败**
+`python3 -m unittest discover -s test`——当前 **374 个测试、0 失败**
 （数量随版本变化，以 CI 输出为准）。
 
 ---
