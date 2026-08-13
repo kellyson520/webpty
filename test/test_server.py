@@ -651,6 +651,58 @@ class ServerIntegrationTest(unittest.TestCase):
         st, _ = self._req("/api/fs/list")
         self.assertEqual(st, 200)
 
+    def test_fs_list_symlink_escape_blocked(self):
+        # roots 内指向外部的符号链接不能被枚举（realpath 二次校验）。
+        link = os.path.join(self.proj_root, "alpha", "escape")
+        try:
+            os.symlink("/etc", link)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        st, j = self._req("/api/fs/list?path=" + urllib.parse.quote(link))
+        self.assertEqual(st, 403)
+        self.assertIn("outside", j.get("error", ""))
+
+    def test_agent_config_read_update_explicit_path(self):
+        # 显式 path 直连任意配置文件（隔离放宽），.bak 备份仍保留。
+        tmp = tempfile.mkdtemp(prefix="wp-ext-")
+        cfg = os.path.join(tmp, "remote.toml")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write('model = "old"\n')
+        st, j = self._req("/api/agent-config/read?tool=codex&path="
+                          + urllib.parse.quote(cfg))
+        self.assertEqual(st, 200)
+        self.assertIn("old", j["content"])
+        st, j = self._req("/api/agent-config/update", "PUT",
+                          {"tool": "codex", "values": {"model": "new"},
+                           "path": cfg})
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+        self.assertIn('model = "new"', open(cfg, encoding="utf-8").read())
+        self.assertTrue(os.path.exists(cfg + ".bak"))
+
+    def test_agent_config_sync_imports_provider(self):
+        # codex config.toml 的 [model_providers] 段可同步进 webpty 的
+        # providers 注册表 + tools.codex.provider 映射。
+        tmp = tempfile.mkdtemp(prefix="wp-sync-")
+        cfg = os.path.join(tmp, "config.toml")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write('model_provider = "mine"\nmodel = "m-1"\n'
+                    '[model_providers.mine]\n'
+                    'base_url = "https://sync.example/v1"\n')
+        st, j = self._req("/api/agent-config/sync", "POST",
+                          {"tool": "codex", "path": cfg})
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+        st, j = self._req("/api/config")
+        self.assertEqual(j["providers"]["mine"]["baseUrl"],
+                         "https://sync.example/v1")
+        self.assertEqual(j["tools"]["codex"]["provider"], "mine")
+        # 幂等：第二次同步无变化
+        st, j = self._req("/api/agent-config/sync", "POST",
+                          {"tool": "codex", "path": cfg})
+        self.assertEqual(st, 200)
+        self.assertEqual(j["changed"], [])
+
 class ServerUnitTest(unittest.IsolatedAsyncioTestCase):
     """Pure unit tests for server helper functions (no server process)."""
 

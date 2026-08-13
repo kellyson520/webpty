@@ -3836,6 +3836,9 @@ const acfgTool = document.getElementById('acfg-tool');
 const acfgPath = document.getElementById('acfg-path');
 const acfgFields = document.getElementById('acfg-fields');
 const acfgRaw = document.getElementById('acfg-raw');
+const acfgPathInput = document.getElementById('acfg-path-input');
+const acfgSyncBtn = document.getElementById('acfg-sync-btn');
+let acfgCustomPath = '';
 
 // 每工具可编辑字段 → 显示名/类型/占位
 const ACFG_FIELD_META = {
@@ -3869,13 +3872,19 @@ async function openAcfgPanel() {
 async function loadAcfgTool() {
   const tool = acfgTool.value;
   const info = acfgList[tool] || {};
-  acfgPath.textContent = info.exists ? (info.path || '') : '未找到配置文件';
+  acfgCustomPath = acfgPathInput.value.trim();
+  const qs = acfgCustomPath ? `&path=${encodeURIComponent(acfgCustomPath)}` : '';
+  acfgPath.textContent = info.exists ? (info.path || '') : (acfgCustomPath || '未找到配置文件');
   acfgRaw.hidden = true;
-  if (!info.exists) {
-    acfgFields.innerHTML = `<div class="empty-tip">该工具暂无配置文件（webpty 只在发现文件时展示）</div>`;
+  if (!info.exists && !acfgCustomPath) {
+    acfgFields.innerHTML = `<div class="empty-tip">该工具暂无配置文件（可填写自定义路径直连外部配置）</div>`;
     return;
   }
-  const r = await api(`/api/agent-config/read?tool=${encodeURIComponent(tool)}`).catch(() => ({}));
+  const r = await api(`/api/agent-config/read?tool=${encodeURIComponent(tool)}${qs}`).catch(() => ({}));
+  if (r.error) {
+    acfgFields.innerHTML = `<div class="empty-tip">读取失败: ${esc(r.error)}</div>`;
+    return;
+  }
   const content = r.content || '';
   acfgRaw.textContent = content;
   const fields = await deriveAcfgFields(tool, content);
@@ -3914,7 +3923,10 @@ async function deriveAcfgFields(tool, content) {
 }
 
 function renderAcfgFields(tool, values, content) {
-  const editable = (acfgList[tool] || {}).editable;
+  // A custom path makes the file editable even when auto-discovery didn't
+  // find it (e.g. configs outside $HOME); unsupported formats still get
+  // rejected server-side with a clear error.
+  const editable = (acfgList[tool] || {}).editable || !!acfgCustomPath;
   if (!editable) {
     acfgFields.innerHTML = `<div class="empty-tip">该工具配置当前为只读（YAML 等格式暂不支持编辑）</div>`;
     return;
@@ -3958,7 +3970,9 @@ function renderAcfgFields(tool, values, content) {
       if (!Object.keys(values2).length) { alert('没有输入任何修改'); return; }
       try {
         const r = await api('/api/agent-config/update', {
-          method: 'PUT', body: JSON.stringify({ tool, values: values2 }) });
+          method: 'PUT',
+          body: JSON.stringify({ tool, values: values2,
+                                 path: acfgCustomPath || undefined }) });
         // Audit M9 (v24): .bak feedback + provider-switch hint.
         const bakNote = r.ok ? '（原配置已备份为 .bak）' : '';
         const modelHint = values2.model && !values2.base_url && !values2.provider
@@ -3982,3 +3996,32 @@ document.getElementById('acfg-toggle-raw').onclick = () => {
   acfgRaw.hidden = !acfgRaw.hidden;
 };
 document.getElementById('agents-acfg-btn').onclick = openAcfgPanel;
+
+// 自定义路径变更 → 重读（留空则回到自动发现）。
+acfgPathInput.addEventListener('change', () => { loadAcfgTool(); });
+
+// 同步：把 agent CLI 自己的配置（codex config.toml、reasonix
+// [[providers]]、claude settings.json …）导入 webpty 的 providers 注册表
+// 与 tools.<tool>.provider 映射。密钥永不导入（key 在 agent 的 env 文件里）。
+acfgSyncBtn.onclick = async () => {
+  acfgSyncBtn.disabled = true;
+  try {
+    const r = await api('/api/agent-config/sync', {
+      method: 'POST',
+      body: JSON.stringify({ tool: acfgTool.value,
+                             path: acfgCustomPath || undefined })
+    });
+    if (r.ok) {
+      const lines = (r.changed || []).join('\n');
+      alert(lines
+        ? `已同步到 webpty:\n${lines}`
+        : (r.note || '已是最新，无变化'));
+    } else {
+      alert('同步失败: ' + zhErr(r.error || ''));
+    }
+  } catch (e) {
+    alert('同步失败: ' + zhErr(e.message));
+  } finally {
+    acfgSyncBtn.disabled = false;
+  }
+};

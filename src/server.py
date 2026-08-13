@@ -580,6 +580,13 @@ class Server:
                            for f in (self.config.get("extraFolders") or [])]
                 if not is_path_under_roots(req_path, allowed):
                     raise HttpError(403, "path outside registered roots")
+                # Symlink escape guard: a link inside a registered root that
+                # points outside it (e.g. → /etc) must not make outside dirs
+                # listable — resolve and re-check against resolved roots.
+                allowed_real = [os.path.realpath(r) for r in allowed]
+                if not is_path_under_roots(os.path.realpath(req_path),
+                                           allowed_real):
+                    raise HttpError(403, "path outside registered roots")
             try:
                 entries = self._list_dir_entries(raw)
                 return await self._send_json(writer, 200, entries, headers)
@@ -725,7 +732,9 @@ class Server:
             if tool not in _AGENT_CONFIG_TOOLS:
                 return await self._send_json(writer, 400,
                                              {"error": "unknown tool"}, headers)
-            return await self._send_json(writer, 200, read_config(tool), headers)
+            explicit = (query.get("path") or [""])[0].strip() or None
+            return await self._send_json(writer, 200, read_config(tool, explicit),
+                                         headers)
 
         if path == "/api/agent-config/update" and method == "PUT":
             from agent_config import update_config
@@ -735,9 +744,168 @@ class Server:
             if tool not in _AGENT_CONFIG_TOOLS:
                 return await self._send_json(writer, 400,
                                              {"error": "unknown tool"}, headers)
-            res = update_config(tool, values)
+            explicit = str(body.get("path") or "").strip() or None
+            res = update_config(tool, values, explicit)
             status = 200 if res.get("ok") else 400
             return await self._send_json(writer, status, res, headers)
+
+        if path == "/api/agent-config/sync" and method == "POST":
+            # Import the agent CLI's OWN config (codex config.toml,
+            # reasonix [[providers]], claude settings.json, …) into
+            # webpty's provider registry + tool.provider mapping so the
+            # two stay in sync. Secrets are never imported — api keys live
+            # in the agents' env files, not in webpty's registry.
+            from agent_config import read_native
+            body = await self._read_json(reader, headers)
+            tool = str(body.get("tool") or "")
+            if tool not in _AGENT_CONFIG_TOOLS:
+                return await self._send_json(writer, 400,
+                                             {"error": "unknown tool"}, headers)
+            explicit = str(body.get("path") or "").strip() or None
+            native = read_native(tool, explicit)
+            if native is None:
+                return await self._send_json(
+                    writer, 400,
+                    {"ok": False, "error": "no config file or unparseable"},
+                    headers)
+            data = native["data"]
+            changed: list[str] = []
+            providers = dict(self.config.get("providers") or {})
+            tools = dict(self.config.get("tools") or {})
+            tool_cfg = dict(tools.get(tool) or {})
+
+            def match_by_url(url: str):
+                return next((n for n, p in providers.items()
+                             if isinstance(p, dict)
+                             and str(p.get("baseUrl")) == url), None)
+
+            def adopt_model(pname: str, model: str) -> None:
+                p = providers[pname]
+                models = p.get("models")
+                if not isinstance(models, list):
+                    p["models"] = [model]
+                    changed.append(f"providers.{pname}.models")
+                elif model and model not in models:
+                    models.append(model)
+                    changed.append(f"providers.{pname}.models")
+
+            if tool == "codex":
+                active = str(data.get("model_provider") or "")
+                model = str(data.get("model") or "")
+                mps = data.get("model_providers")
+                url_of: dict[str, str] = {}
+                if isinstance(mps, dict):
+                    for name, mp in mps.items():
+                        if not isinstance(mp, dict):
+                            continue
+                        base_url = str(mp.get("base_url") or "").strip()
+                        if not base_url:
+                            continue
+                        name = str(name)
+                        url_of[name] = base_url
+                        # match is always a provider NAME (a dict value in
+                        # the registry must never be used as a dict key).
+                        match = name if name in providers else match_by_url(base_url)
+                        if match is None:
+                            providers[name] = {"baseUrl": base_url,
+                                               "models": [model] if model else []}
+                            changed.append(f"providers.{name} (new)")
+                        else:
+                            if str(providers[match].get("baseUrl")) != base_url:
+                                providers[match]["baseUrl"] = base_url
+                                changed.append(f"providers.{match}.baseUrl")
+                            if model:
+                                adopt_model(match, model)
+                if active:
+                    # tools.<tool>.provider → the provider that matches the
+                    # agent's ACTIVE model_provider (by name, then base_url).
+                    pname = match_by_url(url_of.get(active) or "") or active
+                    if tool_cfg.get("provider") != pname:
+                        tool_cfg["provider"] = pname
+                        changed.append(f"tools.{tool}.provider={pname}")
+            elif tool == "reasonix":
+                model = str(data.get("default_model") or "")
+                provs = data.get("providers")
+                if isinstance(provs, list) and provs and isinstance(provs[0], dict):
+                    first = provs[0]
+                    base_url = str(first.get("base_url") or "").strip()
+                    p_model = str(first.get("model") or "")
+                    if base_url:
+                        match = match_by_url(base_url)
+                        if match is None:
+                            name = "reasonix"
+                            providers[name] = {"baseUrl": base_url,
+                                               "models": [p_model or model] if (p_model or model) else []}
+                            changed.append(f"providers.{name} (new)")
+                            tool_cfg["provider"] = name
+                            changed.append(f"tools.{tool}.provider={name}")
+                        else:
+                            if str(providers[match].get("baseUrl")) != base_url:
+                                providers[match]["baseUrl"] = base_url
+                                changed.append(f"providers.{match}.baseUrl")
+                            if p_model or model:
+                                adopt_model(match, p_model or model)
+                            if tool_cfg.get("provider") != match:
+                                tool_cfg["provider"] = match
+                                changed.append(f"tools.{tool}.provider={match}")
+            elif tool in ("cursor-agent", "agy"):
+                base_url = str(data.get("base_url") or "").strip()
+                model = str(data.get("model") or "")
+                if base_url:
+                    match = match_by_url(base_url)
+                    if match is None:
+                        providers[tool] = {"baseUrl": base_url,
+                                           "models": [model] if model else []}
+                        changed.append(f"providers.{tool} (new)")
+                        tool_cfg["provider"] = tool
+                        changed.append(f"tools.{tool}.provider={tool}")
+                    else:
+                        if str(providers[match].get("baseUrl")) != base_url:
+                            providers[match]["baseUrl"] = base_url
+                            changed.append(f"providers.{match}.baseUrl")
+                        if model:
+                            adopt_model(match, model)
+                        if tool_cfg.get("provider") != match:
+                            tool_cfg["provider"] = match
+                            changed.append(f"tools.{tool}.provider={match}")
+            elif tool == "claude":
+                env = data.get("env")
+                if isinstance(env, dict) and env.get("ANTHROPIC_BASE_URL"):
+                    burl = str(env["ANTHROPIC_BASE_URL"]).strip()
+                    p = providers.get("anthropic")
+                    if p is None:
+                        providers["anthropic"] = {"baseUrl": burl, "models": []}
+                        changed.append("providers.anthropic (new)")
+                    elif str(p.get("baseUrl")) != burl:
+                        p["baseUrl"] = burl
+                        changed.append("providers.anthropic.baseUrl")
+            elif tool == "gemini":
+                burl = str(data.get("baseUrl") or "").strip()
+                if burl:
+                    p = providers.get("gemini")
+                    if p is None:
+                        providers["gemini"] = {"baseUrl": burl, "models": []}
+                        changed.append("providers.gemini (new)")
+                    elif str(p.get("baseUrl")) != burl:
+                        p["baseUrl"] = burl
+                        changed.append("providers.gemini.baseUrl")
+            else:
+                return await self._send_json(
+                    writer, 400,
+                    {"ok": False, "error": f"sync not supported for {tool}"},
+                    headers)
+            if not changed:
+                return await self._send_json(
+                    writer, 200, {"ok": True, "changed": [],
+                                  "note": "already in sync"}, headers)
+            self.config["providers"] = providers
+            if tool_cfg:
+                tools[tool] = tool_cfg
+                self.config["tools"] = tools
+            save_config(self.config)
+            return await self._send_json(writer, 200,
+                                         {"ok": True, "changed": changed},
+                                         headers)
 
         if path == "/api/sessions" and method == "GET":
             limit_q = (query.get("limit") or [""])[0]

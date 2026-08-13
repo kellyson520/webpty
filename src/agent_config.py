@@ -121,13 +121,45 @@ def _real_home() -> str:
     return os.path.realpath(_HOME)
 
 
+def extra_roots() -> list[str]:
+    """Additional allowed config roots from WEBPTY_AGENT_CONFIG_ROOTS
+    (os.pathsep-separated). Lets webpty touch agent configs that live
+    outside $HOME (custom CODEX_HOME, shared configs on other mounts, …)
+    without pip-deps — direct external contact, opt-in per deployment."""
+    raw = os.environ.get("WEBPTY_AGENT_CONFIG_ROOTS") or ""
+    out: list[str] = []
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(os.path.realpath(part))
+        except OSError:
+            continue
+    return out
+
+
+def _allowed_roots() -> list[str]:
+    roots = [_real_home()]
+    for r in extra_roots():
+        if r not in roots:
+            roots.append(r)
+    return roots
+
+
+def _under_allowed_roots(p: str) -> bool:
+    return any(p == r or p.startswith(r + os.sep) for r in _allowed_roots())
+
+
 def config_path(tool: str) -> str | None:
-    """Return the existing config path for a tool, or None."""
+    """Return the existing config path for a tool, or None.
+
+    Candidates must live under $HOME or a WEBPTY_AGENT_CONFIG_ROOTS entry.
+    """
     for cand in AGENT_CONFIG_PATHS.get(tool, []):
         p = os.path.realpath(cand)
-        home = _real_home()
-        if not (p == home or p.startswith(home + os.sep)):
-            continue  # not under $HOME — skip
+        if not _under_allowed_roots(p):
+            continue  # outside every allowed root — skip
         if os.path.isfile(p):
             return p
     return None
@@ -148,23 +180,62 @@ def list_configs() -> dict[str, dict[str, Any]]:
     return out
 
 
-def read_config(tool: str) -> dict[str, Any]:
-    path = config_path(tool)
-    if not path:
-        return {"ok": False, "error": "no config file"}
+def _read_capped(path: str) -> tuple[str | None, str | None]:
+    """Read a config file with the size cap; returns (content, error)."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             size = os.fstat(f.fileno()).st_size
             if size > MAX_READ_BYTES:
-                return {"ok": False, "error": "config too large"}
-            content = f.read()
+                return None, "config too large"
+            return f.read(), None
     except OSError as err:
-        return {"ok": False, "error": str(err)}
+        return None, str(err)
+
+
+def read_config(tool: str, path: str | None = None) -> dict[str, Any]:
+    if path:
+        # Explicit path: direct contact with any config file the user
+        # points at (size cap + secret masking still apply).
+        target = os.path.abspath(str(path))
+        if not os.path.isfile(target):
+            return {"ok": False, "error": "config file not found"}
+    else:
+        target = config_path(tool)
+        if not target:
+            return {"ok": False, "error": "no config file"}
+    content, err = _read_capped(target)
+    if err is not None:
+        return {"ok": False, "error": err}
     # Mask secrets in the raw view (Issue 2.2): keys like
     # api_key / ANTHROPIC_AUTH_TOKEN / password must not be sent to the
     # browser in plaintext. TOML `key = "value"` and JSON "key": "value".
-    content = _mask_secret_values(content)
-    return {"ok": True, "path": path, "content": content}
+    content = _mask_secret_values(content or "")
+    return {"ok": True, "path": target, "content": content}
+
+
+def read_native(tool: str, path: str | None = None) -> dict[str, Any] | None:
+    """Parse the agent's native config into a dict (no masking).
+
+    Returns None when the file is missing/unparseable — used by the sync
+    import (server-side) to mirror the agent CLI's own settings."""
+    target = path or config_path(tool)
+    if not target or not os.path.isfile(target):
+        return None
+    content, err = _read_capped(target)
+    if err is not None or content is None:
+        return None
+    try:
+        if tool in TOML_KEYS:
+            data = tomllib.loads(content)
+        elif tool in JSON_KEYS:
+            data = json.loads(content)
+        else:
+            return None
+    except Exception:  # noqa: BLE001 — unparseable native config
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {"path": target, "data": data}
 
 
 _SECRET_KEY_RE = re.compile(
@@ -186,6 +257,15 @@ def _mask_secret_values(text: str) -> str:
     return _SECRET_KEY_RE2.sub(_mask, out)
 
 
+def _esc_toml_str(value: str) -> str:
+    """Proper TOML string escaping: backslash, quote, control chars."""
+    return (value.replace("\\", "\\\\")
+                 .replace('"', '\\"')
+                 .replace("\n", "\\n")
+                 .replace("\r", "\\r")
+                 .replace("\t", "\\t"))
+
+
 def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> tuple[str, bool]:
     """Replace a TOP-LEVEL key's line in TOML text; preserve everything else.
 
@@ -194,13 +274,7 @@ def _replace_toml(content: str, key: str, fmt: tuple[str, str], value: str) -> t
     never mistaken for the top-level one. Escapes the value correctly.
     """
     pattern, template = fmt
-    # Proper TOML escaping: backslash, quote, control chars.
-    esc = (value.replace("\\", "\\\\")
-                .replace('"', '\\"')
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t"))
-    new_line = template.format(esc)
+    new_line = template.format(_esc_toml_str(value))
     lines = content.splitlines(keepends=True)
 
     # Refuse to edit files that aren't parseable TOML — never corrupt an
@@ -294,15 +368,19 @@ def _set_toml_section_key(content: str, section_re: str, dotted_key: str,
 
     out = list(lines)
     replaced = False
+    # Values must be TOML-escaped like top-level ones (a quote/backslash in
+    # the value otherwise corrupts the file), and the replacement must be a
+    # function so re.sub treats it literally (no \1 group escapes).
+    esc = _esc_toml_str(raw)
     for i in range(start, end):
         stripped = out[i].strip()
         if re.match(line_re, stripped):
-            out[i] = re.sub(line_re, fmt.format(raw), out[i])
+            out[i] = re.sub(line_re, lambda _m: fmt.format(esc), out[i])
             replaced = True
             break
     if not replaced:
         # Key absent in the block: append inside it (before next section or EOF).
-        out.insert(end, f"{target} = {fmt.format(raw).split(' = ', 1)[1]}\n")
+        out.insert(end, f"{target} = {fmt.format(esc).split(' = ', 1)[1]}\n")
         replaced = True
     return "".join(out), replaced
 
@@ -327,17 +405,27 @@ def _set_json_path(obj: Any, path: str, value: Any) -> bool:
     return False
 
 
-def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
-    """Precisely replace the given keys in the tool's config file."""
-    path = config_path(tool)
-    if not path:
-        return {"ok": False, "error": "no config file"}
+def update_config(tool: str, values: dict[str, Any],
+                  path: str | None = None) -> dict[str, Any]:
+    """Precisely replace the given keys in the tool's config file.
+
+    `path` is an optional explicit target for direct external contact —
+    any existing file can be edited (size cap, .bak backup, atomic write
+    and TOML/JSON validity checks still apply)."""
+    if path:
+        target = os.path.abspath(str(path))
+        if not os.path.isfile(target):
+            return {"ok": False, "error": "config file not found"}
+    else:
+        target = config_path(tool)
+        if not target:
+            return {"ok": False, "error": "no config file"}
     fmt = "toml" if tool in TOML_KEYS else ("json" if tool in JSON_KEYS else None)
     if fmt is None:
         return {"ok": False, "error": f"unsupported format for {tool}"}
 
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError as err:
         return {"ok": False, "error": str(err)}
@@ -412,20 +500,20 @@ def update_config(tool: str, values: dict[str, Any]) -> dict[str, Any]:
     # (bad api_key etc.) can always be reverted by hand.
     try:
         import shutil
-        shutil.copy2(path, path + ".bak")
+        shutil.copy2(target, target + ".bak")
     except OSError:
         pass  # backup is best-effort
     try:
-        mode = os.stat(path).st_mode & 0o777
-        tmp = f"{path}.webpty-tmp.{os.getpid()}"
+        mode = os.stat(target).st_mode & 0o777
+        tmp = f"{target}.webpty-tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.replace(tmp, target)
     except OSError as err:
         return {"ok": False, "error": str(err)}
 
-    return {"ok": True, "changed": changed, "path": path}
+    return {"ok": True, "changed": changed, "path": target}
 
 
 def _redact(value: str) -> str:

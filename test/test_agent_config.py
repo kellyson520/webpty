@@ -127,6 +127,43 @@ class AgentConfigTest(unittest.TestCase):
         with open(bak, encoding="utf-8") as f:
             self.assertIn("gpt-5", f.read())
 
+    def test_explicit_path_direct_contact(self):
+        """显式 path 可直连 $HOME 之外的配置文件（隔离放宽，外部直连）。"""
+        outer = os.path.join(self.tmp, "outside", "remote.toml")
+        os.makedirs(os.path.dirname(outer), exist_ok=True)
+        with open(outer, "w", encoding="utf-8") as f:
+            f.write('model = "old"\n')
+        res = ac.update_config("codex", {"model": "new"}, path=outer)
+        self.assertTrue(res["ok"], res)
+        content = open(outer, encoding="utf-8").read()
+        self.assertIn('model = "new"', content)
+        self.assertTrue(os.path.exists(outer + ".bak"))
+        rd = ac.read_config("codex", path=outer)
+        self.assertTrue(rd["ok"])
+        self.assertIn("new", rd["content"])
+
+    def test_explicit_path_missing_file_rejected(self):
+        res = ac.update_config("codex", {"model": "x"},
+                               path="/nonexistent/xx.toml")
+        self.assertFalse(res["ok"])
+        res = ac.read_config("codex", path="/nonexistent/xx.toml")
+        self.assertFalse(res["ok"])
+
+    def test_section_key_value_escaped(self):
+        """model_providers.<id>.base_url 值含引号/反斜杠必须正确转义，
+        否则生成非法 TOML（潜在损坏）。"""
+        p = self._write(".codex/config.toml",
+                        '[model_providers."prov"]\n'
+                        'base_url = "https://old/v1"\n')
+        raw = 'a"b\\c'
+        res = ac.update_config("codex",
+                               {"model_providers.prov.base_url": raw})
+        self.assertTrue(res["ok"], res)
+        content = open(p, encoding="utf-8").read()
+        parsed = tomllib.loads(content)  # 转义后必须是合法 TOML
+        self.assertEqual(parsed["model_providers"]["prov"]["base_url"], raw)
+        self.assertIn('"a\\"b\\\\c"', content)  # 文件里的转义形态
+
     def test_json_replace_env_values(self):
         p = self._write(".claude/settings.json", json.dumps({
             "env": {"ANTHROPIC_BASE_URL": "https://old",
