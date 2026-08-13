@@ -651,6 +651,16 @@ class ServerIntegrationTest(unittest.TestCase):
         st, _ = self._req("/api/fs/list")
         self.assertEqual(st, 200)
 
+    def test_fs_list_null_byte_400(self):
+        # 路径含 NUL 字节 → realpath/scandir 抛 ValueError；必须 400 而非
+        # 500（根内路径走完整守卫后到达 scandir）。
+        bad = os.path.join(self.proj_root, "a\x00b")
+        st, _ = self._req("/api/fs/list?path=" + urllib.parse.quote(bad))
+        self.assertEqual(st, 400)
+        st, _ = self._req("/api/projects", "POST",
+                          {"path": "/tmp/a\x00b"})
+        self.assertEqual(st, 400)
+
     def test_fs_list_symlink_escape_blocked(self):
         # roots 内指向外部的符号链接不能被枚举（realpath 二次校验）。
         link = os.path.join(self.proj_root, "alpha", "escape")

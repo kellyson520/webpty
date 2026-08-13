@@ -465,8 +465,13 @@ class Server:
             if not raw_path:
                 raise HttpError(400, "path required")
             p = os.path.abspath(raw_path)
-            if not os.path.isdir(p):
-                raise HttpError(400, "Path does not exist" if not os.path.exists(p) else "Not a directory")
+            try:
+                is_dir = os.path.isdir(p)
+                exists = os.path.exists(p)
+            except ValueError as err:
+                raise HttpError(400, f"Invalid path: {err}")
+            if not is_dir:
+                raise HttpError(400, "Path does not exist" if not exists else "Not a directory")
             if not isinstance(self.config.get("extraFolders"), list):
                 self.config["extraFolders"] = []
             # Audit fix (v27): dedup against roots TOO — /root/webpty was
@@ -573,6 +578,10 @@ class Server:
             # them as extraFolders — they then become browsable).
             raw = query.get("path", [""])[0]
             if raw:
+                if "\x00" in raw:
+                    # Embedded NUL breaks realpath/scandir with ValueError —
+                    # reject cleanly as 400 before any filesystem call.
+                    raise HttpError(400, "Invalid path")
                 req_path = os.path.abspath(raw)
                 allowed = [os.path.abspath(r)
                            for r in (self.config.get("roots") or [])] + \
