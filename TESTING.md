@@ -64,6 +64,12 @@ service (production codex/reasonix sessions + headless Chromium).
 | tab 切换 | ✅ (曾静默失效——已修复+回归测试) |
 | 主题切换/字号/重命名流程 | ✅ |
 
+## 真实 agent 交互 / Real agent interaction
+
+| 项目 | 结果 |
+|---|---|
+| 新建 codex 会话 + 最小提示词 (`please reply with exactly: PONG_OK`) | ✅ **agent 真实回复 PONG_OK**——WS 输出流收到 24KB TUI 数据,全链路(WS→webpty→pty-host→codex CLI→AI provider→返回)闭合 |
+
 ## 修复清单 / Bugs fixed (15)
 
 - py3.10 tomllib 缺失(vendor tomli)
