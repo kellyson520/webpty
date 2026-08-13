@@ -547,6 +547,10 @@ class ServerIntegrationTest(unittest.TestCase):
                     break
             await ws.close()
             self.assertIn(b"WS_ECHO_OK", got)
+            # 清理:bash 停在提示符不会退出,不 stop+delete 会在共享
+            # pty-host 泄漏会话/进程(实测发现)。
+            self._req(f"/api/sessions/{sid}/stop", "POST")
+            self._req(f"/api/sessions/{sid}", "DELETE")
 
         asyncio.run(run())
 
@@ -590,6 +594,15 @@ class ServerIntegrationTest(unittest.TestCase):
                  "tool": "bash", "name": "ws-reconn"})
             sid = sess["id"]
             self._req(f"/api/sessions/{sid}/start", "POST")
+            try:
+                return await _reconnect_flow(sid)
+            finally:
+                # 清理:死循环 bash 永不退出,不 stop+delete 会在共享
+                # pty-host 里泄漏会话/进程(实测发现两个孤儿 bash)。
+                self._req(f"/api/sessions/{sid}/stop", "POST")
+                self._req(f"/api/sessions/{sid}", "DELETE")
+
+        async def _reconnect_flow(sid):
             ws1, head = await self._ws_roundtrip(
                 sid, b"i=0; while true; do echo TICK$i; i=$((i+1)); sleep 1; done\r")
             self.assertIn(b"101", head)
@@ -663,6 +676,9 @@ class ServerIntegrationTest(unittest.TestCase):
                         break
             await ws.close()
             self.assertIn(b'"snapshot"', got)
+            # 清理 agent 会话(claude 子进程防泄漏)
+            self._req(f"/api/sessions/{sid}/stop", "POST")
+            self._req(f"/api/sessions/{sid}", "DELETE")
 
         asyncio.run(run())
 
@@ -773,6 +789,8 @@ class ServerIntegrationTest(unittest.TestCase):
             self.fail("expected 404 for pty session")
         except _ue.HTTPError as e:
             self.assertEqual(e.code, 404)
+        self._req(f"/api/sessions/{sid}/stop", "POST")
+        self._req(f"/api/sessions/{sid}", "DELETE")
 
     def test_notify_read_endpoints(self):
         """Audit M5/M7 (v24-v26): read-all works and unread count drops."""
@@ -787,6 +805,10 @@ class ServerIntegrationTest(unittest.TestCase):
         st, j = self._req("/api/notify/read-all", "POST")
         self.assertEqual(st, 200)
         self.assertIn("updated", j)
+        # 清理 bash 会话(共享 pty-host 防泄漏)
+        sid = await_sessions[1]["id"]
+        self._req(f"/api/sessions/{sid}/stop", "POST")
+        self._req(f"/api/sessions/{sid}", "DELETE")
 
     def test_fs_list_restricted_to_roots(self):
         # roots 内路径允许
