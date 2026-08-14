@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **394 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **396 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -39,6 +39,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | 自动重启耗尽 | 永久失败命令(exit 1) | ✅ 退避精确 10/30/90s,3 次后停止 |
 | 网络分区 (70s) | iptables DROP 4789 | ✅ agent 不受影响,恢复后无缝重连 |
 | agent CLI 缺失 | 移除 claude 后启动 | ✅ 优雅 500 JSON,last_error 可见 |
+| 200KB 输入洪泛 (Audit T9) | 单帧 200KB → raw cat > 文件 | ✅ 修复前:单次 os.write 在 pty 缓冲边界静默截断(~12KB);修复后:主机排队+选择器集成重试(10ms→1s 退避),**字节精确**落盘 204800/204800,宿主 CPU 0%(曾引入 EVENT_WRITE 忙循环→已用定时重试替代) |
 
 ## 长期稳定性 / Long-running
 

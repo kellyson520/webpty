@@ -44,6 +44,12 @@ BUFFER_CAP = 256 * 1024  # per-session scrollback for replay on reattach
 HOST_VERSION = 1
 MAX_OUTPUT_BYTES = 32768  # max bytes per merged output frame
 FLUSH_DELAY = 0.016  # seconds to wait before flushing pending output
+# Audit T9: large input (big paste) previously went through ONE os.write()
+# on a non-blocking master fd — the write stopped at the pty buffer
+# boundary (~4KB canonical) and the remainder was silently dropped.
+# Input is now queued and flushed on writability; this caps how much can
+# pile up behind a hung child before input is dropped (logged).
+MAX_INPUT_QUEUE = 8 * 1024 * 1024
 
 # --- output merging --------------------------------------------------------
 
@@ -294,15 +300,80 @@ def handle_detach(sock: socket.socket, msg: dict) -> None:
         st["sessions"].discard(msg.get("id"))
 
 
+def _flush_input(session: dict) -> None:
+    """Drain queued input to the pty master; partial writes keep the
+    remainder queued until the slave makes room.
+
+    Audit T9: previously a single os.write() truncated large pastes
+    silently at the pty buffer boundary. Retries are driven by the main
+    loop's select timeout (deadline + backoff 10ms -> 1s cap): an
+    EVENT_WRITE registration busy-looped (pty masters always report
+    writable) and asyncio timers never fire in this selector loop.
+    """
+    fd = session["master_fd"]
+    q = session.get("_input_q")
+    if not q:
+        session.pop("_input_retry_at", None)
+        return
+    made_progress = False
+    try:
+        while q:
+            try:
+                n = os.write(fd, bytes(q))
+            except BlockingIOError:
+                break  # slave buffer full - schedule a retry below
+            except OSError:
+                q.clear()
+                break
+            if n <= 0:
+                break
+            del q[:n]
+            made_progress = True
+    except Exception:  # noqa: BLE001
+        q.clear()
+        return
+    if q:
+        # The host's main loop is a raw selectors loop (not asyncio) - a
+        # call_later-style timer never fires there. Expose the retry
+        # deadline; the main loop folds it into the select timeout.
+        # Backoff doubles ONLY on a full block: while the slave keeps
+        # draining, keep retrying at 10ms so a large paste drains fast.
+        if made_progress:
+            session["_input_retry_delay"] = 0.01
+        else:
+            delay = session.get("_input_retry_delay", 0.01)
+            session["_input_retry_delay"] = min(delay * 2, 1.0)
+        session["_input_retry_at"] = (
+            time.monotonic() + session["_input_retry_delay"])
+    else:
+        session.pop("_input_retry_at", None)
+        session.pop("_input_retry_delay", None)
+
+def _queue_input(session: dict, data: bytes) -> None:
+    q = session.setdefault("_input_q", bytearray())
+    q.extend(data)
+    if len(q) > MAX_INPUT_QUEUE:
+        # Last-resort guard: the child is not draining (hung). Drop the
+        # OLDEST bytes so the newest input survives.
+        del q[:len(q) - MAX_INPUT_QUEUE]
+        try:
+            os.write(2, b"[pty-host] input queue overflow - dropped oldest bytes" + chr(10).encode())
+        except OSError:
+            pass
+    _flush_input(session)
+
+
 def handle_input(msg: dict) -> None:
     session = sessions.get(msg.get("id"))
     if not session or not session["alive"]:
         return
-    data = base64.b64decode(msg.get("data") or "")
     try:
-        os.write(session["master_fd"], data)
-    except OSError:
-        pass
+        data = base64.b64decode(msg.get("data") or "")
+    except Exception:  # noqa: BLE001
+        return
+    if data:
+        _queue_input(session, data)
+
 
 
 def handle_resize(msg: dict) -> None:
@@ -329,6 +400,7 @@ def handle_resize(msg: dict) -> None:
 
 
 def _kill_session(session: dict) -> None:
+    session.pop("_input_q", None)  # Audit T9: no point flushing to a corpse
     try:
         os.kill(session["pid"], signal.SIGKILL)
     except (OSError, ProcessLookupError):
@@ -573,8 +645,20 @@ def main() -> None:
             # check itself.
             has_pending = any(s.get("pending") for s in sessions.values())
             timeout = FLUSH_DELAY if has_pending else 1.0
+            # Audit T9: fold pending input-retry deadlines into the select
+            # timeout so queued input drains as soon as the slave reads.
+            _now = time.monotonic()
+            retry_deadlines = [s["_input_retry_at"] for s in sessions.values()
+                               if s.get("_input_retry_at")]
+            if retry_deadlines:
+                timeout = min(timeout, max(0.0, min(retry_deadlines) - _now))
             events = sel.select(timeout=timeout)
             _flush_expired(time.monotonic())
+            _now = time.monotonic()
+            for _session in list(sessions.values()):
+                if (_session.get("_input_retry_at")
+                        and _now >= _session["_input_retry_at"]):
+                    _flush_input(_session)
             for key, _mask in events:
                 # Audit H1: one bad event must never kill the daemon and
                 # all its sessions — log and continue.
@@ -601,6 +685,8 @@ def main() -> None:
                             if (pending_bytes >= MAX_OUTPUT_BYTES
                                     or time.monotonic() - session["last_flush"] >= FLUSH_DELAY):
                                 _flush_output(session)
+                        if session.get("_input_q"):
+                            _flush_input(session)
                 except Exception:  # noqa: BLE001
                     continue
     except KeyboardInterrupt:
