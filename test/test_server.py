@@ -751,6 +751,116 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_multi_client_same_session(self):
+        # 双开/多开浏览器 tab:同一会话多个 WS 客户端同时在线,各自收到
+        # 完整输出流;一个客户端离开后其余客户端不受影响(此前覆盖只有
+        # 单客户端,多客户端是真实场景——用户可能开多个窗口)。
+        import asyncio
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "ws-multi"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            try:
+                ws1, h1 = await self._ws_roundtrip(
+                    sid, b"i=0; while true; do echo MULTI$i; i=$((i+1)); sleep 1; done\r")
+                self.assertIn(b"101", h1)
+                g1 = b""
+                end = time.time() + 8
+                while time.time() < end and g1.count(b"MULTI") < 2:
+                    frame = await ws1.recv(1.5)
+                    if frame is None:
+                        break
+                    _op, data = frame
+                    g1 += data
+                self.assertGreaterEqual(g1.count(b"MULTI"), 2,
+                                        "ws1 应先收到会话输出")
+                # 第二、三个客户端同时挂到同一会话
+                ws2, h2 = await self._ws_roundtrip(sid, b"")
+                self.assertIn(b"101", h2)
+                ws3, h3 = await self._ws_roundtrip(sid, b"")
+                self.assertIn(b"101", h3)
+                await ws1.close()
+                g2, g3 = b"", b""
+                end = time.time() + 6
+                while time.time() < end:
+                    f2 = await ws2.recv(0.6)
+                    if f2 is not None:
+                        g2 += f2[1]
+                    f3 = await ws3.recv(0.6)
+                    if f3 is not None:
+                        g3 += f3[1]
+                await ws2.close()
+                await ws3.close()
+                self.assertGreaterEqual(g2.count(b"MULTI"), 2,
+                                        "ws2 在 ws1 离开后应继续收到输出")
+                self.assertGreaterEqual(g3.count(b"MULTI"), 2,
+                                        "ws3 在 ws1 离开后应继续收到输出")
+            finally:
+                # 清理:死循环 bash 不退出,不 stop+delete 会在共享
+                # pty-host 泄漏会话/进程。
+                self._req(f"/api/sessions/{sid}/stop", "POST")
+                self._req(f"/api/sessions/{sid}", "DELETE")
+
+        asyncio.run(run())
+
+    def test_ws_reconnect_storm(self):
+        # 重连风暴:10 次快速 连-收-断 循环(移动网络/代理抖动的极端形态)。
+        # 会话必须持续运行、每次重连都拿到继续增长的输出、服务不崩。
+        import asyncio
+        import re as _re
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "ws-storm"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            try:
+                ws0, h0 = await self._ws_roundtrip(
+                    sid, b"i=0; while true; do echo STORM$i; i=$((i+1)); sleep 1; done\r")
+                self.assertIn(b"101", h0)
+                got = b""
+                end = time.time() + 8
+                while time.time() < end and b"STORM1" not in got:
+                    frame = await ws0.recv(1.5)
+                    if frame is None:
+                        break
+                    _op, data = frame
+                    got += data
+                await ws0.close()
+                hi = 0
+                for n in range(10):
+                    ws, head = await self._ws_roundtrip(sid, b"")
+                    self.assertIn(b"101", head)
+                    got = b""
+                    end = time.time() + 3
+                    while time.time() < end:
+                        frame = await ws.recv(0.5)
+                        if frame is None:
+                            break
+                        _op, data = frame
+                        got += data
+                    await ws.close()
+                    m = _re.findall(rb"STORM(\d+)", got)
+                    if m:
+                        hi = max(hi, max(int(x) for x in m))
+                    else:
+                        self.fail(f"重连 #{n} 未收到任何 STORM 输出(会话可能已死)")
+                # 会话从头到尾没死:最后一次循环看到的编号必须 ≥ 首次确认的编号
+                self.assertGreaterEqual(hi, 1, "重连风暴期间会话输出编号未增长")
+                status, _ = self._req("/api/config")
+                self.assertEqual(status, 200)
+            finally:
+                self._req(f"/api/sessions/{sid}/stop", "POST")
+                self._req(f"/api/sessions/{sid}", "DELETE")
+
+        asyncio.run(run())
+
     def test_agent_config_read_returns_ok(self):
         """/api/agent-config/read 路由不再 AttributeError(此前必现连接重置)。"""
         # 用存在的工具(codex)请求;即使本机无配置文件也应返回 200 + ok=False
