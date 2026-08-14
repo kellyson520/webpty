@@ -774,6 +774,15 @@ class SessionManager:
                 "state": "stopped", "exit_code": session.get("exit_code"),
                 "signal": session.get("signal"), "ts": time.time(),
             })
+            # Audit T8: agent-engine crashes (SIGKILL/OOM/segfault) never
+            # auto-restarted — only pty sessions had the generic backoff
+            # restart, so a dead codex/reasonix/claude CLI left the session
+            # stopped forever. Same rule as the pty path: autostart sessions
+            # exiting non-zero (not user-stopped) restart with backoff.
+            if (code not in (0, None) and session.get("autostart")
+                    and not session.get("_resume_retried")
+                    and not session.get("_user_stopped")):
+                self._maybe_restart(session, code)
 
         session["_tasks"] = [
             asyncio.create_task(read_stdout()),
