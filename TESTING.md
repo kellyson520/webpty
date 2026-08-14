@@ -51,6 +51,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | 服务器连续运行 6.5h+ | ✅ RSS 稳定(~21MB),journal 零错误 |
 | 真实事故:OOM 级联 (2026-08-14 14:36) | 内核 OOM killer 杀掉 dsh-web(592MB)与 webpty 主进程 | ✅ 根因:3.4GB 小机内存紧张;恢复:autostart codex 自动重启并 `resume --last` 恢复会话(核心承诺);非 autostart 的 reasonix 按设计保持 stopped,手动 start 后恢复;零数据丢失 |
 | 服务器 SIGKILL 重挂(隔离测试) | 杀 server,宿主+会话存活,起新 server | ✅ 同 pid 重挂,历史输出回放(含 resync 帧),输入可用——真实事故场景的自动化回归 |
+| OOM 加固 (2026-08-14) | 全局 OOM 事故后 | ✅ 生产 unit 增加 drop-in:MemoryMax=2G(cgroup 内 OOM,agent 不拖垮宿主)+ OOMScoreAdjust=-500(整 cgroup 受保护);应用后 agent pid 不变,零错误 |
 
 ## 成本核对 / Cost reconcile
 
