@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **391 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **393 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -49,7 +49,8 @@ service (production codex/reasonix sessions + headless Chromium).
 | 8 小时浏览器浸泡 v3 (自愈式,探针/10min) | ✅ 进行中——浏览器会话丢失自动重建,不误报(v2 会把每次丢失后的探针计为问题) |
 | 2 小时浏览器浸泡 (60 探针/2min) | ✅ 0 问题,画布全程渲染 |
 | 服务器连续运行 6.5h+ | ✅ RSS 稳定(~21MB),journal 零错误 |
-| 真实事故:服务被 stop 后重启 (2026-08-14 14:36) | systemd stop→start,旧宿主与 agent 全灭 | ✅ autostart codex 自动重启并 `resume --last` 恢复会话(核心承诺);非 autostart 的 reasonix 按设计保持 stopped,手动 start 后恢复;零错误,零数据丢失 |
+| 真实事故:OOM 级联 (2026-08-14 14:36) | 内核 OOM killer 杀掉 dsh-web(592MB)与 webpty 主进程 | ✅ 根因:3.4GB 小机内存紧张;恢复:autostart codex 自动重启并 `resume --last` 恢复会话(核心承诺);非 autostart 的 reasonix 按设计保持 stopped,手动 start 后恢复;零数据丢失 |
+| 服务器 SIGKILL 重挂(隔离测试) | 杀 server,宿主+会话存活,起新 server | ✅ 同 pid 重挂,历史输出回放(含 resync 帧),输入可用——真实事故场景的自动化回归 |
 
 ## 成本核对 / Cost reconcile
 
