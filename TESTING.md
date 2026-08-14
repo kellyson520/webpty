@@ -69,6 +69,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | 项目 | 结果 |
 |---|---|
 | 新建 codex 会话 + 最小提示词 (`please reply with exactly: PONG_OK`) | ✅ **agent 真实回复 PONG_OK**——WS 输出流收到 24KB TUI 数据,全链路(WS→webpty→pty-host→codex CLI→AI provider→返回)闭合 |
+| 新建 reasonix 会话 + 最小提示词 (`please reply with exactly: RX_OK`) | ✅ **agent 真实回复 RX_OK**——reasonix 路径(含全局会话锁)同样闭合 |
 
 ## 性能 / Performance (2026-08-14 实测)
 
