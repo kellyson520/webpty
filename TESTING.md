@@ -49,6 +49,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | 8 小时浏览器浸泡 v3 (自愈式,探针/10min) | ✅ 进行中——浏览器会话丢失自动重建,不误报(v2 会把每次丢失后的探针计为问题) |
 | 2 小时浏览器浸泡 (60 探针/2min) | ✅ 0 问题,画布全程渲染 |
 | 服务器连续运行 6.5h+ | ✅ RSS 稳定(~21MB),journal 零错误 |
+| 真实事故:服务被 stop 后重启 (2026-08-14 14:36) | systemd stop→start,旧宿主与 agent 全灭 | ✅ autostart codex 自动重启并 `resume --last` 恢复会话(核心承诺);非 autostart 的 reasonix 按设计保持 stopped,手动 start 后恢复;零错误,零数据丢失 |
 
 ## 成本核对 / Cost reconcile
 
