@@ -183,6 +183,15 @@ ENV_LINES="Environment=WEBPTY_BIND_HOST=$BIND_HOST"
 ENV_LINES+=$'\n'"Environment=WEBPTY_PORT=$PORT"
 [ -n "$PROJECTS_ROOT" ] && ENV_LINES+=$'\n'"Environment=WEBPTY_PROJECTS_ROOT=$PROJECTS_ROOT"
 
+# BUGFIX (deploy review): re-running install.sh used to CLOBBER an
+# existing hand-tuned unit (User/HOME/data-dir/projects-root/restart
+# policy). That silently switched a tuned deployment to root with a
+# different config and broke every session. Preserve an existing unit;
+# only fresh installs get the template.
+if [ -f "$UNIT" ]; then
+  echo ">> existing $UNIT found — keeping it (edit manually to change"
+  echo "   User/Environment/Restart; fresh installs get the template)"
+else
 cat > "$UNIT" <<EOF
 [Unit]
 Description=webpty — multi-session web terminal (AI agent supervisor)
@@ -209,6 +218,7 @@ OOMScoreAdjust=-100
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 systemctl daemon-reload
 systemctl enable webpty.service >/dev/null 2>&1 || true
