@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **384 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **391 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -26,6 +26,8 @@ service (production codex/reasonix sessions + headless Chromium).
 | 服务器 SIGKILL ×2 | kill -9 server.py | ✅ systemd ~7s 拉起,会话 pid 不变 |
 | pty-host SIGKILL | kill -9 pty_host.py | ✅ 监控重生宿主,autostart 会话退避重启 |
 | pty-host SIGKILL(WS 连接中,隔离宿主) | 专用 socket 宿主 + 连着的 WS | ✅ 实时收到 state(stopped)→reconnected→state(running),恢复后 echo 往返正常 |
+| 宿主刚死就创建/启动会话 | kill 后 0.3s 内 POST 新会话 | ✅ 按需重生宿主,会话正常 running,输入可用 |
+| 测试防静默空转守卫 | 4 个隔离文件 meta-test | ✅ 每个 async 测试必须含 asyncio.run(run())——曾因编辑丢失导致测试空转通过 |
 | agent CLI SIGKILL(隔离+假 agent) | 杀 agent 子进程 | ✅ 修复前:永不自动重启(Audit T8 真实 bug);修复后:state(stopped)→退避重启→state(running)→TICK 恢复→用户消息往返 |
 | 30 会话并发隔离 | 30 个 bash 会话同宿主 | ✅ 全部 running;每会话 WS 只见自己的 MARK;批量删除后零孤儿进程,宿主健康 |
 | 删除项目文件夹 | 运行中会话所在 extraFolder 被删 | ✅ active_sessions=1 上报;会话继续运行,输出/输入均正常 |

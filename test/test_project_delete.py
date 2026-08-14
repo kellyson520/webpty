@@ -131,6 +131,24 @@ class ProjectDeleteKeepsSessionsTest(unittest.TestCase):
             await writer.drain()
         return ws, head
 
+
+    def test_meta_noop_guard(self):
+        # Regression guard: a test whose coroutine is never awaited passes
+        # instantly (the asyncio.run(run()) line was once lost to an edit).
+        # Every async test method must contain the run() call.
+        import inspect
+        import re as _re
+        src = inspect.getsource(type(self))
+        for name, _ in inspect.getmembers(type(self), inspect.isfunction):
+            if not name.startswith("test_") or name == "test_meta_noop_guard":
+                continue
+            m = _re.search(
+                r"def %s\(self\):.*?asyncio\.run\(run\(\)\)" % name,
+                src, _re.S)
+            self.assertIsNotNone(
+                m,
+                "%s must call asyncio.run(run()) — silent no-op guard" % name)
+
     def test_delete_extra_folder_keeps_running_session(self):
         import asyncio
 

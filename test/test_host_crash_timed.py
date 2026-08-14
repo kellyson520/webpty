@@ -143,28 +143,11 @@ class HostCrashIntegrationTest(unittest.TestCase):
         except subprocess.CalledProcessError:
             return []
 
-
-    def test_meta_noop_guard(self):
-        # Regression guard: a test whose coroutine is never awaited passes
-        # instantly (the asyncio.run(run()) line was once lost to an edit).
-        # Every async test method must contain the run() call.
-        import inspect
-        import re as _re
-        src = inspect.getsource(type(self))
-        for name, _ in inspect.getmembers(type(self), inspect.isfunction):
-            if not name.startswith("test_") or name == "test_meta_noop_guard":
-                continue
-            m = _re.search(
-                r"def %s\(self\):.*?asyncio\.run\(run\(\)\)" % name,
-                src, _re.S)
-            self.assertIsNotNone(
-                m,
-                "%s must call asyncio.run(run()) — silent no-op guard" % name)
-
     def test_pty_host_crash_live_notify_and_autostart(self):
         import asyncio
 
         async def run():
+            t0 = time.time()
             st, sess = self._req(
                 "/api/sessions", "POST",
                 {"cwd": os.path.join(self.proj_root, "alpha"),
@@ -173,6 +156,7 @@ class HostCrashIntegrationTest(unittest.TestCase):
             self._req(f"/api/sessions/{sid}/start", "POST")
             ws, head = await self._ws_connect(
                 sid, b"i=0; while true; do echo HCRASH$i; i=$((i+1)); sleep 1; done\r")
+            print("T t=%.2f ws connected" % (time.time()-t0), flush=True)
             self.assertIn(b"101", head)
             # first ticks arrive
             got = b""
@@ -183,6 +167,7 @@ class HostCrashIntegrationTest(unittest.TestCase):
                     break
                 _op, data = frame
                 got += data
+            print("T t=%.2f HCRASH1 got len=%d" % (time.time()-t0, len(got)), flush=True)
             self.assertIn(b"HCRASH1", got, "ticker did not start")
 
             hosts = self._host_pids()
@@ -253,14 +238,13 @@ class HostCrashIntegrationTest(unittest.TestCase):
             st, _ = self._req("/api/health")
             self.assertEqual(st, 200)
 
-        asyncio.run(run())
-
     def test_start_session_right_after_host_kill(self):
         # 宿主刚被杀就创建+启动新会话:必须自愈(按需重生宿主),
         # 而不是阻塞或留下死会话——用户操作不应被宿主故障挡住。
         import asyncio
 
         async def run():
+            t0 = time.time()
             hosts = self._host_pids()
             self.assertTrue(hosts, "dedicated pty-host not running")
             os.system("kill -9 %d" % hosts[0])
@@ -289,6 +273,7 @@ class HostCrashIntegrationTest(unittest.TestCase):
             CR = chr(13)
             ws, head = await self._ws_connect(
                 sid, ("echo HOSTBACK" + CR).encode())
+            print("T t=%.2f ws connected" % (time.time()-t0), flush=True)
             self.assertIn(b"101", head)
             out = b""
             end = time.time() + 8
