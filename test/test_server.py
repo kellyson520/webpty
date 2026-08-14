@@ -1002,6 +1002,72 @@ class ServerIntegrationTest(unittest.TestCase):
             status, _ = self._req("/api/config")
             self.assertEqual(status, 200)
 
+    def test_ws_agent_reconnect_snapshot(self):
+        # Agent 会话重连必须重新收到完整 transcript snapshot,且
+        # _snapshot_pending 互斥不能卡死(卡死会让之后的连接永远
+        # 收不到快照——审计 M2/M3 的回归面)。
+        import asyncio
+
+        async def run():
+            status, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "claude-chat", "name": "ws-agent-rc"})
+            self.assertEqual(status, 201, sess)
+            sid = sess["id"]
+            CRLF = chr(13) + chr(10)
+
+            async def connect_and_get_snapshot():
+                reader, writer = await asyncio_open_conn(self.port)
+                key = base64.b64encode(b"0123456789abcdef").decode()
+                req = ("GET /ws/sessions/" + sid + " HTTP/1.1" + CRLF +
+                       "Host: x" + CRLF + "Upgrade: websocket" + CRLF +
+                       "Connection: Upgrade" + CRLF +
+                       "Sec-WebSocket-Key: " + key + CRLF +
+                       "Sec-WebSocket-Version: 13" + CRLF + CRLF)
+                writer.write(req.encode())
+                await writer.drain()
+                head = await reader.readline()
+                while True:
+                    line = await reader.readline()
+                    if line in (b"\r\n", b"\n"):
+                        break
+                ws = WebSocket(reader, writer)
+                ws.open = True
+                got = b""
+                end = time.time() + 8
+                while time.time() < end and b'"snapshot"' not in got:
+                    frame = await ws.recv(1.5)
+                    if frame is None:
+                        break
+                    opcode, data = frame
+                    if opcode == 0x1:
+                        got += data
+                return ws, head, got
+
+            # 第一次连接:收到 snapshot
+            ws1, head1, g1 = await connect_and_get_snapshot()
+            self.assertIn(b"101", head1)
+            self.assertIn(b'"snapshot"', g1)
+            await ws1.close()
+            # 第二次连接(重连):仍必须收到 snapshot
+            ws2, head2, g2 = await connect_and_get_snapshot()
+            self.assertIn(b"101", head2)
+            self.assertIn(b'"snapshot"', g2)
+            await ws2.close()
+            # 第三次连接:互斥不能卡死——仍能拿到 snapshot
+            ws3, head3, g3 = await connect_and_get_snapshot()
+            self.assertIn(b"101", head3)
+            self.assertIn(b'"snapshot"', g3)
+            await ws3.close()
+            # 清理 agent 会话
+            self._req(f"/api/sessions/{sid}/stop", "POST")
+            self._req(f"/api/sessions/{sid}", "DELETE")
+            status, _ = self._req("/api/config")
+            self.assertEqual(status, 200)
+
+        asyncio.run(run())
+
         asyncio.run(run())
 
     def test_agent_config_read_returns_ok(self):

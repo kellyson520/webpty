@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **379 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **380 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -28,6 +28,8 @@ service (production codex/reasonix sessions + headless Chromium).
 | 双连崩溃 | 15s 内两次杀 pty-host | ✅ 会话+生产 codex 都恢复,零错误 |
 | 删除运行中会话 | DELETE 带 sleep 的 pty 会话 | ✅ 进程被杀,无孤儿 |
 | 连接中删除会话 | WS 挂载时 DELETE | ✅ 收到 removed 帧+干净关闭(修复前僵尸 tab,前端误报"令牌失效"——Audit T7) |
+| WS 连接中 stop/start | REST 操作 + 已连 WS | ✅ state 帧 stopped/running 实时到达;对停止会话输入收到离线提示帧 |
+| agent 会话重连 ×3 | 连-收快照-断 循环 | ✅ 每次重连完整 snapshot,互斥不卡死 |
 | 自动重启耗尽 | 永久失败命令(exit 1) | ✅ 退避精确 10/30/90s,3 次后停止 |
 | 网络分区 (70s) | iptables DROP 4789 | ✅ agent 不受影响,恢复后无缝重连 |
 | agent CLI 缺失 | 移除 claude 后启动 | ✅ 优雅 500 JSON,last_error 可见 |
