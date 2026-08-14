@@ -39,6 +39,14 @@ service (production codex/reasonix sessions + headless Chromium).
 | 2 小时浏览器浸泡 (60 探针/2min) | ✅ 0 问题,画布全程渲染 |
 | 服务器连续运行 6.5h+ | ✅ RSS 稳定(~21MB),journal 零错误 |
 
+## 成本核对 / Cost reconcile
+
+| 项目 | 结果 |
+|---|---|
+| claude/reasonix/opencode 日志扫描 | ✅ 支持(价格表最长前缀匹配,大小写不敏感) |
+| codex 会话用量 | ⚠️ **不可从 rollout 解析**——codex v0.144.6 的 rollout JSONL 中 token_count 事件 info=null,无内嵌 usage 字段;用量仅存于内部 SQLite 日志(格式不稳定,不宜依赖)。界面给出明确提示,不会崩溃 |
+| 预算告警 | ✅ 超预算时面板告警 |
+
 ## 攻击面 / Attack surface
 
 | 项目 | 结果 |
