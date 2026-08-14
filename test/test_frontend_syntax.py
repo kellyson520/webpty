@@ -70,6 +70,26 @@ class FrontendSyntaxTest(unittest.TestCase):
         window = src[max(0, idx - 260):idx + 60]
         self.assertIn("return", window)  # 过滤(直接返回),而非仅注释
 
+
+    def test_removed_frame_handling_guards(self):
+        """Audit T7 回归:删除会话时前端必须 (1) 在两条 WS 消息路径都处理
+        removed 帧 (2) onclose 里对 entry._removed 短路重连——任何一条
+        丢失都会退回僵尸 tab/误报令牌失效。"""
+        src = open(APP, encoding="utf-8").read()
+        # 两个引擎各一个 removed 分支
+        self.assertEqual(src.count("msg.type === 'removed'"), 2,
+                         "both WS engines must handle removed frames")
+        # 分支必须真的做三件事:标记 + 提示 + 关闭
+        for m in re.finditer(r"if \(msg\.type === 'removed'\) \{(.*?)\n        \}",
+                             src, re.S):
+            block = m.group(1)
+            self.assertIn("entry._removed = true", block)
+            self.assertIn("会话已删除", block)
+            self.assertIn("ws.close", block)
+        # onclose 必须短路重连
+        self.assertIn("if (entry._removed) { showHint('会话已删除', 8000); return; }",
+                      src)
+
     def test_render_tabs_onclick_uses_defined_variable(self):
         """回归:8381e6f 起 tab.onclick 引用了未定义的 session(forEach
         参数是 s)——每次点击 tab 都抛 ReferenceError,tab 切换静默失效

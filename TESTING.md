@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **393 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **394 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
