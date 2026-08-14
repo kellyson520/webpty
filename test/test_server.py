@@ -861,6 +861,83 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_closed_on_session_delete(self):
+        # Audit T7: 删除会话时,已连接的 WS 必须收到 removed 帧并干净关闭
+        # (此前连接永远挂着,前端最终误报"令牌失效"——僵尸 tab)。
+        import asyncio
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "ws-del"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            ws, head = await self._ws_roundtrip(sid, b"")
+            self.assertIn(b"101", head)
+            # 先确认连接在线(能收到心跳/输出帧之外的数据——会话为空则
+            # 只会有 proto 帧,但连接必须保持打开)
+            st, _ = self._req(f"/api/sessions/{sid}", "DELETE")
+            self.assertEqual(st, 200)
+            got = b""
+            end = time.time() + 5
+            while time.time() < end:
+                frame = await ws.recv(1.0)
+                if frame is None:
+                    break
+                _op, data = frame
+                got += data
+            self.assertIn(b'"removed"', got,
+                          "删除会话后客户端应收到 removed 帧")
+            # 连接应已被服务端关闭(recv 返回 None)
+            self.assertIsNone(frame, "删除会话后 WS 应被服务端关闭")
+            # 服务仍然健康,会话已消失
+            st, _ = self._req(f"/api/sessions/{sid}")
+            self.assertEqual(st, 404)
+            status, _ = self._req("/api/config")
+            self.assertEqual(status, 200)
+
+        asyncio.run(run())
+
+    def test_delete_running_pty_kills_process(self):
+        # 删除运行中的 pty 会话必须杀掉其进程(不留孤儿 sleep/bash)。
+        import asyncio
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "del-run"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            st, _ = self._req(f"/api/sessions/{sid}/input", "POST",
+                              {"bytes": "sleep 300\n"})
+            self.assertEqual(st, 200)
+            time.sleep(0.7)
+            st, j = self._req(f"/api/sessions/{sid}")
+            self.assertEqual(st, 200)
+            pid = j.get("pid")
+            self.assertTrue(pid, "会话应有 pid")
+            # 进程存在
+            r = os.system(f"kill -0 {pid} 2>/dev/null")
+            self.assertEqual(r, 0, "删除前会话进程应存活")
+            st, _ = self._req(f"/api/sessions/{sid}", "DELETE")
+            self.assertEqual(st, 200)
+            # 删除后进程必须消失(不残留孤儿)
+            gone = False
+            for _ in range(20):
+                r = os.system(f"kill -0 {pid} 2>/dev/null")
+                if r != 0:
+                    gone = True
+                    break
+                time.sleep(0.25)
+            self.assertTrue(gone, f"删除后会话进程 {pid} 仍存活(孤儿泄漏)")
+            # 无孤儿 sleep 进程(用 [s] 技巧避免匹配到测试自身命令行)
+            r = os.system("pgrep -f '[s]leep 300' >/dev/null 2>&1")
+            self.assertNotEqual(r, 0, "删除后不应有孤儿 sleep 300 进程")
+
+        asyncio.run(run())
+
     def test_agent_config_read_returns_ok(self):
         """/api/agent-config/read 路由不再 AttributeError(此前必现连接重置)。"""
         # 用存在的工具(codex)请求;即使本机无配置文件也应返回 200 + ok=False

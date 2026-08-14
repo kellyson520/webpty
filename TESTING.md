@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **373 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **378 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -26,6 +26,8 @@ service (production codex/reasonix sessions + headless Chromium).
 | 服务器 SIGKILL ×2 | kill -9 server.py | ✅ systemd ~7s 拉起,会话 pid 不变 |
 | pty-host SIGKILL | kill -9 pty_host.py | ✅ 监控重生宿主,autostart 会话退避重启 |
 | 双连崩溃 | 15s 内两次杀 pty-host | ✅ 会话+生产 codex 都恢复,零错误 |
+| 删除运行中会话 | DELETE 带 sleep 的 pty 会话 | ✅ 进程被杀,无孤儿 |
+| 连接中删除会话 | WS 挂载时 DELETE | ✅ 收到 removed 帧+干净关闭(修复前僵尸 tab,前端误报"令牌失效"——Audit T7) |
 | 自动重启耗尽 | 永久失败命令(exit 1) | ✅ 退避精确 10/30/90s,3 次后停止 |
 | 网络分区 (70s) | iptables DROP 4789 | ✅ agent 不受影响,恢复后无缝重连 |
 | agent CLI 缺失 | 移除 claude 后启动 | ✅ 优雅 500 JSON,last_error 可见 |
@@ -70,6 +72,8 @@ service (production codex/reasonix sessions + headless Chromium).
 | 服务重启/pty-host 崩溃时浏览器 | ✅ 自动重连,画面自动恢复 |
 | 全部菜单/面板(通知/成本/备份/ACFG/迁移) | ✅ 内容正确渲染 |
 | tab 切换 | ✅ (曾静默失效——已修复+回归测试) |
+| 同会话多客户端(多开 tab) | ✅ 各自完整输出,一个离开不影响其余 |
+| 重连风暴 10 连-收-断 | ✅ 会话持续输出,编号单调递增,服务不崩 |
 | 主题切换/字号/重命名流程 | ✅ |
 
 ## 真实 agent 交互 / Real agent interaction

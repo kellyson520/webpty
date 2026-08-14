@@ -2044,6 +2044,29 @@ class Server:
             self.sessions.on("change", on_change)
             self.sessions.on("reconnected", on_reconnected)
 
+            # Audit T7: deleting a session left connected tabs in a zombie
+            # state — the WS stayed open forever (heartbeat kept it alive),
+            # the terminal showed a dead session, and the eventual
+            # reconnect-failure path mislabeled it as "token revoked".
+            # Notify the client and close the connection cleanly instead.
+            def on_removed(rm_sid: str) -> None:
+                if rm_sid == sid:
+                    outbox.send(json.dumps({"type": "removed"}), binary=False)
+
+                    async def _close_after_flush() -> None:
+                        await asyncio.sleep(0.1)  # let the outbox drain flush
+                        try:
+                            await ws.close(1001, "session removed")
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    try:
+                        asyncio.get_event_loop().create_task(_close_after_flush())
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            self.sessions.on("remove", on_removed)
+
             while True:
                 frame = await ws.recv()
                 if frame is None:
@@ -2097,6 +2120,10 @@ class Server:
                 self.sessions.off("change", on_change)
             if on_reconnected is not None:
                 self.sessions.off("reconnected", on_reconnected)
+            try:
+                self.sessions.off("remove", on_removed)
+            except (NameError, Exception):  # noqa: BLE001 — never registered
+                pass
             hb_task.cancel()
             outbox.stop()
             if self._ws_count > 0:

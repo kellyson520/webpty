@@ -613,6 +613,9 @@ function openWs(entry, session, attempt, { onopen, onmessage, reconnect }) {
   ws.onclose = () => {
     if (entry.socket === ws) entry.socket = null;
     if (live.get(session.id) !== entry) return;
+    // Audit T7: session was deleted — the server told us; do not treat
+    // this as a connection loss (no reconnect loop, no stale hints).
+    if (entry._removed) { showHint('会话已删除', 8000); return; }
     // Audit T5: repeated handshake failures (attempt>=3) with a token set
     // usually mean the token was revoked/rotated — stop hammering and
     // re-prompt for the token instead of a forever-reconnect loop.
@@ -661,6 +664,14 @@ function connectSocket(entry, session, attempt = 0) {
           return;
         }
         if (msg.type === 'state') { applySessionState(msg.session); return; }
+        if (msg.type === 'removed') {
+          // Audit T7: session deleted (likely from another tab) — do not
+          // reconnect, surface the reason.
+          entry._removed = true;
+          showHint('会话已删除', 8000);
+          try { ws.close(); } catch {}
+          return;
+        }
         if (msg.type === 'resync') {
           // Server dropped output frames (backgrounded tab etc.) and sent a
           // full buffer snapshot. Reset the terminal and replay it so
@@ -1281,6 +1292,14 @@ function connectChatSocket(entry, session, attempt = 0) {
       // Audit L3: agent sessions also get pty-host recovery events —
       // clear any stale offline hint (the transcript snapshot follows).
       showHint('', 0);
+      return;
+    }
+    if (msg.type === 'removed') {
+      // Audit T7: the session was deleted (likely from another tab).
+      // Mark the entry so onclose doesn't reconnect, and surface why.
+      entry._removed = true;
+      showHint('会话已删除', 8000);
+      try { ws.close(); } catch {}
       return;
     }
     if (msg.type === 'snapshot') {
