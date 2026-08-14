@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **383 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **384 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -28,6 +28,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | pty-host SIGKILL(WS 连接中,隔离宿主) | 专用 socket 宿主 + 连着的 WS | ✅ 实时收到 state(stopped)→reconnected→state(running),恢复后 echo 往返正常 |
 | agent CLI SIGKILL(隔离+假 agent) | 杀 agent 子进程 | ✅ 修复前:永不自动重启(Audit T8 真实 bug);修复后:state(stopped)→退避重启→state(running)→TICK 恢复→用户消息往返 |
 | 30 会话并发隔离 | 30 个 bash 会话同宿主 | ✅ 全部 running;每会话 WS 只见自己的 MARK;批量删除后零孤儿进程,宿主健康 |
+| 删除项目文件夹 | 运行中会话所在 extraFolder 被删 | ✅ active_sessions=1 上报;会话继续运行,输出/输入均正常 |
 | 双连崩溃 | 15s 内两次杀 pty-host | ✅ 会话+生产 codex 都恢复,零错误 |
 | 删除运行中会话 | DELETE 带 sleep 的 pty 会话 | ✅ 进程被杀,无孤儿 |
 | 连接中删除会话 | WS 挂载时 DELETE | ✅ 收到 removed 帧+干净关闭(修复前僵尸 tab,前端误报"令牌失效"——Audit T7) |
