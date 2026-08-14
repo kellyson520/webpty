@@ -938,6 +938,72 @@ class ServerIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_ws_lifecycle_state_frames(self):
+        # WS 连接期间会话 stop/start:客户端必须收到对应的 state 帧
+        # (live 状态通道);对已停止会话输入必须得到离线提示帧。
+        import asyncio
+
+        async def run():
+            st, sess = self._req(
+                "/api/sessions", "POST",
+                {"cwd": os.path.join(self.proj_root, "alpha"),
+                 "tool": "bash", "name": "ws-life"})
+            sid = sess["id"]
+            self._req(f"/api/sessions/{sid}/start", "POST")
+            ws, head = await self._ws_roundtrip(sid, b"")
+            self.assertIn(b"101", head)
+
+            async def collect_text(timeout_s):
+                """Collect text (JSON) frames for timeout_s; return bytes."""
+                got = b""
+                end = time.time() + timeout_s
+                while time.time() < end:
+                    frame = await ws.recv(0.4)
+                    if frame is None:
+                        break
+                    op, data = frame
+                    if op == 0x1:
+                        got += data
+                return got
+
+            # STOP:state 帧必须带 stopped
+            st, _ = self._req(f"/api/sessions/{sid}/stop", "POST")
+            self.assertEqual(st, 200)
+            t1 = await collect_text(5)
+            self.assertIn(b'"stopped"', t1,
+                          "stop 后应收到 state 帧(stopped)")
+            # 对已停止会话输入 → 离线提示帧(binary)
+            mask = bytes([17, 34, 51, 68])
+            payload = b"echo x"  # stopped: write() fails regardless of content
+            masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            ws.writer.write(bytes([129, 128 | len(payload)]) + mask + masked)
+            await ws.writer.drain()
+            hint = b""
+            end = time.time() + 8
+            while time.time() < end and b"[webpty]" not in hint:
+                frame = await ws.recv(1.0)
+                if frame is None:
+                    break
+                _op, data = frame
+                if _op == 0x2:
+                    hint += data
+            self.assertIn(b"[webpty]", hint,
+                          "对已停止会话输入应收到离线提示帧")
+            # START:state 帧必须带 running
+            st, _ = self._req(f"/api/sessions/{sid}/start", "POST")
+            self.assertEqual(st, 200)
+            t2 = await collect_text(5)
+            self.assertIn(b'"running"', t2,
+                          "start 后应收到 state 帧(running)")
+            await ws.close()
+            # 清理
+            self._req(f"/api/sessions/{sid}/stop", "POST")
+            self._req(f"/api/sessions/{sid}", "DELETE")
+            status, _ = self._req("/api/config")
+            self.assertEqual(status, 200)
+
+        asyncio.run(run())
+
     def test_agent_config_read_returns_ok(self):
         """/api/agent-config/read 路由不再 AttributeError(此前必现连接重置)。"""
         # 用存在的工具(codex)请求;即使本机无配置文件也应返回 200 + ok=False
