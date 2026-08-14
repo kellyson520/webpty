@@ -11,7 +11,7 @@ service (production codex/reasonix sessions + headless Chromium).
 
 ## 测试套件 / Test suite
 
-- **380 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
+- **381 tests, 0 failures** (`python3 -m unittest discover -s test`, 3
   platform/optional skips)
 - 覆盖: 路径/参数/环形缓冲/认证/配置合并/会话管理/pty-host 崩溃自愈/
   端到端 HTTP/WebSocket/四大扩展/前端静态契约（DOM id、API 路径、语法）
@@ -25,6 +25,7 @@ service (production codex/reasonix sessions + headless Chromium).
 | 服务重启 | systemctl restart | ✅ pty-host 存活,会话 reattach |
 | 服务器 SIGKILL ×2 | kill -9 server.py | ✅ systemd ~7s 拉起,会话 pid 不变 |
 | pty-host SIGKILL | kill -9 pty_host.py | ✅ 监控重生宿主,autostart 会话退避重启 |
+| pty-host SIGKILL(WS 连接中,隔离宿主) | 专用 socket 宿主 + 连着的 WS | ✅ 实时收到 state(stopped)→reconnected→state(running),恢复后 echo 往返正常 |
 | 双连崩溃 | 15s 内两次杀 pty-host | ✅ 会话+生产 codex 都恢复,零错误 |
 | 删除运行中会话 | DELETE 带 sleep 的 pty 会话 | ✅ 进程被杀,无孤儿 |
 | 连接中删除会话 | WS 挂载时 DELETE | ✅ 收到 removed 帧+干净关闭(修复前僵尸 tab,前端误报"令牌失效"——Audit T7) |
